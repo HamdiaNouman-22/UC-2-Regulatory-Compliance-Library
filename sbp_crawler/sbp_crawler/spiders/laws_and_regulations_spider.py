@@ -427,153 +427,163 @@ class SBPLawsSpider(scrapy.Spider):
         """
         self.logger.info("📖 Parsing Foreign Exchange Manual")
 
-        # Process each blockquote separately to maintain proper context
-        for blockquote in response.xpath("//td[@valign='top'][@bgcolor='#F8F8F8']/blockquote"):
-            current_volume = None
-            in_appendices = False
+        current_volume = None
 
-            for element in blockquote.xpath("./*"):
-                element_text = clean(element.xpath("string(.)").get())
-                element_text_upper = element_text.upper()
+        # Process the main content area
+        main_content = response.xpath("//td[@valign='top'][@bgcolor='#F8F8F8']")
 
-                # Check for volume markers
-                if element.xpath("self::p"):
-                    strong_text = " ".join(element.xpath(".//strong//text()").getall()).upper()
+        if not main_content:
+            self.logger.warning("⚠️ Could not find main content area")
+            return
 
-                    if "VOLUME II" in strong_text or "VOLUME II" in element_text_upper:
-                        current_volume = "Volume II"
-                        in_appendices = False
-                        self.logger.info(f"📚 Entered {current_volume}")
-                        continue
-                    elif "VOLUME I" in strong_text or (
-                            "VOLUME I" in element_text_upper and "VOLUME II" not in element_text_upper):
+        # Iterate through all direct children (blockquotes and uls)
+        for element in main_content.xpath("./blockquote | ./ul"):
+            element_name = element.xpath("name()").get()
+
+            # Check if this is a blockquote (Volume I or Volume II section)
+            if element_name == "blockquote":
+                for sub_element in element.xpath("./*"):
+                    element_text = clean(sub_element.xpath("string(.)").get())
+                    element_text_upper = element_text.upper()
+
+                    # Check for volume markers
+                    if sub_element.xpath("self::p"):
+                        strong_text = " ".join(sub_element.xpath(".//strong//text()").getall()).upper()
+
+                        if "VOLUME II" in strong_text or "VOLUME II" in element_text_upper:
+                            current_volume = "Volume II"
+                            self.logger.info(f"📚 Entered {current_volume}")
+                            continue
+                        elif "VOLUME I" in strong_text or (
+                                "VOLUME I" in element_text_upper and "VOLUME II" not in element_text_upper):
+                            current_volume = "Volume I"
+                            self.logger.info(f"📚 Entered {current_volume}")
+                            continue
+
+                    # Default to Volume I if no marker found yet
+                    if current_volume is None:
                         current_volume = "Volume I"
-                        in_appendices = False
-                        self.logger.info(f"📚 Entered {current_volume}")
-                        continue
 
-                # Default to Volume I if no marker found yet
-                if current_volume is None:
-                    current_volume = "Volume I"
+                    # Process <ul> elements within blockquote
+                    if sub_element.xpath("self::ul"):
+                        # Check if this contains a nested table (Chapter table)
+                        nested_tables = sub_element.xpath(".//table")
+                        if nested_tables:
+                            for table in nested_tables:
+                                headers = table.xpath(".//tr[1]//td//text()").getall()
+                                headers_text = " ".join(clean(h) for h in headers).upper()
 
-                # Process <ul> elements
-                if element.xpath("self::ul"):
-                    # FIRST: Check if this contains a nested table (Chapter table)
-                    nested_tables = element.xpath(".//table")
-                    if nested_tables:
-                        for table in nested_tables:
-                            headers = table.xpath(".//tr[1]//td//text()").getall()
-                            headers_text = " ".join(clean(h) for h in headers).upper()
+                                is_chapter_table = "CHAPTER" in headers_text and "SUBJECT" in headers_text
 
-                            is_chapter_table = "CHAPTER" in headers_text and "SUBJECT" in headers_text
+                                if is_chapter_table:
+                                    self.logger.info(f"📋 Processing chapter table ({current_volume})")
 
-                            if is_chapter_table:
-                                self.logger.info(f"📋 Processing chapter table ({current_volume})")
-
-                                for row in table.xpath(".//tr[position()>1]"):
-                                    cells = row.xpath("./td")
-                                    if len(cells) < 2:
-                                        continue
-
-                                    chapter_num = clean(cells[0].xpath("string(.)").get())
-                                    subject_cell = cells[1]
-
-                                    for link in subject_cell.xpath(".//a[@href]"):
-                                        href = link.xpath("@href").get()
-                                        link_text = clean(link.xpath("string(.)").get())
-
-                                        if not href or not link_text:
+                                    for row in table.xpath(".//tr[position()>1]"):
+                                        cells = row.xpath("./td")
+                                        if len(cells) < 2:
                                             continue
 
-                                        url = urljoin(response.url, href)
-                                        title = f"Chapter {chapter_num}: {link_text}" if chapter_num else link_text
+                                        chapter_num = clean(cells[0].xpath("string(.)").get())
+                                        subject_cell = cells[1]
 
-                                        doc_path = [
-                                            "SBP", "Laws & Regulations", section, parent_title,
-                                            current_volume, title
-                                        ]
+                                        for link in subject_cell.xpath(".//a[@href]"):
+                                            href = link.xpath("@href").get()
+                                            link_text = clean(link.xpath("string(.)").get())
 
-                                        self.logger.info(f"📄 FE Manual chapter: {title}")
+                                            if not href or not link_text:
+                                                continue
 
-                                        reg_doc = RegulatoryDocument(
-                                            regulator="SBP",
-                                            source_system="SBP-LAW",
-                                            category=section,
-                                            title=title,
-                                            document_url=url,
-                                            urdu_url=None,
-                                            published_date=None,
-                                            reference_no=f"Chapter {chapter_num}" if chapter_num else None,
-                                            department=[section, parent_title, current_volume],
-                                            year=None,
-                                            source_page_url=response.url,
-                                            doc_path=doc_path,
-                                            extra_meta={
-                                                "chapter": chapter_num,
-                                                "volume": current_volume,
-                                                "type": "chapter"
-                                            }
-                                        )
+                                            url = urljoin(response.url, href)
+                                            title = f"Chapter {chapter_num}: {link_text}" if chapter_num else link_text
 
-                                        self.shared_items.append(reg_doc)
-                                        yield reg_doc
-                        continue  # Skip further processing of this <ul>
+                                            doc_path = [
+                                                "SBP", "Laws & Regulations", section, parent_title,
+                                                current_volume, title
+                                            ]
 
-                    # SECOND: Check if this is "Appendices" section
-                    appendix_label = clean(
-                        element.xpath(".//li/font[normalize-space()='Appendices']/text()").get() or ""
-                    )
+                                            self.logger.info(f"📄 FE Manual chapter: {title}")
 
-                    if appendix_label.upper() == "APPENDICES":
-                        self.logger.info(f"📂 Entered Appendices section ({current_volume})")
+                                            reg_doc = RegulatoryDocument(
+                                                regulator="SBP",
+                                                source_system="SBP-LAW",
+                                                category=section,
+                                                title=title,
+                                                document_url=url,
+                                                urdu_url=None,
+                                                published_date=None,
+                                                reference_no=f"Chapter {chapter_num}" if chapter_num else None,
+                                                department=[section, parent_title, current_volume],
+                                                year=None,
+                                                source_page_url=response.url,
+                                                doc_path=doc_path,
+                                                extra_meta={
+                                                    "chapter": chapter_num,
+                                                    "volume": current_volume,
+                                                    "type": "chapter"
+                                                }
+                                            )
 
-                        nested_tables = element.xpath(".//blockquote//table")
-                        for table in nested_tables:
-                            yield from self._process_appendix_table(
-                                table, section, parent_title, current_volume, response
-                            )
-                        continue
+                                            self.shared_items.append(reg_doc)
+                                            yield reg_doc
+                            continue
 
-                    # THIRD: Process as direct document links (Title, Disclaimer, Volume II links)
-                    for li in element.xpath(".//li"):
-                        for link in li.xpath(".//a[@href]"):
-                            href = link.xpath("@href").get()
-                            link_text = clean(link.xpath("string(.)").get())
+                        # Process direct document links (Title, Disclaimer)
+                        for li in sub_element.xpath(".//li"):
+                            for link in li.xpath(".//a[@href]"):
+                                href = link.xpath("@href").get()
+                                link_text = clean(link.xpath("string(.)").get())
 
-                            if not href or not link_text:
-                                continue
+                                if not href or not link_text:
+                                    continue
 
-                            url = urljoin(response.url, href)
+                                url = urljoin(response.url, href)
 
-                            doc_path = [
-                                "SBP", "Laws & Regulations", section, parent_title,
-                                current_volume, link_text
-                            ]
-                            department = [section, parent_title, current_volume]
+                                doc_path = [
+                                    "SBP", "Laws & Regulations", section, parent_title,
+                                    current_volume, link_text
+                                ]
+                                department = [section, parent_title, current_volume]
 
-                            self.logger.info(f"📄 FE Manual document: {link_text}")
-                            self.logger.info(f"   Location: {current_volume}")
+                                self.logger.info(f"📄 FE Manual document: {link_text}")
+                                self.logger.info(f"   Location: {current_volume}")
 
-                            reg_doc = RegulatoryDocument(
-                                regulator="SBP",
-                                source_system="SBP-LAW",
-                                category=section,
-                                title=link_text,
-                                document_url=url,
-                                urdu_url=None,
-                                published_date=None,
-                                reference_no=None,
-                                department=department,
-                                year=None,
-                                source_page_url=response.url,
-                                doc_path=doc_path,
-                                extra_meta={
-                                    "volume": current_volume
-                                }
-                            )
+                                reg_doc = RegulatoryDocument(
+                                    regulator="SBP",
+                                    source_system="SBP-LAW",
+                                    category=section,
+                                    title=link_text,
+                                    document_url=url,
+                                    urdu_url=None,
+                                    published_date=None,
+                                    reference_no=None,
+                                    department=department,
+                                    year=None,
+                                    source_page_url=response.url,
+                                    doc_path=doc_path,
+                                    extra_meta={
+                                        "volume": current_volume
+                                    }
+                                )
 
-                            self.shared_items.append(reg_doc)
-                            yield reg_doc
+                                self.shared_items.append(reg_doc)
+                                yield reg_doc
+
+            # Check if this is a standalone <ul> containing "Appendices"
+            elif element_name == "ul":
+                # Check if this ul contains "Appendices" text
+                has_appendices = element.xpath(".//li[contains(., 'Appendices')]")
+
+                if has_appendices:
+                    self.logger.info(f"📂 Entered Appendices section (standalone)")
+
+                    # The table is inside a nested <blockquote> within the <li>
+                    appendix_tables = element.xpath(".//li//blockquote//table")
+
+                    for table in appendix_tables:
+                        yield from self._process_appendix_table(
+                            table, section, parent_title, None, response
+                        )
+
     def _process_appendix_table(self, table, section, parent_title, current_volume, response):
         """Helper method to process appendix tables"""
         # Get table headers
@@ -581,12 +591,16 @@ class SBPLawsSpider(scrapy.Spider):
         headers_text = " ".join(clean(h) for h in headers).upper()
 
         is_appendix_table = (
-                ("SR. NO." in headers_text or "SR.NO." in headers_text)
+                ("SR. NO." in headers_text or "SR.NO." in headers_text or "SR NO" in headers_text)
                 and "DESCRIPTION" in headers_text
         )
 
         if is_appendix_table:
-            self.logger.info(f"📋 Processing appendix table ({current_volume})")
+            # Log with or without volume
+            if current_volume:
+                self.logger.info(f"📋 Processing appendix table ({current_volume})")
+            else:
+                self.logger.info(f"📋 Processing appendix table (standalone)")
 
             for row in table.xpath(".//tr[position()>1]"):
                 cells = row.xpath("./td")
@@ -606,13 +620,14 @@ class SBPLawsSpider(scrapy.Spider):
                     url = urljoin(response.url, href)
                     title = link_text
 
+                    # Direct path: FE Manual → Appendices → Document Title (NO volume)
                     doc_path = [
                         "SBP", "Laws & Regulations", section, parent_title,
-                        current_volume, "Appendices", title
+                        "Appendices", title
                     ]
 
                     self.logger.info(f"📄 FE Manual appendix: {title}")
-                    self.logger.info(f"   Location: {current_volume} / Appendices")
+                    self.logger.info(f"   Location: Appendices")
 
                     if url.lower().endswith(".htm") or url.lower().endswith(".html"):
                         # Follow appendix subpage (e.g. Appendix III)
@@ -635,16 +650,17 @@ class SBPLawsSpider(scrapy.Spider):
                             urdu_url=None,
                             published_date=None,
                             reference_no=f"Appendix {sr_no}" if sr_no else None,
-                            department=[section, parent_title, current_volume, "Appendices"],
+                            department=[section, parent_title, "Appendices"],
                             year=None,
                             source_page_url=response.url,
                             doc_path=doc_path,
                             extra_meta={
                                 "appendix": sr_no,
-                                "volume": current_volume,
                                 "type": "appendix"
                             }
                         )
 
                         self.shared_items.append(reg_doc)
                         yield reg_doc
+
+

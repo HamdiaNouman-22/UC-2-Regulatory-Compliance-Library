@@ -121,6 +121,7 @@ class MSSQLRepository(DocumentRepository):
         """
         Insert a regulation. doc_path is stored as NVARCHAR(MAX) (JSON array string).
         urdu_url is stored inside extra_meta JSON.
+        document_html is optional - inserted if present, otherwise NULL.
         """
         doc_path_list = getattr(document, "doc_path", None)
 
@@ -135,6 +136,9 @@ class MSSQLRepository(DocumentRepository):
         # Convert extra_meta to JSON string
         extra_meta_json = json.dumps(extra_meta) if extra_meta else None
 
+        # Get document_html (optional - only SAMA has it at insert time)
+        document_html = getattr(document, "document_html", None)
+
         sql = """
             INSERT INTO regulations (
                 regulator, source_system, category,
@@ -142,7 +146,7 @@ class MSSQLRepository(DocumentRepository):
                 published_date, reference_no,
                 department, year,
                 source_page_url, extra_meta,
-                compliancecategory_id
+                compliancecategory_id, document_html
             )
             OUTPUT INSERTED.id
             VALUES (?, ?, ?,
@@ -150,7 +154,7 @@ class MSSQLRepository(DocumentRepository):
                     ?, ?,
                     ?, ?,
                     ?, ?,
-                    ?)
+                    ?, ?)
         """
         try:
             with self._get_conn() as conn:
@@ -166,14 +170,15 @@ class MSSQLRepository(DocumentRepository):
                     document.category,
                     document.title,
                     document.document_url,
-                    doc_path_json,  # JSON string for MSSQL
+                    doc_path_json,
                     document.published_date,
                     document.reference_no,
                     department_value,
                     year_value,
                     document.source_page_url,
-                    extra_meta_json,  # JSON string for MSSQL
-                    getattr(document, "compliancecategory_id", None)
+                    extra_meta_json,
+                    getattr(document, "compliancecategory_id", None),
+                    document_html  # Will be None for SBP/SECP, has value for SAMA
                 ))
                 reg_id = cursor.fetchone()[0]
                 conn.commit()
@@ -379,3 +384,124 @@ class MSSQLRepository(DocumentRepository):
         except Exception as e:
             logger.error(f"Failed to save metadata: {e}")
             raise
+
+    def store_compliance_analysis(self, regulation_id: int, analysis_data: dict):
+        """
+        Store LLM compliance analysis results in the compliance_analysis table.
+
+        Args:
+            regulation_id: The ID of the regulation
+            analysis_data: Dictionary containing the LLM analysis results
+        """
+        analysis_json = json.dumps(analysis_data, ensure_ascii=False)
+
+        # Check if analysis already exists for this regulation
+        check_query = "SELECT id FROM compliance_analysis WHERE regulation_id = ?"
+
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(check_query, (regulation_id,))
+                existing = cursor.fetchone()
+
+                if existing:
+                    # Update existing analysis
+                    update_query = """
+                        UPDATE compliance_analysis
+                        SET analysis_json = ?,
+                            updated_at = SYSDATETIMEOFFSET()
+                        WHERE regulation_id = ?
+                    """
+                    cursor.execute(update_query, (analysis_json, regulation_id))
+                    logger.info(f"Updated compliance analysis for regulation {regulation_id}")
+                else:
+                    # Insert new analysis
+                    insert_query = """
+                        INSERT INTO compliance_analysis (regulation_id, analysis_json)
+                        VALUES (?, ?)
+                    """
+                    cursor.execute(insert_query, (regulation_id, analysis_json))
+                    logger.info(f"Inserted compliance analysis for regulation {regulation_id}")
+
+                conn.commit()
+
+        except Exception as e:
+            logger.error(f"Failed to store compliance analysis for regulation {regulation_id}: {e}")
+            raise
+
+    # -------------------- RETRIEVE SINGLE ANALYSIS --------------------
+    def get_compliance_analysis(self, regulation_id: int) -> dict:
+        """
+        Retrieve compliance analysis for a specific regulation.
+
+        Args:
+            regulation_id: The ID of the regulation
+
+        Returns:
+            Dictionary containing the analysis data, or None if not found
+        """
+        query = """
+            SELECT id, regulation_id, analysis_json, created_at, updated_at
+            FROM compliance_analysis
+            WHERE regulation_id = ?
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (regulation_id,))
+                row = cursor.fetchone()
+                if row:
+                    result = {
+                        "id": row[0],
+                        "regulation_id": row[1],
+                        "analysis_data": json.loads(row[2]),
+                        "created_at": row[3],
+                        "updated_at": row[4],
+                    }
+                    return result
+                return None
+        except Exception as e:
+            logger.error(f"Failed to retrieve compliance analysis for regulation {regulation_id}: {e}")
+            return None
+
+    # -------------------- RETRIEVE ALL ANALYSES --------------------
+    def get_all_compliance_analyses(self, limit: int = None, offset: int = 0) -> list:
+        """
+        Retrieve all compliance analyses with optional pagination.
+
+        Args:
+            limit: Maximum number of records to return
+            offset: Number of records to skip
+
+        Returns:
+            List of dictionaries containing analysis data
+        """
+        query = """
+            SELECT id, regulation_id, analysis_json, created_at, updated_at
+            FROM compliance_analysis
+            ORDER BY created_at DESC
+        """
+
+        if limit:
+            query += f" OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
+
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                rows = cursor.fetchall()
+
+                results = []
+                for row in rows:
+                    results.append({
+                        "id": row[0],
+                        "regulation_id": row[1],
+                        "analysis_data": json.loads(row[2]),
+                        "created_at": row[3],
+                        "updated_at": row[4],
+                    })
+
+                return results
+        except Exception as e:
+            logger.error(f"Failed to retrieve compliance analyses: {e}")
+            return []

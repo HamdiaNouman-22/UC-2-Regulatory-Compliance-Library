@@ -1,7 +1,91 @@
+# ============================================================
+# Regulatory Pipeline Scheduler Configuration
+# ============================================================
+# 
+# This file controls when each regulator pipeline runs.
+# Supports both direct execution and API-based triggering.
+#
+# Timezone: Set in .env file (default: Asia/Karachi)
+# ============================================================
+
 jobs:
-  full_pipeline:
+  # --------------------------------------------------------
+  # SBP Pipeline
+  # --------------------------------------------------------
+  sbp_pipeline:
     enabled: true
     trigger: cron
     schedule:
-      hour: 11
-      minute: 54
+      # Run every day at 2:00 AM (Karachi time)
+      hour: 2
+      minute: 0
+      # day_of_week: '*'  # Every day (default)
+      # day_of_week: 'mon,wed,fri'  # Specific days
+      # day_of_week: 'mon-fri'  # Weekdays only
+
+  # --------------------------------------------------------
+  # SECP Pipeline
+  # --------------------------------------------------------
+  secp_pipeline:
+    enabled: true
+    trigger: cron
+    schedule:
+      # Run every day at 3:00 AM (Karachi time)
+      hour: 3
+      minute: 0
+
+  # --------------------------------------------------------
+  # SAMA Pipeline
+  # --------------------------------------------------------
+  sama_pipeline:
+    enabled: true
+    trigger: cron
+    schedule:
+      # Run every day at 4:00 AM (Karachi time)
+      hour: 10
+      minute: 46
+
+  # --------------------------------------------------------
+  # Full Pipeline (All Regulators)
+  # --------------------------------------------------------
+  # This is only available when using API mode
+  # It triggers all regulators via a single API call
+  full_pipeline:
+    enabled: false  # Set to true if you want to use this instead
+    trigger: cron
+    schedule:
+      # Run every day at 2:00 AM (Karachi time)
+      hour: 2
+      minute: 0
+
+# ============================================================
+# Schedule Examples
+# ============================================================
+#
+# Daily at specific time:
+#   hour: 14
+#   minute: 30
+#
+# Weekdays only at 9 AM:
+#   hour: 9
+#   minute: 0
+#   day_of_week: 'mon-fri'
+#
+# Specific days at 6 PM:
+#   hour: 18
+#   minute: 0
+#   day_of_week: 'mon,wed,fri'
+#
+# Every 6 hours:
+#   trigger: interval
+#   schedule:
+#     hours: 6
+#
+# Every Monday at 10 AM:
+#   hour: 10
+#   minute: 0
+#   day_of_week: 'mon'
+#
+# Twice daily (8 AM and 8 PM):
+#   Create two separate jobs with different hours
+# ============================================================

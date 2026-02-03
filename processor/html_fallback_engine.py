@@ -219,7 +219,7 @@ class HTMLFallbackEngine:
         html.append('</table>')
         return '\n'.join(html)
 
-    def tesseract_to_html(self, pdf_path: str) -> str:
+    def tesseract_to_html(self, pdf_path: str, lang: str = "eng") -> str:
         """Advanced fallback for scanned PDFs using Tesseract OCR with preprocessing"""
         logger.info("Using advanced Tesseract OCR extraction...")
         html_parts = []
@@ -239,6 +239,7 @@ class HTMLFallbackEngine:
                 # Get OCR data with position information
                 ocr_data = pytesseract.image_to_data(
                     img_processed,
+                    lang=lang,
                     output_type=pytesseract.Output.DICT,
                     config='--oem 3 --psm 3'  # Automatic page segmentation
                 )
@@ -257,7 +258,11 @@ class HTMLFallbackEngine:
             pages = convert_from_path(pdf_path)
             html_parts = ["<html><body>"]
             for i, page_image in enumerate(pages, start=1):
-                text = pytesseract.image_to_string(page_image)
+                text = pytesseract.image_to_string(
+                    page_image,
+                    lang=lang,
+                    config="--psm 6"
+                )
                 html_parts.append(f"<div><h4>Page {i}</h4><p>{text}</p></div>")
             html_parts.append("</body></html>")
             return "\n".join(html_parts)
@@ -540,7 +545,12 @@ class HTMLFallbackEngine:
 
         return str(soup)
 
-    def process_pdf_to_html(self, pdf_path: str, regulator_name: str) -> str:
+    def process_pdf_to_html(
+            self,
+            pdf_path: str,
+            regulator_name: str,
+            lang: str = "eng"
+    ) -> str:
         """
         Main processing method with fallback chain:
         1. PDF.co (primary)
@@ -550,7 +560,7 @@ class HTMLFallbackEngine:
         #Try PDF.co first
         html = ""
         try:
-            html = pdfco_pdf_to_html(pdf_path)
+            html = pdfco_pdf_to_html(pdf_path, lang=lang)
             logger.info("PDF.co HTML generated successfully")
         except Exception as e:
             logger.warning(f"PDF.co failed: {e}")
@@ -571,7 +581,7 @@ class HTMLFallbackEngine:
         if scanned and not html:
             try:
                 logger.info("Using advanced Tesseract OCR fallback for scanned PDF...")
-                html = self.tesseract_to_html(pdf_path)
+                html = self.tesseract_to_html(pdf_path, lang=lang)
                 logger.info("Advanced Tesseract OCR HTML generated successfully")
             except Exception as e:
                 logger.error(f"Advanced Tesseract fallback failed: {e}")
@@ -585,3 +595,30 @@ class HTMLFallbackEngine:
         html = self.remove_blank_page(html)
 
         return html
+
+    def extract_text_pymupdf(self, pdf_path: str) -> str:
+        """Plain text extraction for digital PDFs (Arabic-safe)"""
+        import fitz
+        doc = fitz.open(pdf_path)
+        text = []
+        for page in doc:
+            text.append(page.get_text("text"))
+        doc.close()
+        return "\n".join(text)
+
+    def extract_text_tesseract_ar(self, pdf_path: str) -> str:
+        """Plain OCR text extraction for Arabic scanned PDFs"""
+        from pdf2image import convert_from_path
+        images = convert_from_path(pdf_path, dpi=300)
+
+        text = []
+        for img in images:
+            page_text = pytesseract.image_to_string(
+                img,
+                lang="ara+eng",
+                config="--psm 6"
+            )
+            text.append(page_text)
+
+        return "\n".join(text)
+
