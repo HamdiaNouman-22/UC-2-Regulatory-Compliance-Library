@@ -92,6 +92,33 @@ class ComplianceAnalysisResponse(BaseModel):
     success: bool
     data: Dict[str, Any]
 
+class CategoryInfo(BaseModel):
+    id: Optional[int]
+    title: Optional[str]
+    parent_id: Optional[int]
+
+class RegulationModel(BaseModel):
+    id: int
+    regulator: str
+    source_system: Optional[str]
+    category: Optional[str]
+    title: str
+    document_url: Optional[str]
+    document_html: Optional[str]
+    published_date: Optional[str]
+    reference_no: Optional[str]
+    department: Optional[str]
+    year: Optional[int]
+    source_page_url: Optional[str]
+    extra_meta: Optional[Dict[str, Any]]
+    created_at: Optional[str]
+    updated_at: Optional[str]
+    category_info: Optional[CategoryInfo]
+
+class SingleRegulationResponse(BaseModel):
+    success: bool
+    data: RegulationModel
+
 
 # ---------- API Endpoints ----------
 @app.post("/update-schedule")
@@ -178,7 +205,7 @@ def get_regulations_by_regulator(
                 r.title,
                 r.document_url,
                 r.document_html,
-                TRY_CAST(r.published_date AS DATETIME) AS published_date,
+                TRY_CONVERT(DATETIME, r.published_date, 103) AS published_date,
                 r.reference_no,
                 r.department,
                 r.[year],
@@ -217,7 +244,7 @@ def get_regulations_by_regulator(
 
             regulations = []
             for row in rows:
-                reg_dict = {col: row[idx] for idx, col in enumerate(columns)}
+                reg_dict = row_to_dict(row, columns)
 
                 # Keep document_html but ignore extra_meta.org_pdf_html
                 if reg_dict.get('extra_meta'):
@@ -268,6 +295,72 @@ def get_regulations_by_regulator(
         raise HTTPException(status_code=500, detail=f"Failed to fetch regulations: {str(e)}")
 
 
+# ================= GET Regulation BY REGULATION ID =================
+@app.get("/regulation/{regulation_id}", response_model=SingleRegulationResponse)
+def get_regulation_detail(regulation_id: int):
+    """
+    Get details for a specific regulation by its ID.
+    """
+    try:
+        query = """
+            SELECT 
+                r.id,
+                r.regulator,
+                r.source_system,
+                r.category,
+                r.title,
+                r.document_url,
+                r.document_html,
+                TRY_CONVERT(DATETIME, r.published_date, 103) AS published_date,
+                r.reference_no,
+                r.department,
+                r.[year],
+                r.source_page_url,
+                r.extra_meta,
+                TRY_CAST(r.created_at AS DATETIME) AS created_at,
+                TRY_CAST(r.updated_at AS DATETIME) AS updated_at,
+                r.compliancecategory_id,
+                cc.title AS category_title,
+                cc.parentid AS category_parent_id
+            FROM regulations r
+            LEFT JOIN compliancecategory cc 
+                ON r.compliancecategory_id = cc.compliancecategory_id
+            WHERE r.id = ?
+        """
+
+        with repo._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, [regulation_id])
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Regulation not found")
+
+            columns = [col[0] for col in cursor.description]
+            reg_dict = row_to_dict(row, columns)
+
+            # Parse extra_meta and remove org_pdf_html
+            if reg_dict.get('extra_meta'):
+                try:
+                    reg_dict['extra_meta'] = json.loads(reg_dict['extra_meta'])
+                    reg_dict['extra_meta'].pop('org_pdf_html', None)
+                except:
+                    pass
+
+            # Add category info
+            reg_dict['category_info'] = {
+                'id': reg_dict.pop('compliancecategory_id', None),
+                'title': reg_dict.pop('category_title', None),
+                'parent_id': reg_dict.pop('category_parent_id', None)
+            }
+
+        return {
+            "success": True,
+            "data": reg_dict
+        }
+
+    except Exception as e:
+        logger.exception(f"Error fetching regulation {regulation_id}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch regulation: {str(e)}")
 
 # ================= GET COMPLIANCE ANALYSIS BY REGULATION ID =================
 @app.get("/compliance-analysis/{regulation_id}", response_model=ComplianceAnalysisResponse)
@@ -309,16 +402,6 @@ def get_compliance_analysis(regulation_id: int):
                 "success": True,
                 "data": analysis_dict
             }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"Error fetching compliance analysis for regulation {regulation_id}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch compliance analysis: {str(e)}"
-        )
-
 
     except HTTPException:
         raise
