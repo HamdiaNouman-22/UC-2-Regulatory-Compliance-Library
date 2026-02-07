@@ -205,7 +205,11 @@ def get_regulations_by_regulator(
                 r.title,
                 r.document_url,
                 r.document_html,
+<<<<<<< HEAD
                 TRY_CONVERT(DATETIME, r.published_date, 103) AS published_date,
+=======
+                TRY_CAST(r.published_date AS DATETIME) AS published_date,
+>>>>>>> 9f09f2937e6f3004c7842c5d801a7e4cf047037a
                 r.reference_no,
                 r.department,
                 r.[year],
@@ -244,7 +248,11 @@ def get_regulations_by_regulator(
 
             regulations = []
             for row in rows:
+<<<<<<< HEAD
                 reg_dict = row_to_dict(row, columns)
+=======
+                reg_dict = {col: row[idx] for idx, col in enumerate(columns)}
+>>>>>>> 9f09f2937e6f3004c7842c5d801a7e4cf047037a
 
                 # Keep document_html but ignore extra_meta.org_pdf_html
                 if reg_dict.get('extra_meta'):
