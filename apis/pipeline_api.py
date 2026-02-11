@@ -6,6 +6,9 @@ import logging
 import os
 import json
 from typing import Optional, List, Dict, Any
+import time
+from threading import Thread, Lock
+from datetime import time as dtime
 
 # ---------------- Celery imports commented out ----------------
 # from scheduler.celery_app import celery_app, update_schedule, load_schedules_from_db
@@ -41,10 +44,17 @@ REGULATOR_PIPELINES = {
     "SAMA": run_sama_pipeline
 }
 
+pipeline_lock = Lock()
 
-# ---------------- Celery DB/schedule loading commented out ----------------
-# Load schedules from DB on startup
-# load_schedules_from_db()
+def update_heartbeat(regulator: str):
+    with repo._get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE pipeline_status
+            SET last_heartbeat = GETUTCDATE()
+            WHERE regulator=? AND status='RUNNING'
+        """, regulator)
+        conn.commit()
 
 
 # ================= HELPER FUNCTIONS =================
@@ -64,6 +74,102 @@ def row_to_dict(row, columns):
 
 
 # ---------- Background pipeline runner ----------
+from threading import Thread
+
+def run_pipeline_async(regulator: str):
+
+    with repo._get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO pipeline_status (regulator, status, started_at, last_heartbeat)
+            VALUES (?, 'RUNNING', GETUTCDATE(), GETUTCDATE())
+        """, regulator)
+        conn.commit()
+
+    stop_heartbeat = False
+
+    def heartbeat_loop():
+        while not stop_heartbeat:
+            update_heartbeat(regulator)
+            time.sleep(300)  # every 5 minutes
+
+    heartbeat_thread = Thread(target=heartbeat_loop, daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        REGULATOR_PIPELINES[regulator]()
+
+        with repo._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE pipeline_status
+                SET status='DONE', finished_at=GETUTCDATE()
+                WHERE regulator=? AND status='RUNNING'
+            """, regulator)
+            conn.commit()
+
+    except Exception as e:
+        with repo._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE pipeline_status
+                SET status='FAILED', finished_at=GETUTCDATE(), error=?
+                WHERE regulator=? AND status='RUNNING'
+            """, str(e), regulator)
+            conn.commit()
+
+    finally:
+        stop_heartbeat = True
+
+def scheduler_loop():
+    logger.info("Scheduler started")
+
+    while True:
+        now = datetime.utcnow().time()
+
+        with repo._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT TOP 1 id, regulator
+                FROM pipeline_schedule
+                WHERE scheduled_time <= ?
+                  AND status = 'PENDING'
+                ORDER BY scheduled_time
+            """, now)
+
+            job = cursor.fetchone()
+
+        if job:
+            schedule_id, regulator = job
+
+            if pipeline_lock.acquire(blocking=False):
+                try:
+                    with repo._get_conn() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            UPDATE pipeline_schedule
+                            SET status='RUNNING'
+                            WHERE id=?
+                        """, schedule_id)
+                        conn.commit()
+
+                    run_pipeline_async(regulator)
+
+                    with repo._get_conn() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            UPDATE pipeline_schedule
+                            SET status='DONE',
+                                last_run_at = GETUTCDATE()
+                            WHERE id=?
+                        """, schedule_id)
+                        conn.commit()
+
+                finally:
+                    pipeline_lock.release()
+
+        time.sleep(30)
+
 def run_regulator_pipeline(regulator: str):
     try:
         logger.info(f"Starting {regulator} pipeline")
@@ -121,6 +227,39 @@ class SingleRegulationResponse(BaseModel):
 
 
 # ---------- API Endpoints ----------
+@app.on_event("startup")
+def start_scheduler():
+    Thread(target=scheduler_loop, daemon=True).start()
+
+@app.post("/schedule")
+def schedule_pipeline(regulator: str, hour: int, minute: int):
+
+    if regulator not in REGULATOR_PIPELINES:
+        raise HTTPException(400, "Unknown regulator")
+
+    scheduled_time = dtime(hour, minute)
+
+    with repo._get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            MERGE pipeline_schedule AS target
+            USING (SELECT ? AS regulator) AS src
+            ON target.regulator = src.regulator
+            WHEN MATCHED THEN
+                UPDATE SET scheduled_time=?, status='PENDING'
+            WHEN NOT MATCHED THEN
+                INSERT (regulator, scheduled_time)
+                VALUES (?, ?);
+        """, regulator, scheduled_time, regulator, scheduled_time)
+        conn.commit()
+
+    return {
+        "success": True,
+        "regulator": regulator,
+        "scheduled_time": f"{hour:02d}:{minute:02d}"
+    }
+
+
 @app.post("/update-schedule")
 def update_pipeline_schedule(payload: ScheduleUpdate):
     if payload.regulator not in REGULATOR_PIPELINES:
@@ -136,7 +275,27 @@ def update_pipeline_schedule(payload: ScheduleUpdate):
         "minute": payload.minute,
         "message": f"{payload.regulator} schedule updated successfully"
     }
+@app.post("/trigger/full")
+def trigger_full_pipeline():
+    completed_regulators = []
+    errors = []
 
+    for regulator, pipeline_func in REGULATOR_PIPELINES.items():
+        try:
+            logger.info(f"Starting {regulator} pipeline")
+            pipeline_func()
+            completed_regulators.append(regulator)
+            logger.info(f"{regulator} pipeline completed")
+        except Exception as e:
+            logger.error(f"Error in {regulator} pipeline: {e}", exc_info=True)
+            errors.append({"regulator": regulator, "error": str(e)})
+
+    return {
+        "status": "done" if not errors else "partial_failure",
+        "completed_regulators": completed_regulators,
+        "errors": errors,
+        "completed_at": datetime.utcnow().isoformat()
+    }
 
 @app.post("/trigger/{regulator}")
 def trigger_regulator_pipeline(regulator: str):
@@ -159,28 +318,6 @@ def trigger_regulator_pipeline(regulator: str):
         logger.error(f"Error in {regulator} pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"{regulator} pipeline failed: {e}")
 
-
-@app.post("/trigger/full")
-def trigger_full_pipeline():
-    completed_regulators = []
-    errors = []
-
-    for regulator, pipeline_func in REGULATOR_PIPELINES.items():
-        try:
-            logger.info(f"Starting {regulator} pipeline")
-            pipeline_func()
-            completed_regulators.append(regulator)
-            logger.info(f"{regulator} pipeline completed")
-        except Exception as e:
-            logger.error(f"Error in {regulator} pipeline: {e}", exc_info=True)
-            errors.append({"regulator": regulator, "error": str(e)})
-
-    return {
-        "status": "done" if not errors else "partial_failure",
-        "completed_regulators": completed_regulators,
-        "errors": errors,
-        "completed_at": datetime.utcnow().isoformat()
-    }
 
 
 # ================= NEW GET API: REGULATIONS BY REGULATOR =================
@@ -205,11 +342,7 @@ def get_regulations_by_regulator(
                 r.title,
                 r.document_url,
                 r.document_html,
-<<<<<<< HEAD
                 TRY_CONVERT(DATETIME, r.published_date, 103) AS published_date,
-=======
-                TRY_CAST(r.published_date AS DATETIME) AS published_date,
->>>>>>> 9f09f2937e6f3004c7842c5d801a7e4cf047037a
                 r.reference_no,
                 r.department,
                 r.[year],
@@ -248,11 +381,7 @@ def get_regulations_by_regulator(
 
             regulations = []
             for row in rows:
-<<<<<<< HEAD
                 reg_dict = row_to_dict(row, columns)
-=======
-                reg_dict = {col: row[idx] for idx, col in enumerate(columns)}
->>>>>>> 9f09f2937e6f3004c7842c5d801a7e4cf047037a
 
                 # Keep document_html but ignore extra_meta.org_pdf_html
                 if reg_dict.get('extra_meta'):
@@ -474,6 +603,146 @@ def get_categories():
         logger.exception("Error fetching categories")
         raise HTTPException(status_code=500, detail=f"Failed to fetch categories: {str(e)}")
 
+@app.get("/categories/roots")
+def get_root_categories_only():
+    try:
+        query = """
+            SELECT compliancecategory_id, title, parentid
+            FROM compliancecategory
+            WHERE parentid IS NULL
+        """
+
+        with repo._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            columns = [col[0] for col in cursor.description]
+            root_categories = [row_to_dict(row, columns) for row in rows]
+
+        return {
+            "success": True,
+            "data": root_categories,
+            "total": len(root_categories)
+        }
+
+    except Exception as e:
+        logger.exception("Error fetching root categories")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/categories/root")
+def get_root_categories_with_children():
+    try:
+        query = """
+            SELECT compliancecategory_id, title, parentid
+            FROM compliancecategory
+        """
+
+        with repo._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            columns = [col[0] for col in cursor.description]
+            categories = [row_to_dict(row, columns) for row in rows]
+
+        # Index categories
+        categories_by_id = {c["compliancecategory_id"]: c for c in categories}
+
+        # Initialize children list
+        for c in categories:
+            c["children"] = []
+
+        # Get root categories
+        root_categories = [c for c in categories if c["parentid"] is None]
+
+        # Attach ONLY direct children to root categories
+        for root in root_categories:
+            root_id = root["compliancecategory_id"]
+            root["children"] = [
+                c for c in categories if c["parentid"] == root_id
+            ]
+
+        return {
+            "success": True,
+            "data": root_categories,
+            "total_root_categories": len(root_categories)
+        }
+
+    except Exception as e:
+        logger.exception("Error fetching root categories")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/categories/children/{parent_id}")
+def get_children(parent_id: int):
+    try:
+        query = """
+            SELECT compliancecategory_id, title, parentid
+            FROM compliancecategory
+            WHERE parentid = ?
+        """
+
+        with repo._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, parent_id)
+            rows = cursor.fetchall()
+            columns = [col[0] for col in cursor.description]
+
+            children = [row_to_dict(row, columns) for row in rows]
+
+        return {"success": True, "data": children}
+
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+
+@app.get("/status/full")
+def get_full_status():
+
+    results = {}
+
+    for regulator in REGULATOR_PIPELINES.keys():
+        with repo._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT TOP 1 status
+                FROM pipeline_status
+                WHERE regulator=?
+                ORDER BY id DESC
+            """, regulator)
+
+            row = cursor.fetchone()
+            results[regulator] = row[0] if row else "NOT_STARTED"
+
+    return {
+        "pipeline_status": results,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/status/{regulator}")
+def get_regulator_status(regulator: str):
+
+    with repo._get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT TOP 1 status, started_at, finished_at, error
+            FROM pipeline_status
+            WHERE regulator=?
+            ORDER BY id DESC
+        """, regulator)
+
+        row = cursor.fetchone()
+
+    if not row:
+        return {"regulator": regulator, "status": "NOT_STARTED"}
+
+    return {
+        "regulator": regulator,
+        "status": row[0],
+        "started_at": serialize_datetime(row[1]),
+        "finished_at": serialize_datetime(row[2]),
+        "error": row[3]
+    }
 
 # ================= HEALTH CHECK =================
 @app.get("/health")
