@@ -1,0 +1,33 @@
+# 1. Update package lists
+sudo apt update
+
+# 2. Build tools and Python headers
+sudo apt install -y build-essential python3-dev curl wget git
+
+# 3. OCR dependencies
+sudo apt install -y tesseract-ocr
+sudo apt install -y tesseract-ocr-ara      # Arabic language support
+sudo apt install -y poppler-utils          # Required by pdf2image
+
+# 4. OpenCV / Image processing dependencies
+sudo apt install -y libgl1 libglib2.0-0   # Needed by opencv-python
+
+# 5. ODBC / Database dependencies
+sudo apt install -y unixodbc unixodbc-dev  # Required by pyodbc
+# Microsoft SQL Server ODBC driver (required if connecting to SQL Server)
+sudo ACCEPT_EULA=Y apt install -y msodbcsql17
+
+# 6. Redis for Celery task queue
+sudo apt install -y redis-server
+sudo systemctl enable redis
+sudo systemctl start redis
+
+# 7. Chrome / Chromium for Selenium & Playwright
+sudo apt install -y chromium-browser chromium-chromedriver
+
+# 8. Python packages
+# Make sure your virtual environment is activated, then install:
+pip install -r requirements.txt
+
+# 9. Playwright browser dependencies
+playwright install --with-deps
