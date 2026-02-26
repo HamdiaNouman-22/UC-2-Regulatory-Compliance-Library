@@ -32,7 +32,6 @@ from crawler.secp_crawler import SECPCrawler
 from processor.downloader import Downloader
 from processor.html_fallback_engine import HTMLFallbackEngine
 from storage.mssql_repo import MSSQLRepository
-import scrapy_runtime
 
 load_dotenv()
 
