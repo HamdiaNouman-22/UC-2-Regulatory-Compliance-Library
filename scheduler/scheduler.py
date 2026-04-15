@@ -33,6 +33,7 @@ from processor.downloader import Downloader
 from processor.html_fallback_engine import HTMLFallbackEngine
 from storage.mssql_repo import MSSQLRepository
 import scrapy_runtime
+from crawler.cbb_monitoring_crawler import monitor_cbb_changes
 
 load_dotenv()
 
@@ -117,6 +118,20 @@ def run_sama_pipeline():
     except Exception as e:
         logger.error(f"SAMA pipeline failed: {e}", exc_info=True)
 
+def run_cbb_monitoring():
+    """Run CBB monitoring crawler to check for content changes"""
+    logger.info("=" * 60)
+    logger.info("Starting CBB Monitoring Crawler")
+    logger.info("=" * 60)
+    try:
+        result = monitor_cbb_changes()
+        logger.info("CBB monitoring completed successfully")
+        logger.info(f"Result: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"CBB monitoring failed: {e}", exc_info=True)
+        raise
+
 
 # ==============================================================
 # OPTION 2: API-BASED EXECUTION (Trigger via API)
@@ -196,6 +211,11 @@ def trigger_full_pipeline_via_api():
         logger.error(f"Error triggering full pipeline: {e}", exc_info=True)
         raise
 
+def trigger_cbb_via_api():
+    """Trigger CBB monitoring via API"""
+    trigger_via_api("CBB")
+
+
 
 # ==============================================================
 # CONFIGURATION LOADER
@@ -219,18 +239,18 @@ def load_scheduler_config():
 # Map job names to functions
 # Choose either DIRECT or API execution mode
 
-# OPTION 1: Direct execution (runs in same process)
 DIRECT_JOB_MAPPING = {
     "sbp_pipeline": run_sbp_pipeline,
     "secp_pipeline": run_secp_pipeline,
     "sama_pipeline": run_sama_pipeline,
+    "cbb_monitoring": run_cbb_monitoring,  # ← ADD THIS
 }
 
-# OPTION 2: API-based execution (calls API server)
 API_JOB_MAPPING = {
     "sbp_pipeline": trigger_sbp_via_api,
     "secp_pipeline": trigger_secp_via_api,
     "sama_pipeline": trigger_sama_via_api,
+    "cbb_monitoring": trigger_cbb_via_api,  # ← ADD THIS
     "full_pipeline": trigger_full_pipeline_via_api,
 }
 
