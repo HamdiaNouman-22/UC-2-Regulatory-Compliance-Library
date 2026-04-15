@@ -1,5 +1,4 @@
-from typing import Dict,List
-
+from typing import Dict, List, Optional
 import pyodbc
 import json
 from storage.repository import DocumentRepository
@@ -12,23 +11,31 @@ logger = logging.getLogger(__name__)
 class MSSQLRepository(DocumentRepository):
     """
     MSSQL implementation for regulatory documents.
-    Uses pyodbc for SQL Server connectivity.
+
+    VERSIONING STRATEGY (unified):
+    ─────────────────────────────────────────────────────────────────────
+    compliance_analysis          → CURRENT active rows for ALL regulators
+                                   (CBB, SAMA, SBP, SECP). version_id is
+                                   populated for CBB, NULL for others.
+
+    compliance_analysis_versions → ARCHIVED/historical rows for CBB only.
+                                   Rows move here (status='inactive') when
+                                   a CBB document's content changes and a
+                                   new version is created.
+
+    regulation_versions          → Content snapshots for CBB (HTML + text
+                                   + hash per version). regulator column
+                                   already exists on this table.
+    ─────────────────────────────────────────────────────────────────────
     """
 
     def __init__(self, conn_params: dict):
-        """
-        conn_params should contain:
-        {
-            'server': 'localhost',
-            'database': 'regulations_db',
-            'username': 'your_user',
-            'password': 'your_password',
-            'driver': '{ODBC Driver 17 for SQL Server}'  # or appropriate driver
-        }
-        """
         self.conn_params = conn_params
 
-    # -------------------- CONNECTION --------------------
+    # ================================================================== #
+    #  CONNECTION                                                          #
+    # ================================================================== #
+
     def _get_conn(self):
         conn_str = (
             f"DRIVER={self.conn_params.get('driver', '{ODBC Driver 17 for SQL Server}')};"
@@ -39,15 +46,14 @@ class MSSQLRepository(DocumentRepository):
         )
         return pyodbc.connect(conn_str)
 
-    # -------------------- FOLDER MANAGEMENT --------------------
+    # ================================================================== #
+    #  FOLDER MANAGEMENT                                                   #
+    # ================================================================== #
+
     def get_folder_id(self, title: str, parent_id: int = None) -> int:
-        """
-        Get the compliancecategory_id for a given title and parent.
-        Returns None if not found.
-        """
         query = """
-            SELECT compliancecategory_id 
-            FROM compliancecategory 
+            SELECT compliancecategory_id
+            FROM compliancecategory
             WHERE title = ? AND (parentid = ? OR (parentid IS NULL AND ? IS NULL))
         """
         try:
@@ -61,10 +67,6 @@ class MSSQLRepository(DocumentRepository):
             return None
 
     def insert_folder(self, title: str, parent_id: int = None) -> int:
-        """
-        Insert a new folder in compliancecategory table.
-        Returns the new compliancecategory_id.
-        """
         query = """
             INSERT INTO compliancecategory (title, parentid)
             OUTPUT INSERTED.compliancecategory_id
@@ -82,63 +84,19 @@ class MSSQLRepository(DocumentRepository):
             logger.error(f"Failed to insert folder: {e}")
             raise
 
-    # -------------------- IDENTITY --------------------
-    def _get_regulation_id(self, document: RegulatoryDocument):
-        """
-        Get regulation ID based on reference_no or document_url.
-        """
-        try:
-            with self._get_conn() as conn:
-                cursor = conn.cursor()
+    # ================================================================== #
+    #  REGULATION INSERT / UPDATE                                          #
+    # ================================================================== #
 
-                # First try with reference_no if available
-                if document.reference_no:
-                    cursor.execute(
-                        """
-                        SELECT id FROM regulations
-                        WHERE regulator=? AND category=? AND reference_no=?
-                        """,
-                        (document.regulator, document.category, document.reference_no)
-                    )
-                    row = cursor.fetchone()
-                    if row:
-                        return row[0]
-
-                # Fall back to document_url
-                cursor.execute(
-                    """
-                    SELECT id FROM regulations
-                    WHERE regulator=? AND category=? AND document_url=?
-                    """,
-                    (document.regulator, document.category, document.document_url)
-                )
-                row = cursor.fetchone()
-                return row[0] if row else None
-        except Exception as e:
-            logger.error(f"Failed to get regulation ID: {e}")
-            return None
-
-    # -------------------- INSERT --------------------
     def _insert_regulation(self, document: RegulatoryDocument) -> int:
-        """
-        Insert a regulation. doc_path is stored as NVARCHAR(MAX) (JSON array string).
-        urdu_url is stored inside extra_meta JSON.
-        document_html is optional - inserted if present, otherwise NULL.
-        """
         doc_path_list = getattr(document, "doc_path", None)
-
-        # Convert doc_path list to JSON string for MSSQL
         doc_path_json = json.dumps(doc_path_list) if doc_path_list else None
 
-        # Merge urdu_url into extra_meta
         extra_meta = getattr(document, "extra_meta", {}) or {}
         if getattr(document, "urdu_url", None):
             extra_meta["urdu_url"] = document.urdu_url
-
-        # Convert extra_meta to JSON string
         extra_meta_json = json.dumps(extra_meta) if extra_meta else None
 
-        # Get document_html (optional - only SAMA has it at insert time)
         document_html = getattr(document, "document_html", None)
 
         sql = """
@@ -151,20 +109,16 @@ class MSSQLRepository(DocumentRepository):
                 compliancecategory_id, document_html
             )
             OUTPUT INSERTED.id
-            VALUES (?, ?, ?,
-                    ?, ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                if isinstance(document.department, list):
-                    department_value = json.dumps(document.department)
-                else:
-                    department_value = str(document.department) if document.department else None
+                department_value = (
+                    json.dumps(document.department)
+                    if isinstance(document.department, list)
+                    else (str(document.department) if document.department else None)
+                )
                 year_value = str(document.year) if document.year is not None else None
                 cursor.execute(sql, (
                     document.regulator,
@@ -180,7 +134,7 @@ class MSSQLRepository(DocumentRepository):
                     document.source_page_url,
                     extra_meta_json,
                     getattr(document, "compliancecategory_id", None),
-                    document_html  # Will be None for SBP/SECP, has value for SAMA
+                    document_html
                 ))
                 reg_id = cursor.fetchone()[0]
                 conn.commit()
@@ -192,14 +146,63 @@ class MSSQLRepository(DocumentRepository):
             logger.error(f"Failed to insert regulation: {e}")
             raise
 
-    # -------------------- DOCUMENT EXISTENCE --------------------
-    def document_exists(self, title: str, published_date: str, doc_path: list) -> bool:
+    def update_regulation(self, regulation_id: int, **kwargs):
+        if not kwargs:
+            return
+        set_clause = ", ".join([f"{k} = ?" for k in kwargs.keys()])
+        values = list(kwargs.values()) + [regulation_id]
+        query = f"""
+            UPDATE regulations
+            SET {set_clause}, updated_at = SYSDATETIMEOFFSET()
+            WHERE id = ?
         """
-        Check if document exists based on title, published_date, and doc_path.
-        """
-        # Convert doc_path list to JSON string for comparison
-        doc_path_json = json.dumps(doc_path) if doc_path else None
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(values))
+                conn.commit()
+            logger.info(f"Updated regulation {regulation_id}: {list(kwargs.keys())}")
+        except Exception as e:
+            logger.error(f"Failed to update regulation {regulation_id}: {e}")
+            raise
 
+    def save_metadata(self, document: RegulatoryDocument) -> None:
+        """
+        Save/update metadata for a regulatory document.
+        This is an abstract method required by DocumentRepository.
+        """
+        try:
+            regulation_id = document.id
+            if not regulation_id:
+                logger.warning("Cannot save metadata: document has no ID")
+                return
+
+            extra_meta = getattr(document, "extra_meta", {}) or {}
+            extra_meta_json = json.dumps(extra_meta) if extra_meta else None
+
+            query = """
+                UPDATE regulations
+                SET extra_meta = ?, updated_at = SYSDATETIMEOFFSET()
+                WHERE id = ?
+            """
+
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (extra_meta_json, regulation_id))
+                conn.commit()
+
+            logger.info(f"Saved metadata for regulation {regulation_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to save metadata: {e}")
+            raise
+
+    # ================================================================== #
+    #  DOCUMENT EXISTENCE CHECKS                                           #
+    # ================================================================== #
+
+    def document_exists(self, title: str, published_date: str, doc_path: list) -> bool:
+        doc_path_json = json.dumps(doc_path) if doc_path else None
         query = """
             SELECT 1
             FROM regulations
@@ -225,68 +228,66 @@ class MSSQLRepository(DocumentRepository):
             logger.error(f"Document existence check failed: {e}")
             return False
 
-    # -------------------- HTML STORAGE --------------------
-    def save_document_html(self, regulation_id: int, html_content: str):
-        """
-        Save HTML content to the regulations table.
-        """
+    def document_exists_by_source_url(self, source_page_url: str) -> bool:
+        return self.get_regulation_id_by_source_url(source_page_url) is not None
+
+    def get_regulation_id_by_source_url(self, source_page_url: str) -> Optional[int]:
         query = """
-            UPDATE regulations 
-            SET document_html = ?, updated_at = SYSDATETIMEOFFSET()
-            WHERE id = ?
+            SELECT id
+            FROM regulations
+            WHERE source_page_url = ?
+              AND regulator = 'Central Bank of Bahrain'
         """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                cursor.execute(query, (html_content, regulation_id))
-                conn.commit()
-                logger.info(f"HTML content saved for regulation ID: {regulation_id}")
+                cursor.execute(query, (source_page_url,))
+                row = cursor.fetchone()
+                return row[0] if row else None
         except Exception as e:
-            logger.error(f"Failed to save HTML content: {e}")
-            raise
+            logger.error(f"Failed to check source_page_url existence: {e}")
+            return None
 
-    # -------------------- LOGGING --------------------
-    def _log_processing(self, regulation_id, step, status, message, details=None):
+    def get_regulation_id_by_doc_path(self, doc_path: list) -> Optional[int]:
         """
-        Log processing steps to processinglogs table.
+        Find regulation ID by doc_path (used for CBB.gov.bh pages).
+        doc_path is stored as JSON array in the database.
         """
-        # Convert details dict to JSON string if provided
-        details_json = json.dumps(details) if details else None
+        if not doc_path:
+            return None
 
+        doc_path_json = json.dumps(doc_path)
         query = """
-            INSERT INTO processinglogs (
-                regulation_id, step, status, message, details
-            )
-            VALUES (?, ?, ?, ?, ?)
+            SELECT id
+            FROM regulations
+            WHERE doc_path = ?
+              AND regulator = 'Central Bank of Bahrain'
         """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    query,
-                    (regulation_id, step, status, message, details_json)
-                )
-                conn.commit()
+                cursor.execute(query, (doc_path_json,))
+                row = cursor.fetchone()
+                return row[0] if row else None
         except Exception as e:
-            logger.error(f"Failed to write processing log: {e}")
+            logger.error(f"Failed to check doc_path existence: {e}")
+            return None
+    # ================================================================== #
+    #  REGULATION RETRIEVAL                                                #
+    # ================================================================== #
 
-    # -------------------- UTILITY METHODS --------------------
-    def get_regulation_by_id(self, regulation_id: int) -> dict:
-        """
-        Retrieve a regulation by ID.
-        Returns a dictionary with all fields.
-        """
+    def get_regulation_by_id(self, regulation_id: int) -> Optional[dict]:
         query = """
-            SELECT 
-                id, regulator, source_system, category, title, 
+            SELECT
+                id, regulator, source_system, category, title,
                 document_url, doc_path, published_date, reference_no,
                 department, year, source_page_url,
                 CAST(extra_meta AS NVARCHAR(MAX)) as extra_meta,
                 compliancecategory_id,
                 CAST(created_at AS DATETIME2) as created_at,
                 CAST(updated_at AS DATETIME2) as updated_at,
-                document_html
-            FROM regulations 
+                document_html, content_hash
+            FROM regulations
             WHERE id = ?
         """
         try:
@@ -295,17 +296,15 @@ class MSSQLRepository(DocumentRepository):
                 cursor.execute(query, (regulation_id,))
                 columns = [column[0] for column in cursor.description]
                 row = cursor.fetchone()
-
                 if row:
                     result = dict(zip(columns, row))
-                    # Parse JSON fields
                     if result.get('doc_path'):
                         result['doc_path'] = json.loads(result['doc_path'])
                     if result.get('department'):
                         try:
                             result['department'] = json.loads(result['department'])
-                        except:
-                            pass  # Keep as string if not JSON
+                        except Exception:
+                            pass
                     if result.get('extra_meta'):
                         result['extra_meta'] = json.loads(result['extra_meta'])
                     return result
@@ -314,488 +313,629 @@ class MSSQLRepository(DocumentRepository):
             logger.error(f"Failed to get regulation by ID: {e}")
             return None
 
-    def update_regulation(self, regulation_id: int, **kwargs):
-        """
-        Update specific fields of a regulation.
-        """
-        if not kwargs:
-            return
+    # ================================================================== #
+    #  CBB CONTENT VERSIONING  (regulation_versions table)                 #
+    # ================================================================== #
 
-        # Handle JSON fields
-        if 'doc_path' in kwargs and isinstance(kwargs['doc_path'], list):
-            kwargs['doc_path'] = json.dumps(kwargs['doc_path'])
-        if 'extra_meta' in kwargs and isinstance(kwargs['extra_meta'], dict):
-            kwargs['extra_meta'] = json.dumps(kwargs['extra_meta'])
-
-        set_clause = ", ".join([f"{key} = ?" for key in kwargs.keys()])
-        query = f"""
-            UPDATE regulations 
-            SET {set_clause}, updated_at = SYSDATETIMEOFFSET()
-            WHERE id = ?
-        """
-
-        try:
-            with self._get_conn() as conn:
-                cursor = conn.cursor()
-                cursor.execute(query, (*kwargs.values(), regulation_id))
-                conn.commit()
-                logger.info(f"Updated regulation ID {regulation_id}: {list(kwargs.keys())}")
-        except Exception as e:
-            logger.error(f"Failed to update regulation: {e}")
-            raise
-
-    def save_metadata(
-            self,
-            document: RegulatoryDocument,
-            ocr_text: str,
-            classification: str
-    ):
-        """
-        Save OCR text and classification metadata for the latest regulation version.
-        MSSQL equivalent of Postgres implementation.
-        """
-        reg_id = document.id or self._get_regulation_id(document)
-        if not reg_id:
-            return
-
-        latest = self._get_latest_version(reg_id)
-        if not latest:
-            return
-
-        try:
-            with self._get_conn() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE regulation_versions
-                    SET ocr_text = ?, updated_at = SYSDATETIMEOFFSET()
-                    WHERE id = ?
-                    """,
-                    (ocr_text, latest["id"])
-                )
-                conn.commit()
-
-            self._log_processing(
-                regulation_id=reg_id,
-                version_id=latest["id"],
-                step="classification",
-                status="DONE",
-                message=classification
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to save metadata: {e}")
-            raise
-
-    def store_compliance_analysis(self, regulation_id: int, analysis_data: dict):
-        """
-        Store LLM compliance analysis results in the compliance_analysis table.
-
-        Args:
-            regulation_id: The ID of the regulation
-            analysis_data: Dictionary containing the LLM analysis results
-        """
-        analysis_json = json.dumps(analysis_data, ensure_ascii=False)
-
-        # Check if analysis already exists for this regulation
-        check_query = "SELECT id FROM compliance_analysis WHERE regulation_id = ?"
-
-        try:
-            with self._get_conn() as conn:
-                cursor = conn.cursor()
-                cursor.execute(check_query, (regulation_id,))
-                existing = cursor.fetchone()
-
-                if existing:
-                    # Update existing analysis
-                    update_query = """
-                        UPDATE compliance_analysis
-                        SET analysis_json = ?,
-                            updated_at = SYSDATETIMEOFFSET()
-                        WHERE regulation_id = ?
-                    """
-                    cursor.execute(update_query, (analysis_json, regulation_id))
-                    logger.info(f"Updated compliance analysis for regulation {regulation_id}")
-                else:
-                    # Insert new analysis
-                    insert_query = """
-                        INSERT INTO compliance_analysis (regulation_id, analysis_json)
-                        VALUES (?, ?)
-                    """
-                    cursor.execute(insert_query, (regulation_id, analysis_json))
-                    logger.info(f"Inserted compliance analysis for regulation {regulation_id}")
-
-                conn.commit()
-
-        except Exception as e:
-            logger.error(f"Failed to store compliance analysis for regulation {regulation_id}: {e}")
-            raise
-
-    # -------------------- RETRIEVE SINGLE ANALYSIS --------------------
-    def get_compliance_analysis(self, regulation_id: int) -> dict:
-        """
-        Retrieve compliance analysis for a specific regulation.
-
-        Args:
-            regulation_id: The ID of the regulation
-
-        Returns:
-            Dictionary containing the analysis data, or None if not found
-        """
+    def get_last_cbb_crawl_date(self):
         query = """
-                SELECT id, regulation_id, analysis_json,
-                       CAST(created_at AS DATETIME2) as created_at,
-                       CAST(updated_at AS DATETIME2) as updated_at
-                FROM compliance_analysis
-                WHERE regulation_id = ?
-            """
+            SELECT MAX(created_at)
+            FROM regulations
+            WHERE regulator = 'Central Bank of Bahrain'
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception as e:
+            logger.error(f"Failed to get last CBB crawl date: {e}")
+            return None
+
+    def get_cbb_content_hash(self, regulation_id: int) -> Optional[str]:
+        query = "SELECT content_hash FROM regulations WHERE id = ?"
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, (regulation_id,))
                 row = cursor.fetchone()
-                if row:
-                    result = {
-                        "id": row[0],
-                        "regulation_id": row[1],
-                        "analysis_data": json.loads(row[2]),
-                        "created_at": row[3],
-                        "updated_at": row[4],
-                    }
-                    return result
-                return None
+                return row[0] if row and row[0] else None
         except Exception as e:
-            logger.error(f"Failed to retrieve compliance analysis for regulation {regulation_id}: {e}")
+            logger.warning(f"Could not get content hash for {regulation_id}: {e}")
             return None
 
-    # -------------------- RETRIEVE ALL ANALYSES --------------------
-    def get_all_compliance_analyses(self, limit: int = None, offset: int = 0) -> list:
+    def update_cbb_content_hash(self, regulation_id: int, content_hash: str):
+        query = """
+            UPDATE regulations
+            SET content_hash = ?, updated_at = SYSDATETIMEOFFSET()
+            WHERE id = ?
         """
-        Retrieve all compliance analyses with optional pagination.
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (content_hash, regulation_id))
+                conn.commit()
+                logger.info(f"Updated content hash for regulation {regulation_id}")
+        except Exception as e:
+            logger.error(f"Failed to update content hash: {e}")
+            raise
 
-        Args:
-            limit: Maximum number of records to return
-            offset: Number of records to skip
+    def insert_regulation_version(
+        self,
+        regulation_id: int,
+        regulator: str,
+        content_html: str,
+        content_text: str,
+        content_hash: str,
+        updated_date,
+        change_summary: str,
+        status: str = 'active',
+    ) -> int:
+        """
+        Insert a content snapshot into regulation_versions.
+        Returns version_id.
 
-        Returns:
-            List of dictionaries containing analysis data
+        This replaces the old insert_cbb_version() — now regulator-aware,
+        though currently only CBB creates version snapshots.
         """
         query = """
-            SELECT id, regulation_id, analysis_json,
-                   CAST(created_at AS DATETIME2) as created_at,
-                   CAST(updated_at AS DATETIME2) as updated_at
-            FROM compliance_analysis
+            INSERT INTO regulation_versions (
+                regulation_id, regulator,
+                content_html, content_text,
+                content_hash, updated_date,
+                change_summary, status
+            )
+            OUTPUT INSERTED.version_id
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (
+                    regulation_id, regulator,
+                    content_html, content_text,
+                    content_hash, updated_date,
+                    change_summary, status
+                ))
+                row = cursor.fetchone()
+                version_id = row[0] if row else None
+                conn.commit()
+                logger.info(
+                    f"Inserted regulation_version {version_id} "
+                    f"(reg={regulation_id}, regulator={regulator})"
+                )
+                return version_id
+        except Exception as e:
+            logger.error(f"Failed to insert regulation version: {e}")
+            raise
+
+    # Keep the old name as an alias so existing call-sites don't break during migration
+    def insert_cbb_version(
+        self,
+        regulation_id: int,
+        content_html: str,
+        content_text: str,
+        content_hash: str,
+        updated_date,
+        change_summary: str,
+    ) -> int:
+        return self.insert_regulation_version(
+            regulation_id=regulation_id,
+            regulator='Central Bank of Bahrain',
+            content_html=content_html,
+            content_text=content_text,
+            content_hash=content_hash,
+            updated_date=updated_date,
+            change_summary=change_summary,
+        )
+
+    def get_regulation_versions(self, regulation_id: int) -> list:
+        """Get all content version snapshots for a regulation."""
+        query = """
+            SELECT
+                version_id, regulation_id, regulator,
+                content_hash, updated_date,
+                CAST(created_at AS DATETIME2) as created_at,
+                change_summary, status
+            FROM regulation_versions
+            WHERE regulation_id = ?
+            ORDER BY version_id DESC
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (regulation_id,))
+                cols = [c[0] for c in cursor.description]
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get regulation versions for {regulation_id}: {e}")
+            return []
+
+    def get_active_regulation_version(self, regulation_id: int):
+        """
+        Fetch the ACTIVE version content for a CBB regulation.
+
+        Returns:
+            dict with keys: version_id, content_html, content_text, content_hash
+            or None if no active version found
+        """
+        query = """
+            SELECT 
+                version_id,
+                content_html,
+                content_text,
+                content_hash,
+                status,
+                created_at
+            FROM regulation_versions
+            WHERE regulation_id = ?
+            AND status = 'active'
             ORDER BY created_at DESC
         """
 
-        if limit:
-            query += f" OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
-
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                cursor.execute(query)
-                rows = cursor.fetchall()
+                cursor.execute(query, (regulation_id,))
+                row = cursor.fetchone()
 
-                results = []
-                for row in rows:
-                    results.append({
-                        "id": row[0],
-                        "regulation_id": row[1],
-                        "analysis_data": json.loads(row[2]),
-                        "created_at": row[3],
-                        "updated_at": row[4],
-                    })
-
-                return results
-        except Exception as e:
-            logger.error(f"Failed to retrieve compliance analyses: {e}")
-            return []
-
-        # -------------------- GAP ANALYSIS --------------------
-
-    def create_gap_session(self, document_name: str, document_text: str) -> int:
-            """
-            Create a new gap analysis session for an uploaded document.
-            Returns the new session ID.
-            """
-            query = """
-                INSERT INTO gap_analysis_session (uploaded_document_name, uploaded_document_text)
-                OUTPUT INSERTED.id
-                VALUES (?, ?)
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query, (document_name, document_text))
-                    session_id = cursor.fetchone()[0]
-                    conn.commit()
-                    logger.info(f"Created gap analysis session ID: {session_id}")
-                    return session_id
-            except Exception as e:
-                logger.error(f"Failed to create gap analysis session: {e}")
-                raise
-
-    def store_gap_results(self, session_id: int, regulation_id: int, results: list):
-            """
-            Store gap analysis results for a regulation within a session.
-
-            Args:
-                session_id:    ID of the gap_analysis_session row
-                regulation_id: ID of the regulation being checked against
-                results:       List of dicts with keys:
-                               requirement_text, coverage_status, evidence_text, gap_description
-            """
-            query = """
-                INSERT INTO gap_analysis (
-                    session_id, regulation_id,
-                    requirement_text, coverage_status,
-                    evidence_text, gap_description
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    for result in results:
-                        cursor.execute(query, (
-                            session_id,
-                            regulation_id,
-                            result.get("requirement_text"),
-                            result.get("coverage_status"),
-                            result.get("evidence_text"),
-                            result.get("gap_description")
-                        ))
-                    conn.commit()
-                    logger.info(
-                        f"Stored {len(results)} gap results for "
-                        f"session {session_id}, regulation {regulation_id}"
-                    )
-            except Exception as e:
-                logger.error(f"Failed to store gap results: {e}")
-                raise
-
-    def get_gap_results_by_session(self, session_id: int) -> dict:
-            """
-            Retrieve all gap analysis results for a session, grouped by regulation.
-
-            Returns:
-                {
-                    "session_id": int,
-                    "uploaded_document_name": str,
-                    "created_at": str,
-                    "regulations": [
-                        {
-                            "regulation_id": int,
-                            "results": [
-                                {
-                                    "requirement_text": str,
-                                    "coverage_status": str,
-                                    "evidence_text": str or None,
-                                    "gap_description": str or None
-                                }
-                            ],
-                            "summary": {
-                                "total": int,
-                                "covered": int,
-                                "partial": int,
-                                "missing": int
-                            }
-                        }
-                    ]
-                }
-            """
-            session_query = """
-                SELECT id, uploaded_document_name, created_at
-                FROM gap_analysis_session
-                WHERE id = ?
-            """
-            results_query = """
-                SELECT regulation_id, requirement_text, coverage_status,
-                       evidence_text, gap_description
-                FROM gap_analysis
-                WHERE session_id = ?
-                ORDER BY regulation_id
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-
-                    # Fetch session info
-                    cursor.execute(session_query, (session_id,))
-                    session_row = cursor.fetchone()
-                    if not session_row:
-                        logger.warning(f"No session found for ID: {session_id}")
-                        return None
-
-                    # Fetch all results
-                    cursor.execute(results_query, (session_id,))
-                    rows = cursor.fetchall()
-
-                # Group by regulation_id
-                grouped: Dict[int, list] = {}
-                for row in rows:
-                    reg_id = row[0]
-                    if reg_id not in grouped:
-                        grouped[reg_id] = []
-                    grouped[reg_id].append({
-                        "requirement_text": row[1],
-                        "coverage_status": row[2],
-                        "evidence_text": row[3],
-                        "gap_description": row[4]
-                    })
-
-                # Build response
-                regulations = []
-                for reg_id, results in grouped.items():
-                    summary = {
-                        "total": len(results),
-                        "covered": sum(1 for r in results if r["coverage_status"] == "covered"),
-                        "partial": sum(1 for r in results if r["coverage_status"] == "partial"),
-                        "missing": sum(1 for r in results if r["coverage_status"] == "missing")
+                if row:
+                    return {
+                        "version_id": row[0],
+                        "content_html": row[1],
+                        "content_text": row[2],
+                        "content_hash": row[3],
+                        "status": row[4],
+                        "created_at": row[5],
                     }
-                    regulations.append({
-                        "regulation_id": reg_id,
-                        "results": results,
-                        "summary": summary
-                    })
-
-                return {
-                    "session_id": session_row[0],
-                    "uploaded_document_name": session_row[1],
-                    "created_at": str(session_row[2]),
-                    "regulations": regulations
-                }
-
-            except Exception as e:
-                logger.error(f"Failed to retrieve gap results for session {session_id}: {e}")
                 return None
+        except Exception as e:
+            logger.error(f"Failed to get active regulation version: {e}")
+            return None
+    # ================================================================== #
+    #  COMPLIANCE ANALYSIS — UNIFIED PRIMARY STORE                         #
+    #                                                                      #
+    #  compliance_analysis holds CURRENT rows for ALL regulators.          #
+    #  For CBB: version_id and is_current are populated.                   #
+    #  For SAMA/SBP/SECP: version_id is NULL, is_current defaults to 1.   #
+    # ================================================================== #
 
-            # -------------------- STEP 2: REQUIREMENT MATCHING --------------------
-
-    def get_all_compliance_requirements(self) -> list:
+    def store_analysis(
+        self,
+        rows: List[dict],
+        version_id: Optional[int] = None,
+    ) -> None:
         """
-        Fetch all existing internal requirements from COMPLIANCE_REQUIREMENT table.
-        Returns list of dicts with id, title, description.
+        Insert analysis rows into compliance_analysis (the unified current table).
+
+        Called for ALL regulators:
+          - SAMA/SBP/SECP: version_id=None (no content versioning)
+          - CBB new doc:    version_id=<new version>
+          - CBB modified:   version_id=<new version> (old rows already archived first)
+
+        All inserted rows get is_current=1 and schema_version='v2'.
         """
         query = """
-                SELECT
-                    COMPLIANCEREQUIREMENT_ID as id,
-                    TITLE                    as title,
-                    DESCRIPTION              as description
-                FROM COMPLIANCE_REQUIREMENT
-                WHERE TITLE IS NOT NULL
-                  AND DESCRIPTION IS NOT NULL
-            """
+            INSERT INTO compliance_analysis (
+                regulation_id, version_id,
+                requirement_id, requirement_title,
+                execution_category, criticality, obligation_type,
+                stage1_json, stage2_json, stage3_json, stage4_md,
+                analysis_json, schema_version,
+                status, is_current
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'v2', 'active', 1)
+        """
+
+        def _s(v):
+            if v is None:
+                return None
+            return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                for row in rows:
+                    cursor.execute(query, (
+                        row["regulation_id"],
+                        version_id,
+                        row.get("requirement_id"),
+                        row.get("requirement_title"),
+                        row.get("execution_category"),
+                        row.get("criticality"),
+                        row.get("obligation_type"),
+                        _s(row.get("stage1_json")),
+                        _s(row.get("stage2_json")),
+                        _s(row.get("stage3_json")),
+                        row.get("stage4_md"),
+                        _s(row.get("analysis_json")),
+                    ))
+                conn.commit()
+                logger.info(
+                    f"Stored {len(rows)} analysis rows in compliance_analysis "
+                    f"(version_id={version_id})"
+                )
+        except Exception as e:
+            logger.error(f"Failed to store analysis: {e}")
+            raise
+
+    # Keep the old SAMA-path name as an alias — callers that used
+    # store_staged_analysis() will still work without changes.
+    def store_staged_analysis(self, rows: List[dict]) -> None:
+        self.store_analysis(rows, version_id=None)
+
+    def archive_current_analysis(self, regulation_id: int, version_id: int) -> int:
+        """
+        Move current compliance_analysis rows for a CBB regulation into
+        compliance_analysis_versions (status='inactive'), then delete them
+        from compliance_analysis.
+
+        Returns the count of rows archived.
+        Called BEFORE inserting new analysis for a modified CBB document.
+        """
+        # 1. Fetch current rows
+        current_rows = self.get_compliance_analysis(regulation_id)
+        if not current_rows:
+            logger.info(
+                f"No current analysis to archive for regulation {regulation_id}"
+            )
+            return 0
+
+        # 2. Write them into compliance_analysis_versions with status='inactive'
+        insert_q = """
+            INSERT INTO compliance_analysis_versions (
+                regulation_id, version_id,
+                requirement_id, requirement_title,
+                execution_category, criticality, obligation_type,
+                stage1_json, stage2_json, stage3_json, stage4_md,
+                analysis_json, schema_version, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'v2', 'inactive')
+        """
+
+        def _s(v):
+            if v is None:
+                return None
+            return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                for row in current_rows:
+                    cursor.execute(insert_q, (
+                        row["regulation_id"],
+                        version_id,
+                        row.get("requirement_id"),
+                        row.get("requirement_title"),
+                        row.get("execution_category"),
+                        row.get("criticality"),
+                        row.get("obligation_type"),
+                        _s(row.get("stage1_json")),
+                        _s(row.get("stage2_json")),
+                        _s(row.get("stage3_json")),
+                        row.get("stage4_md"),
+                        _s(row.get("analysis_json")),
+                    ))
+
+                # 3. Delete from compliance_analysis
+                cursor.execute(
+                    "DELETE FROM compliance_analysis WHERE regulation_id = ?",
+                    [regulation_id]
+                )
+                conn.commit()
+
+            count = len(current_rows)
+            logger.info(
+                f"Archived {count} analysis rows to compliance_analysis_versions "
+                f"(version_id={version_id}, status=inactive) and cleared compliance_analysis"
+            )
+            return count
+        except Exception as e:
+            logger.error(f"Failed to archive analysis for regulation {regulation_id}: {e}")
+            raise
+
+    # ================================================================== #
+    #  COMPLIANCE ANALYSIS — READ                                          #
+    # ================================================================== #
+
+    def get_compliance_analysis(self, regulation_id: int) -> List[dict]:
+        """
+        Fetch CURRENT active analysis for any regulation.
+
+        Reads from compliance_analysis (is_current=1, schema_version='v2').
+        Works identically for CBB, SAMA, SBP, SECP.
+        """
+        query = """
+            SELECT
+                id, regulation_id, version_id,
+                requirement_id, requirement_title,
+                execution_category, criticality, obligation_type,
+                analysis_json, stage1_json, stage2_json, stage3_json, stage4_md,
+                schema_version, status, is_current,
+                CAST(created_at AS DATETIME2) as created_at
+            FROM compliance_analysis
+            WHERE regulation_id = ?
+              AND schema_version = 'v2'
+              AND is_current = 1
+            ORDER BY requirement_id
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, [regulation_id])
+                return self._parse_analysis_rows(cursor)
+        except Exception as e:
+            logger.error(f"Failed to get compliance analysis: {e}")
+            return []
+
+    # Keep old name as alias
+    def get_compliance_analysis_v2(self, regulation_id: int) -> List[dict]:
+        return self.get_compliance_analysis(regulation_id)
+
+    def get_analysis_version_history(self, regulation_id: int) -> list:
+        """
+        Fetch all archived analysis versions for a CBB regulation.
+        Returns summary rows (one per version_id) from compliance_analysis_versions.
+        """
+        query = """
+            SELECT
+                cav.version_id,
+                cav.regulation_id,
+                cav.status,
+                cav.schema_version,
+                MIN(cav.created_at)    AS archived_at,
+                rv.content_hash,
+                rv.updated_date,
+                rv.change_summary,
+                COUNT(cav.id)          AS requirement_count
+            FROM compliance_analysis_versions cav
+            LEFT JOIN regulation_versions rv
+                   ON cav.version_id = rv.version_id
+            WHERE cav.regulation_id = ?
+            GROUP BY
+                cav.version_id, cav.regulation_id, cav.status,
+                cav.schema_version,
+                rv.content_hash, rv.updated_date, rv.change_summary
+            ORDER BY cav.version_id DESC
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, [regulation_id])
+                cols = [c[0] for c in cursor.description]
+                rows = []
+                for row in cursor.fetchall():
+                    d = dict(zip(cols, row))
+                    for f in ["archived_at", "updated_date"]:
+                        if d.get(f):
+                            d[f] = str(d[f])
+                    rows.append(d)
+                return rows
+        except Exception as e:
+            logger.error(f"Failed to get analysis version history for {regulation_id}: {e}")
+            return []
+
+    # Keep the old name as an alias
+    def get_analysis_versions(self, regulation_id: int) -> list:
+        return self.get_analysis_version_history(regulation_id)
+
+    def get_analysis_version_detail(self, regulation_id: int, version_id: int) -> list:
+        """Fetch all requirement rows for a specific archived analysis version."""
+        query = """
+            SELECT
+                id, regulation_id, version_id,
+                requirement_id, requirement_title,
+                execution_category, criticality, obligation_type,
+                stage2_json, stage3_json, stage4_md,
+                schema_version, status, created_at
+            FROM compliance_analysis_versions
+            WHERE regulation_id = ? AND version_id = ?
+            ORDER BY requirement_id
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, [regulation_id, version_id])
+                cols = [c[0] for c in cursor.description]
+                rows = []
+                for row in cursor.fetchall():
+                    d = dict(zip(cols, row))
+                    for f in ["stage2_json", "stage3_json"]:
+                        if d.get(f) and isinstance(d[f], str):
+                            try:
+                                d[f] = json.loads(d[f])
+                            except Exception:
+                                pass
+                    if d.get("created_at"):
+                        d["created_at"] = str(d["created_at"])
+                    rows.append(d)
+                return rows
+        except Exception as e:
+            logger.error(f"Failed to get version detail {version_id}: {e}")
+            return []
+
+    def get_stage4_executive_summary(self, regulation_id: int) -> Optional[str]:
+        query = """
+            SELECT TOP 1 stage4_md
+            FROM compliance_analysis
+            WHERE regulation_id = ?
+              AND schema_version = 'v2'
+              AND is_current = 1
+              AND stage4_md IS NOT NULL
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (regulation_id,))
+                row = cursor.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            logger.error(f"Failed to get stage4 summary: {e}")
+            return None
+
+    def _parse_analysis_rows(self, cursor) -> List[dict]:
+        cols = [c[0] for c in cursor.description]
+        rows = []
+        for row in cursor.fetchall():
+            d = dict(zip(cols, row))
+            for field in ("analysis_json", "stage1_json", "stage2_json", "stage3_json"):
+                if d.get(field) and isinstance(d[field], str):
+                    try:
+                        d[field] = json.loads(d[field])
+                    except Exception:
+                        pass
+            rows.append(d)
+        return rows
+
+    # ================================================================== #
+    #  REQUIREMENT MATCHING — FETCH EXISTING                               #
+    # ================================================================== #
+
+    def get_all_compliance_requirements(self) -> list:
+        query = """
+            SELECT
+                COMPLIANCEREQUIREMENT_ID as id,
+                TITLE                    as title,
+                DESCRIPTION              as description
+            FROM COMPLIANCE_REQUIREMENT
+            WHERE TITLE IS NOT NULL AND DESCRIPTION IS NOT NULL
+        """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query)
                 rows = cursor.fetchall()
-                results = []
-                for row in rows:
-                    results.append({
-                        "id": row[0],
-                        "title": row[1],
-                        "description": row[2]
-                    })
+                results = [{"id": r[0], "title": r[1], "description": r[2]} for r in rows]
                 logger.info(f"Fetched {len(results)} existing compliance requirements")
                 return results
         except Exception as e:
             logger.error(f"Failed to fetch compliance requirements: {e}")
             return []
 
-    def store_requirement_mappings(self, mappings: list):
-        """
-        Store requirement matching results in sama_requirement_mapping table.
-
-        Args:
-            mappings: List of dicts with keys:
-                      regulation_id, extracted_requirement_text,
-                      matched_requirement_id, match_status, match_explanation
-        """
+    def get_all_demo_controls(self) -> list:
         query = """
-                INSERT INTO sama_requirement_mapping (
-                    regulation_id,
-                    extracted_requirement_text,
-                    matched_requirement_id,
-                    match_status,
-                    match_explanation
-                )
-                VALUES (?, ?, ?, ?, ?)
-            """
+            SELECT CONTROL_ID, TITLE, DESCRIPTION, CONTROL_KEY
+            FROM DEMO_CONTROL
+            WHERE TITLE IS NOT NULL
+        """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                for mapping in mappings:
+                cursor.execute(query)
+                return [
+                    {"id": r[0], "title": r[1], "description": r[2], "control_key": r[3]}
+                    for r in cursor.fetchall()
+                ]
+        except Exception as e:
+            logger.error(f"Failed to fetch demo controls: {e}")
+            return []
+
+    def get_all_demo_kpis(self) -> list:
+        query = """
+            SELECT KISETUP_ID, TITLE, DESCRIPTION, KISETUP_KEY
+            FROM DEMO_KPI
+            WHERE TITLE IS NOT NULL
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                return [
+                    {"id": r[0], "title": r[1], "description": r[2], "kisetup_key": r[3]}
+                    for r in cursor.fetchall()
+                ]
+        except Exception as e:
+            logger.error(f"Failed to fetch demo KPIs: {e}")
+            return []
+
+    def get_linked_controls_by_requirement(self) -> dict:
+        query = "SELECT COMPLIANCEREQUIREMENT_ID, CONTROL_ID FROM DEMO_REQUIREMENT_CONTROL_LINK"
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                result = {}
+                for req_id, ctrl_id in cursor.fetchall():
+                    result.setdefault(req_id, []).append(ctrl_id)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to fetch linked controls: {e}")
+            return {}
+
+    def get_linked_kpis_by_requirement(self) -> dict:
+        query = "SELECT COMPLIANCEREQUIREMENT_ID, KISETUP_ID FROM DEMO_REQUIREMENT_KPI_LINK"
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                result = {}
+                for req_id, kpi_id in cursor.fetchall():
+                    result.setdefault(req_id, []).append(kpi_id)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to fetch linked KPIs: {e}")
+            return {}
+
+    # ================================================================== #
+    #  REQUIREMENT MATCHING — STORE                                         #
+    # ================================================================== #
+
+    def store_requirement_mappings(self, mappings: list, version_id: Optional[int] = None):
+        """
+        Store requirement matching results.
+        version_id is populated for CBB, NULL for SAMA/SBP/SECP.
+        """
+        query = """
+            INSERT INTO sama_requirement_mapping (
+                regulation_id, extracted_requirement_text,
+                matched_requirement_id, match_status, match_explanation,
+                version_id
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                for m in mappings:
                     cursor.execute(query, (
-                        mapping["regulation_id"],
-                        mapping["extracted_requirement_text"],
-                        mapping.get("matched_requirement_id"),  # NULL if new
-                        mapping["match_status"],
-                        mapping.get("match_explanation")
+                        m["regulation_id"],
+                        m["extracted_requirement_text"],
+                        m.get("matched_requirement_id"),
+                        m["match_status"],
+                        m.get("match_explanation"),
+                        version_id,
                     ))
                 conn.commit()
-                logger.info(f"Stored {len(mappings)} requirement mappings")
+                logger.info(
+                    f"Stored {len(mappings)} requirement mappings (version_id={version_id})"
+                )
         except Exception as e:
             logger.error(f"Failed to store requirement mappings: {e}")
             raise
 
     def flag_partially_matched_requirements(self, matched_requirement_ids: list):
-        """
-        Set IS_SUGGESTED = 1 on existing requirements that were partially matched,
-        so compliance team knows they need to be reviewed and updated.
-
-        Args:
-            matched_requirement_ids: List of COMPLIANCEREQUIREMENT_IDs to flag
-        """
         if not matched_requirement_ids:
             return
-
         placeholders = ",".join(["?" for _ in matched_requirement_ids])
         query = f"""
-                UPDATE COMPLIANCE_REQUIREMENT
-                SET IS_SUGGESTED = 1
-                WHERE COMPLIANCEREQUIREMENT_ID IN ({placeholders})
-            """
+            UPDATE COMPLIANCE_REQUIREMENT
+            SET IS_SUGGESTED = 1
+            WHERE COMPLIANCEREQUIREMENT_ID IN ({placeholders})
+        """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, matched_requirement_ids)
                 conn.commit()
-                logger.info(
-                    f"Flagged {len(matched_requirement_ids)} partially matched "
-                    f"requirements with IS_SUGGESTED = 1"
-                )
+                logger.info(f"Flagged {len(matched_requirement_ids)} requirements with IS_SUGGESTED=1")
         except Exception as e:
             logger.error(f"Failed to flag partially matched requirements: {e}")
             raise
 
     def insert_new_suggested_requirement(self, requirement: dict) -> int:
-        """
-        Insert a brand new requirement into COMPLIANCE_REQUIREMENT as IS_SUGGESTED = 1.
-        Used when matching verdict is 'new' — creates a suggested requirement for
-        human review.
-
-        Args:
-            requirement: dict with keys:
-                         title, description, ref_key (optional), ref_no (optional)
-
-        Returns:
-            New COMPLIANCEREQUIREMENT_ID
-        """
         query = """
-                INSERT INTO COMPLIANCE_REQUIREMENT (
-                    TITLE,
-                    DESCRIPTION,
-                    REF_KEY,
-                    REF_NO,
-                    IS_SUGGESTED,
-                    CREATEDON
-                )
-                OUTPUT INSERTED.COMPLIANCEREQUIREMENT_ID
-                VALUES (?, ?, ?, ?, 1, GETDATE())
-            """
+            INSERT INTO COMPLIANCE_REQUIREMENT (TITLE, DESCRIPTION, REF_KEY, REF_NO, IS_SUGGESTED, CREATEDON)
+            OUTPUT INSERTED.COMPLIANCEREQUIREMENT_ID
+            VALUES (?, ?, ?, ?, 1, GETDATE())
+        """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
@@ -813,565 +953,261 @@ class MSSQLRepository(DocumentRepository):
             logger.error(f"Failed to insert new suggested requirement: {e}")
             raise
 
-    def get_requirement_mappings_by_regulation(self, regulation_id: int) -> list:
-        """
-        Retrieve all matching results for a given regulation.
-        Useful for API endpoint to show step 2 results.
-        """
-        query = """
-                SELECT
-                    m.id,
-                    m.regulation_id,
-                    m.extracted_requirement_text,
-                    m.matched_requirement_id,
-                    m.match_status,
-                    m.match_explanation,
-                    CAST(m.created_at AS DATETIME2) as created_at,
-                    cr.TITLE       as matched_requirement_title,
-                    cr.DESCRIPTION as matched_requirement_description
-                FROM sama_requirement_mapping m
-                LEFT JOIN COMPLIANCE_REQUIREMENT cr
-                       ON m.matched_requirement_id = cr.COMPLIANCEREQUIREMENT_ID
-                WHERE m.regulation_id = ?
-                ORDER BY m.id
-            """
-        try:
-            with self._get_conn() as conn:
-                cursor = conn.cursor()
-                cursor.execute(query, (regulation_id,))
-                rows = cursor.fetchall()
-                columns = [col[0] for col in cursor.description]
-
-                results = []
-                for row in rows:
-                    results.append(dict(zip(columns, row)))
-
-                return results
-        except Exception as e:
-            logger.error(f"Failed to get requirement mappings for regulation {regulation_id}: {e}")
-            return []
-
-        # ================================================================== #
-        #  FETCH EXISTING DATA                                                 #
-        # ================================================================== #
-
-        def get_all_compliance_requirements(self) -> list:
-            """Fetch all existing requirements for matching."""
-            query = """
-                SELECT
-                    COMPLIANCEREQUIREMENT_ID as id,
-                    TITLE                    as title,
-                    DESCRIPTION              as description
-                FROM COMPLIANCE_REQUIREMENT
-                WHERE TITLE IS NOT NULL AND DESCRIPTION IS NOT NULL
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query)
-                    rows = cursor.fetchall()
-                    return [{"id": r[0], "title": r[1], "description": r[2]} for r in rows]
-            except Exception as e:
-                logger.error(f"Failed to fetch compliance requirements: {e}")
-                return []
-
-    def get_all_demo_controls(self) -> list:
-            """Fetch all existing controls for matching."""
-            query = """
-                SELECT
-                    CONTROL_ID  as id,
-                    TITLE       as title,
-                    DESCRIPTION as description,
-                    CONTROL_KEY as control_key
-                FROM DEMO_CONTROL
-                WHERE TITLE IS NOT NULL
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query)
-                    rows = cursor.fetchall()
-                    return [{"id": r[0], "title": r[1], "description": r[2], "control_key": r[3]} for r in rows]
-            except Exception as e:
-                logger.error(f"Failed to fetch demo controls: {e}")
-                return []
-
-    def get_all_demo_kpis(self) -> list:
-            """Fetch all existing KPIs for matching."""
-            query = """
-                SELECT
-                    KISETUP_ID  as id,
-                    TITLE       as title,
-                    DESCRIPTION as description,
-                    KISETUP_KEY as kisetup_key
-                FROM DEMO_KPI
-                WHERE TITLE IS NOT NULL
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query)
-                    rows = cursor.fetchall()
-                    return [{"id": r[0], "title": r[1], "description": r[2], "kisetup_key": r[3]} for r in rows]
-            except Exception as e:
-                logger.error(f"Failed to fetch demo KPIs: {e}")
-                return []
-
-    def get_linked_controls_by_requirement(self) -> dict:
-            """
-            Returns dict: { compliancerequirement_id → [control_id, ...] }
-            Used by matcher to know what's already linked so it doesn't duplicate.
-            """
-            query = """
-                SELECT COMPLIANCEREQUIREMENT_ID, CONTROL_ID
-                FROM DEMO_REQUIREMENT_CONTROL_LINK
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query)
-                    rows = cursor.fetchall()
-                    result = {}
-                    for req_id, ctrl_id in rows:
-                        result.setdefault(req_id, []).append(ctrl_id)
-                    return result
-            except Exception as e:
-                logger.error(f"Failed to fetch linked controls: {e}")
-                return {}
-
-    def get_linked_kpis_by_requirement(self) -> dict:
-            """
-            Returns dict: { compliancerequirement_id → [kisetup_id, ...] }
-            Used by matcher to know what's already linked so it doesn't duplicate.
-            """
-            query = """
-                SELECT COMPLIANCEREQUIREMENT_ID, KISETUP_ID
-                FROM DEMO_REQUIREMENT_KPI_LINK
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query)
-                    rows = cursor.fetchall()
-                    result = {}
-                    for req_id, kpi_id in rows:
-                        result.setdefault(req_id, []).append(kpi_id)
-                    return result
-            except Exception as e:
-                logger.error(f"Failed to fetch linked KPIs: {e}")
-                return {}
-
-        # ================================================================== #
-        #  STORE REQUIREMENT MAPPINGS                                          #
-        # ================================================================== #
-
-    def store_requirement_mappings(self, mappings: list):
-            """Store requirement matching results in sama_requirement_mapping."""
-            query = """
-                INSERT INTO sama_requirement_mapping (
-                    regulation_id, extracted_requirement_text,
-                    matched_requirement_id, match_status, match_explanation
-                ) VALUES (?, ?, ?, ?, ?)
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    for m in mappings:
-                        cursor.execute(query, (
-                            m["regulation_id"],
-                            m["extracted_requirement_text"],
-                            m.get("matched_requirement_id"),
-                            m["match_status"],
-                            m.get("match_explanation")
-                        ))
-                    conn.commit()
-                    logger.info(f"Stored {len(mappings)} requirement mappings")
-            except Exception as e:
-                logger.error(f"Failed to store requirement mappings: {e}")
-                raise
-
-    def flag_partially_matched_requirements(self, matched_requirement_ids: list):
-            """Set IS_SUGGESTED = 1 on partially matched existing requirements."""
-            if not matched_requirement_ids:
-                return
-            placeholders = ",".join(["?" for _ in matched_requirement_ids])
-            query = f"""
-                UPDATE COMPLIANCE_REQUIREMENT
-                SET IS_SUGGESTED = 1
-                WHERE COMPLIANCEREQUIREMENT_ID IN ({placeholders})
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query, matched_requirement_ids)
-                    conn.commit()
-                    logger.info(f"Flagged {len(matched_requirement_ids)} requirements with IS_SUGGESTED=1")
-            except Exception as e:
-                logger.error(f"Failed to flag partially matched requirements: {e}")
-                raise
-
-    def insert_new_suggested_requirement(self, requirement: dict) -> int:
-            """Insert brand new AI-suggested requirement into COMPLIANCE_REQUIREMENT."""
-            query = """
-                INSERT INTO COMPLIANCE_REQUIREMENT (TITLE, DESCRIPTION, REF_KEY, REF_NO, IS_SUGGESTED, CREATEDON)
-                OUTPUT INSERTED.COMPLIANCEREQUIREMENT_ID
-                VALUES (?, ?, ?, ?, 1, GETDATE())
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query, (
-                        requirement.get("title", "")[:500],
-                        requirement.get("description", ""),
-                        requirement.get("ref_key", "SAMA-AUTO"),
-                        requirement.get("ref_no", "")
-                    ))
-                    new_id = cursor.fetchone()[0]
-                    conn.commit()
-                    logger.info(f"Inserted new suggested requirement ID: {new_id}")
-                    return new_id
-            except Exception as e:
-                logger.error(f"Failed to insert new suggested requirement: {e}")
-                raise
-
-        # ================================================================== #
-        #  STORE CONTROL LINKS                                                 #
-        # ================================================================== #
-
     def store_control_links(self, control_links: list):
-            """
-            Insert new rows into DEMO_REQUIREMENT_CONTROL_LINK.
-            Used when an existing control is matched to a requirement but not yet linked.
-            """
-            query = """
-                INSERT INTO DEMO_REQUIREMENT_CONTROL_LINK (
-                    COMPLIANCEREQUIREMENT_ID, CONTROL_ID,
-                    MATCH_STATUS, MATCH_EXPLANATION, REGULATION_ID
-                ) VALUES (?, ?, ?, ?, ?)
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    for link in control_links:
-                        cursor.execute(query, (
-                            link["compliancerequirement_id"],
-                            link["control_id"],
-                            link["match_status"],
-                            link.get("match_explanation"),
-                            link.get("regulation_id")
-                        ))
-                    conn.commit()
-                    logger.info(f"Stored {len(control_links)} control links")
-            except Exception as e:
-                logger.error(f"Failed to store control links: {e}")
-                raise
-
-        # ================================================================== #
-        #  STORE KPI LINKS                                                     #
-        # ================================================================== #
-
-    def store_kpi_links(self, kpi_links: list):
-            """
-            Insert new rows into DEMO_REQUIREMENT_KPI_LINK.
-            Used when an existing KPI is matched to a requirement but not yet linked.
-            """
-            query = """
-                INSERT INTO DEMO_REQUIREMENT_KPI_LINK (
-                    COMPLIANCEREQUIREMENT_ID, KISETUP_ID,
-                    MATCH_STATUS, MATCH_EXPLANATION, REGULATION_ID
-                ) VALUES (?, ?, ?, ?, ?)
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    for link in kpi_links:
-                        cursor.execute(query, (
-                            link["compliancerequirement_id"],
-                            link["kisetup_id"],
-                            link["match_status"],
-                            link.get("match_explanation"),
-                            link.get("regulation_id")
-                        ))
-                    conn.commit()
-                    logger.info(f"Stored {len(kpi_links)} KPI links")
-            except Exception as e:
-                logger.error(f"Failed to store KPI links: {e}")
-                raise
-
-        # ================================================================== #
-        #  INSERT NEW SUGGESTED CONTROLS AND KPIs                             #
-        # ================================================================== #
-
-    def insert_new_suggested_control(self, control: dict) -> int:
-            """
-            Insert a brand new AI-suggested control into DEMO_CONTROL with IS_SUGGESTED=1.
-            Returns new CONTROL_ID.
-            """
-            query = """
-                INSERT INTO DEMO_CONTROL (TITLE, DESCRIPTION, CONTROL_KEY, IS_SUGGESTED, CREATEDON)
-                OUTPUT INSERTED.CONTROL_ID
-                VALUES (?, ?, ?, 1, GETDATE())
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query, (
-                        control.get("title", "")[:500],
-                        control.get("description", ""),
-                        control.get("control_key", f"SAMA-AUTO-CTRL-{control.get('title', '')[:20]}")
-                    ))
-                    new_id = cursor.fetchone()[0]
-                    conn.commit()
-                    logger.info(f"Inserted new suggested control ID: {new_id}")
-                    return new_id
-            except Exception as e:
-                logger.error(f"Failed to insert new suggested control: {e}")
-                raise
-
-    def insert_new_suggested_kpi(self, kpi: dict) -> int:
-            """
-            Insert a brand new AI-suggested KPI into DEMO_KPI with IS_SUGGESTED=1.
-            Returns new KISETUP_ID.
-            """
-            query = """
-                INSERT INTO DEMO_KPI (TITLE, DESCRIPTION, KISETUP_KEY, FORMULA, IS_SUGGESTED, CREATEDON)
-                OUTPUT INSERTED.KISETUP_ID
-                VALUES (?, ?, ?, ?, 1, GETDATE())
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query, (
-                        kpi.get("title", "")[:500],
-                        kpi.get("description", ""),
-                        kpi.get("kisetup_key", f"SAMA-AUTO-KPI-{kpi.get('title', '')[:20]}"),
-                        kpi.get("formula", "")
-                    ))
-                    new_id = cursor.fetchone()[0]
-                    conn.commit()
-                    logger.info(f"Inserted new suggested KPI ID: {new_id}")
-                    return new_id
-            except Exception as e:
-                logger.error(f"Failed to insert new suggested KPI: {e}")
-                raise
-
-        # ================================================================== #
-        #  FETCH MAPPING RESULTS (for API response)                           #
-        # ================================================================== #
-
-    def get_requirement_mappings_by_regulation(self, regulation_id: int) -> list:
-            """Fetch requirement matching results with matched requirement details."""
-            query = """
-                SELECT
-                    m.id,
-                    m.regulation_id,
-                    m.extracted_requirement_text,
-                    m.matched_requirement_id,
-                    m.match_status,
-                    m.match_explanation,
-                    CAST(m.created_at AS DATETIME2) as created_at,
-                    cr.TITLE       as matched_requirement_title,
-                    cr.DESCRIPTION as matched_requirement_description
-                FROM sama_requirement_mapping m
-                LEFT JOIN COMPLIANCE_REQUIREMENT cr
-                       ON m.matched_requirement_id = cr.COMPLIANCEREQUIREMENT_ID
-                WHERE m.regulation_id = ?
-                ORDER BY m.id
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query, (regulation_id,))
-                    rows = cursor.fetchall()
-                    columns = [col[0] for col in cursor.description]
-                    return [dict(zip(columns, row)) for row in rows]
-            except Exception as e:
-                logger.error(f"Failed to get requirement mappings for regulation {regulation_id}: {e}")
-                return []
-
-    def get_control_links_by_regulation(self, regulation_id: int) -> list:
-            """Fetch control links for a regulation with control details."""
-            query = """
-                SELECT
-                    l.ID,
-                    l.COMPLIANCEREQUIREMENT_ID,
-                    l.CONTROL_ID,
-                    l.MATCH_STATUS,
-                    l.MATCH_EXPLANATION,
-                    CAST(l.LINKED_ON AS DATETIME2) as LINKED_ON,
-                    dc.TITLE        as control_title,
-                    dc.DESCRIPTION  as control_description,
-                    dc.CONTROL_KEY  as control_key,
-                    dc.IS_SUGGESTED as is_suggested
-                FROM DEMO_REQUIREMENT_CONTROL_LINK l
-                LEFT JOIN DEMO_CONTROL dc ON l.CONTROL_ID = dc.CONTROL_ID
-                WHERE l.REGULATION_ID = ?
-                ORDER BY l.COMPLIANCEREQUIREMENT_ID, l.ID
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query, (regulation_id,))
-                    rows = cursor.fetchall()
-                    columns = [col[0] for col in cursor.description]
-                    return [dict(zip(columns, row)) for row in rows]
-            except Exception as e:
-                logger.error(f"Failed to get control links for regulation {regulation_id}: {e}")
-                return []
-
-    def get_kpi_links_by_regulation(self, regulation_id: int) -> list:
-            """Fetch KPI links for a regulation with KPI details."""
-            query = """
-                SELECT
-                    l.LINKAGE_ID,
-                    l.COMPLIANCEREQUIREMENT_ID,
-                    l.KISETUP_ID,
-                    l.MATCH_STATUS,
-                    l.MATCH_EXPLANATION,
-                    CAST(l.LINKED_ON AS DATETIME2) as LINKED_ON,
-                    dk.TITLE        as kpi_title,
-                    dk.DESCRIPTION  as kpi_description,
-                    dk.KISETUP_KEY  as kisetup_key,
-                    dk.FORMULA      as formula,
-                    dk.IS_SUGGESTED as is_suggested
-                FROM DEMO_REQUIREMENT_KPI_LINK l
-                LEFT JOIN DEMO_KPI dk ON l.KISETUP_ID = dk.KISETUP_ID
-                WHERE l.REGULATION_ID = ?
-                ORDER BY l.COMPLIANCEREQUIREMENT_ID, l.LINKAGE_ID
-            """
-            try:
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(query, (regulation_id,))
-                    rows = cursor.fetchall()
-                    columns = [col[0] for col in cursor.description]
-                    return [dict(zip(columns, row)) for row in rows]
-            except Exception as e:
-                logger.error(f"Failed to get KPI links for regulation {regulation_id}: {e}")
-                return []
-
-    def store_staged_analysis(self, rows: List[dict]) -> None:
-        """
-        Insert per-requirement rows from the 4-stage pipeline.
-        Each dict in rows maps directly to a compliance_analysis row.
-        Called instead of store_compliance_analysis() for v2 documents.
-        """
         query = """
-            INSERT INTO compliance_analysis (
-                regulation_id, analysis_json,
-                requirement_id, requirement_title,
-                execution_category, criticality, obligation_type,
-                stage1_json, stage2_json, stage3_json, stage4_md,
-                schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'v2')
+            INSERT INTO DEMO_REQUIREMENT_CONTROL_LINK (
+                COMPLIANCEREQUIREMENT_ID, CONTROL_ID,
+                MATCH_STATUS, MATCH_EXPLANATION, REGULATION_ID
+            ) VALUES (?, ?, ?, ?, ?)
         """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                for row in rows:
-                    cursor.execute(query,
-                                   row["regulation_id"],
-                                   row["analysis_json"],
-                                   row.get("requirement_id"),
-                                   row.get("requirement_title"),
-                                   row.get("execution_category"),
-                                   row.get("criticality"),
-                                   row.get("obligation_type"),
-                                   row.get("stage1_json"),
-                                   row.get("stage2_json"),
-                                   row.get("stage3_json"),
-                                   row.get("stage4_md"),
-                                   )
+                for link in control_links:
+                    cursor.execute(query, (
+                        link["compliancerequirement_id"],
+                        link["control_id"],
+                        link["match_status"],
+                        link.get("match_explanation"),
+                        link.get("regulation_id")
+                    ))
                 conn.commit()
-                logger.info(f"Stored {len(rows)} staged analysis rows for regulation {rows[0]['regulation_id']}")
+                logger.info(f"Stored {len(control_links)} control links")
         except Exception as e:
-            logger.error(f"Failed to store staged analysis: {e}")
+            logger.error(f"Failed to store control links: {e}")
             raise
 
-    def get_compliance_analysis_v2(self, regulation_id: int) -> List[dict]:
+    def store_kpi_links(self, kpi_links: list):
+        query = """
+            INSERT INTO DEMO_REQUIREMENT_KPI_LINK (
+                COMPLIANCEREQUIREMENT_ID, KISETUP_ID,
+                MATCH_STATUS, MATCH_EXPLANATION, REGULATION_ID
+            ) VALUES (?, ?, ?, ?, ?)
         """
-        Fetch all per-requirement rows for a regulation (v2 schema only).
-        Returns list ordered by requirement_id.
-        Used by the new /compliance-analysis-v2/{id} API endpoint.
-        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                for link in kpi_links:
+                    cursor.execute(query, (
+                        link["compliancerequirement_id"],
+                        link["kisetup_id"],
+                        link["match_status"],
+                        link.get("match_explanation"),
+                        link.get("regulation_id")
+                    ))
+                conn.commit()
+                logger.info(f"Stored {len(kpi_links)} KPI links")
+        except Exception as e:
+            logger.error(f"Failed to store KPI links: {e}")
+            raise
+
+    # ================================================================== #
+    #  REQUIREMENT MATCHING — READ MAPPINGS                               #
+    # ================================================================== #
+
+    def get_requirement_mappings_by_regulation(self, regulation_id: int) -> list:
+        """Get all requirement mappings for a regulation."""
         query = """
             SELECT
-                id, regulation_id,
-                requirement_id, requirement_title,
-                execution_category, criticality, obligation_type,
-                analysis_json, stage1_json, stage2_json, stage3_json, stage4_md,
-                schema_version, status,
-                CAST(created_at AS DATETIME2) as created_at,
-                CAST(updated_at AS DATETIME2) as updated_at
-            FROM compliance_analysis
-            WHERE regulation_id = ? AND schema_version = 'v2'
-            ORDER BY requirement_id
+                srm.regulation_id,
+                srm.extracted_requirement_text,
+                srm.matched_requirement_id,
+                srm.match_status,
+                srm.match_explanation,
+                srm.version_id,
+                srm.obligation_id,
+                srm.requirement_id,
+                cr.TITLE as matched_requirement_title,
+                cr.DESCRIPTION as matched_requirement_description
+            FROM sama_requirement_mapping srm
+            LEFT JOIN COMPLIANCE_REQUIREMENT cr 
+                ON srm.matched_requirement_id = cr.COMPLIANCEREQUIREMENT_ID
+            WHERE srm.regulation_id = ?
+            ORDER BY srm.id
         """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                cursor.execute(query, regulation_id)
+                cursor.execute(query, [regulation_id])
                 cols = [c[0] for c in cursor.description]
-                rows = []
-                for row in cursor.fetchall():
-                    d = dict(zip(cols, row))
-                    # Parse JSON columns into dicts so API can return them directly
-                    for field in ("analysis_json", "stage1_json", "stage2_json", "stage3_json"):
-                        if d.get(field):
-                            try:
-                                d[field] = json.loads(d[field])
-                            except Exception:
-                                pass
-                    rows.append(d)
-                return rows
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
         except Exception as e:
-            logger.error(f"Failed to get v2 analysis for regulation {regulation_id}: {e}")
+            logger.error(f"Failed to get requirement mappings: {e}")
             return []
 
-    def get_stage4_executive_summary(self, regulation_id: int) -> str | None:
-        """
-        Returns the Stage 4 markdown string for a regulation.
-        Stored only on the first requirement row (stage4_md is NULL on all others).
-        Used by the /compliance-analysis-v2/{id}/executive-summary endpoint.
-        """
+    def get_control_links_by_regulation(self, regulation_id: int) -> list:
+        """Get all control links for a regulation."""
         query = """
-            SELECT TOP 1 stage4_md
-            FROM compliance_analysis
-            WHERE regulation_id = ?
-              AND schema_version = 'v2'
-              AND stage4_md IS NOT NULL
+            SELECT
+                drcl.COMPLIANCEREQUIREMENT_ID,
+                drcl.CONTROL_ID,
+                drcl.MATCH_STATUS,
+                drcl.MATCH_EXPLANATION,
+                drcl.REGULATION_ID,
+                dc.TITLE as control_title,
+                dc.DESCRIPTION as control_description,
+                dc.CONTROL_KEY as control_key,
+                dc.IS_SUGGESTED as is_suggested
+            FROM DEMO_REQUIREMENT_CONTROL_LINK drcl
+            JOIN DEMO_CONTROL dc ON drcl.CONTROL_ID = dc.CONTROL_ID
+            WHERE drcl.REGULATION_ID = ?
+            ORDER BY drcl.COMPLIANCEREQUIREMENT_ID
         """
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                cursor.execute(query, regulation_id)
-                row = cursor.fetchone()
-                return row[0] if row else None
+                cursor.execute(query, [regulation_id])
+                cols = [c[0] for c in cursor.description]
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
         except Exception as e:
-            logger.error(f"Failed to get stage4 summary for regulation {regulation_id}: {e}")
-            return None
+            logger.error(f"Failed to get control links: {e}")
+            return []
+
+    def get_kpi_links_by_regulation(self, regulation_id: int) -> list:
+        """Get all KPI links for a regulation."""
+        query = """
+            SELECT
+                drkl.COMPLIANCEREQUIREMENT_ID,
+                drkl.KISETUP_ID,
+                drkl.MATCH_STATUS,
+                drkl.MATCH_EXPLANATION,
+                drkl.REGULATION_ID,
+                dk.TITLE as kpi_title,
+                dk.DESCRIPTION as kpi_description,
+                dk.KISETUP_KEY as kisetup_key,
+                dk.IS_SUGGESTED as is_suggested
+            FROM DEMO_REQUIREMENT_KPI_LINK drkl
+            JOIN DEMO_KPI dk ON drkl.KISETUP_ID = dk.KISETUP_ID
+            WHERE drkl.REGULATION_ID = ?
+            ORDER BY drkl.COMPLIANCEREQUIREMENT_ID
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, [regulation_id])
+                cols = [c[0] for c in cursor.description]
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get KPI links: {e}")
+            return []
 
     def get_control_links_by_requirement_ids(self, requirement_ids: list) -> list:
+        """Get control links for multiple requirement IDs."""
         if not requirement_ids:
             return []
-        placeholders = ",".join("?" * len(requirement_ids))
+
+        placeholders = ",".join(["?" for _ in requirement_ids])
         query = f"""
             SELECT
-                crl.COMPLIANCEREQUIREMENT_ID,
-                crl.CONTROL_ID,
-                crl.MATCH_STATUS,
-                crl.MATCH_EXPLANATION,
-                crl.is_suggested,
-                c.title        AS control_title,
-                c.description  AS control_description,
-                c.control_key  AS control_key
-            FROM DEMO_REQUIREMENT_CONTROL_LINK crl
-            LEFT JOIN controls c ON crl.CONTROL_ID = c.id
-            WHERE crl.COMPLIANCEREQUIREMENT_ID IN ({placeholders})
+                drcl.COMPLIANCEREQUIREMENT_ID,
+                drcl.CONTROL_ID,
+                drcl.MATCH_STATUS,
+                drcl.MATCH_EXPLANATION,
+                drcl.REGULATION_ID,
+                dc.TITLE as control_title,
+                dc.DESCRIPTION as control_description,
+                dc.CONTROL_KEY as control_key,
+                dc.IS_SUGGESTED as is_suggested
+            FROM DEMO_REQUIREMENT_CONTROL_LINK drcl
+            JOIN DEMO_CONTROL dc ON drcl.CONTROL_ID = dc.CONTROL_ID
+            WHERE drcl.COMPLIANCEREQUIREMENT_ID IN ({placeholders})
+            ORDER BY drcl.COMPLIANCEREQUIREMENT_ID
         """
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, requirement_ids)
-            columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, requirement_ids)
+                cols = [c[0] for c in cursor.description]
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get control links by requirement IDs: {e}")
+            return []
 
+    def insert_new_suggested_control(self, control: dict) -> int:
+        query = """
+            INSERT INTO DEMO_CONTROL (TITLE, DESCRIPTION, CONTROL_KEY, IS_SUGGESTED, CREATEDON)
+            OUTPUT INSERTED.CONTROL_ID
+            VALUES (?, ?, ?, 1, GETDATE())
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (
+                    control.get("title", "")[:500],
+                    control.get("description", ""),
+                    control.get("control_key", f"SAMA-AUTO-CTRL-{control.get('title', '')[:20]}")
+                ))
+                new_id = cursor.fetchone()[0]
+                conn.commit()
+                logger.info(f"Inserted new suggested control ID: {new_id}")
+                return new_id
+        except Exception as e:
+            logger.error(f"Failed to insert new suggested control: {e}")
+            raise
+
+    def insert_new_suggested_kpi(self, kpi: dict) -> int:
+        query = """
+            INSERT INTO DEMO_KPI (TITLE, DESCRIPTION, KISETUP_KEY, FORMULA, IS_SUGGESTED, CREATEDON)
+            OUTPUT INSERTED.KISETUP_ID
+            VALUES (?, ?, ?, ?, 1, GETDATE())
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (
+                    kpi.get("title", "")[:500],
+                    kpi.get("description", ""),
+                    kpi.get("kisetup_key", f"SAMA-AUTO-KPI-{kpi.get('title', '')[:20]}"),
+                    kpi.get("formula", "")
+                ))
+                new_id = cursor.fetchone()[0]
+                conn.commit()
+                logger.info(f"Inserted new suggested KPI ID: {new_id}")
+                return new_id
+        except Exception as e:
+            logger.error(f"Failed to insert new suggested KPI: {e}")
+            raise
+
+    # ================================================================== #
+    #  LOGGING                                                             #
+    # ================================================================== #
+
+    def _log_processing(self, regulation_id, step, status, message, details=None, document_url=None):
+        details_json = json.dumps(details) if details else None
+        query = """
+            INSERT INTO processinglogs (regulation_id, step, status, message, details)
+            VALUES (?, ?, ?, ?, ?)
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (regulation_id, step, status, message, details_json))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to write processing log: {e}")
+
+    # ================================================================== #
+    #  UTILITY                                                             #
+    # ================================================================== #
+
+    def execute_query(self, query: str, params: tuple = ()) -> list:
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"execute_query failed: {e}")
+            raise
+
+    def execute_update(self, query: str, params: tuple = ()) -> int:
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                rowcount = cursor.rowcount
+                conn.commit()
+                return rowcount
+        except Exception as e:
+            logger.error(f"execute_update failed: {e}")
+            raise

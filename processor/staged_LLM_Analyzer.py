@@ -6,7 +6,15 @@ import requests
 from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
+from utils.lang_detector import detect_language
 
+LANGUAGE_NAMES = {
+    "ar": "Arabic",
+    "en": "English",
+    "fr": "French",
+    "de": "German",
+    "es": "Spanish",
+}
 
 class StagedLLMAnalyzer:
     """
@@ -19,6 +27,24 @@ class StagedLLMAnalyzer:
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         if not self.api_key:
             raise ValueError("Missing OPENROUTER_API_KEY")
+
+    def _clean_stage4(self, raw: str) -> str:
+        """Strip JSON wrappers and code fences from stage 4 markdown output."""
+        raw = raw.strip()
+        # Strip code fences
+        raw = re.sub(r'^```(?:json)?\s*\n?', '', raw, flags=re.IGNORECASE)
+        raw = re.sub(r'\n?```\s*$', '', raw)
+        raw = raw.strip()
+        # If model wrapped markdown inside a JSON object, extract it
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                for key in ("report", "markdown", "content", "output"):
+                    if key in parsed and isinstance(parsed[key], str):
+                        return parsed[key]
+        except Exception:
+            pass
+        return raw
 
     # ------------------------------------------------------------------ #
     #  PUBLIC ENTRY POINT                                                  #
@@ -33,9 +59,11 @@ class StagedLLMAnalyzer:
             reference: str = "",
             publication_date: str = "",
     ) -> List[Dict]:
+        iso = detect_language(text)
+        doc_language = LANGUAGE_NAMES.get(iso, "English")
         # Stage 1: Extract
         s1_raw = self._call_llm(
-            self._prompt_stage1(text, document_title, regulator, reference, publication_date),
+            self._prompt_stage1(text, document_title, regulator, reference, publication_date, doc_language),
             temperature=0.1
         )
         s1_data = self._parse_json(s1_raw)
@@ -44,7 +72,7 @@ class StagedLLMAnalyzer:
             return []
 
         # Stage 2+2.5: Normalize + classify
-        s2_raw  = self._call_llm(self._prompt_stage2(json.dumps(s1_data, ensure_ascii=False)), temperature=0.1)
+        s2_raw  = self._call_llm(self._prompt_stage2(json.dumps(s1_data, ensure_ascii=False), doc_language), temperature=0.1)
         s2_data = self._parse_json(s2_raw)
 
         # Stage 3: Control design — only for Ongoing_Control obligations
@@ -57,19 +85,19 @@ class StagedLLMAnalyzer:
         ]
         if ongoing_reqs:
             s3_raw  = self._call_llm(
-                self._prompt_stage3(json.dumps({"requirements": ongoing_reqs}, ensure_ascii=False)),
-                temperature=0.25
+            self._prompt_stage3(json.dumps({"requirements": ongoing_reqs}, ensure_ascii=False), doc_language),
+            temperature=0.25
             )
             s3_data = self._parse_json(s3_raw)
         else:
             s3_data = {"requirements": []}
 
         # Stage 4: Executive markdown
-        s4_md = self._call_llm(
-            self._prompt_stage4(s1_data, s2_data, s3_data, document_title),
+        s4_md = self._clean_stage4(self._call_llm(
+            self._prompt_stage4(s1_data, s2_data, s3_data, document_title, doc_language),
             temperature=0.3,
             max_tokens=4000
-        )
+        ))
 
         return self._assemble_rows(s1_data, s2_data, s3_data, s4_md, regulation_id)
 
@@ -84,6 +112,7 @@ class StagedLLMAnalyzer:
             regulator: str = "",
             reference: str = "",
             publication_date: str = "",
+             language="English"
     ) -> str:
         return f"""You are a senior regulatory compliance analyst.
 Extract structured requirements and atomic obligations from the regulatory circular below.
@@ -109,9 +138,9 @@ Extract structured requirements and atomic obligations from the regulatory circu
 - Do not extract the same sentence or list item twice even if it appears more than once in the source text.
 
 ━━━ LANGUAGE RULES ━━━
-- The regulation text may be in Arabic or any other language.
-- All output fields (obligation_text, requirement_title, source_reference) must be written in English.
-- Translate accurately while preserving the exact regulatory meaning — do not summarize or interpret.
+- The document is in {language}.
+- ALL output fields must be written in {language}.
+- Do NOT translate. Preserve exact regulatory meaning in the original language.
 
 Return STRICT JSON only — no markdown, no explanation, no code fences:
 {{
@@ -142,7 +171,7 @@ Regulation Text:
 {text}
 """
 
-    def _prompt_stage2(self, stage1_json: str) -> str:
+    def _prompt_stage2(self, stage1_json: str,language="English") -> str:
         return f"""You are refining previously extracted regulatory obligations.
 
 Tasks:
@@ -163,7 +192,9 @@ Rules:
 - Do NOT invent obligations.
 - Do NOT change regulatory meaning.
 - Keep obligation_text close to original.
-- All output must be in English.
+- The document is in {language}.
+- ALL output fields must be written in {language}.
+- Do NOT translate. Preserve exact regulatory meaning in the original language.
 
 Return STRICT JSON only:
 {{
@@ -195,7 +226,7 @@ Input:
 <<<END>>>
 """
 
-    def _prompt_stage3(self, stage2_ongoing_json: str) -> str:
+    def _prompt_stage3(self, stage2_ongoing_json: str, language="English") -> str:
         return f"""You are a senior banking internal controls architect.
 
 For each obligation where execution_category = "Ongoing_Control", design one internal control.
@@ -217,7 +248,9 @@ Rules:
 - One control per Ongoing_Control obligation.
 - For non-Ongoing obligations: include the obligation but set control: null.
 - Controls must be auditable and specific.
-- All output must be in English.
+- The document is in {language}.
+- ALL output fields must be written in {language}.
+- Do NOT translate. Preserve exact regulatory meaning in the original language.
 
 Return STRICT JSON only:
 {{
@@ -243,7 +276,7 @@ Input:
 <<<END>>>
 """
 
-    def _prompt_stage4(self, s1: dict, s2: dict, s3: dict, document_title: str) -> str:
+    def _prompt_stage4(self, s1: dict, s2: dict, s3: dict, document_title: str, language="English") -> str:
         return f"""You are compiling a formal enterprise regulatory impact document.
 
 Using ONLY the structured data below, generate a professional markdown report with these sections:
@@ -262,7 +295,9 @@ Rules:
 - Use only information from the inputs.
 - Do not invent regulatory content.
 - Professional, concise, enterprise tone.
-- All output must be in English.
+- The document is in {language}.
+- ALL output fields must be written in {language}.
+- Do NOT translate. Preserve exact regulatory meaning in the original language.
 - Return formatted markdown only.
 
 Document: {document_title}
@@ -381,7 +416,7 @@ Stage 3:
                     "content": (
                         "You are a senior banking compliance officer specialising in SAMA and CMA regulations. "
                         "Return only valid JSON unless explicitly told otherwise. Never hallucinate. "
-                        "Always respond in English regardless of the input language."
+                        "Always respond in the same language as the source document."
                     ),
                 },
                 {"role": "user", "content": prompt},
