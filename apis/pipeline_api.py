@@ -33,8 +33,8 @@ from utils.lang_translator import (
     translate_v2_gap_result,
 )
 print("=" * 100)
-print("🚀 PIPELINE_API.PY MODULE LOADED!")
-print("🔧 Python is executing this file")
+print("PIPELINE_API.PY MODULE LOADED!")
+print("Python is executing this file")
 print("=" * 100)
 
 logger = logging.getLogger(__name__)
@@ -2406,11 +2406,11 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
             if len(content_text) >= 200:
                 text_content = content_text
                 content_type = "html"
-                logger.info(f"✓ Using content_text from regulation_versions ({len(text_content)} chars)")
+                logger.info(f"Using content_text from regulation_versions ({len(text_content)} chars)")
             elif len(content_html) >= 200:
                 text_content = content_html
                 content_type = "html"
-                logger.info(f"✓ Using content_html from regulation_versions ({len(text_content)} chars)")
+                logger.info(f"Using content_html from regulation_versions ({len(text_content)} chars)")
 
     # ── FOR SAMA/SBP/SECP: Check extra_meta and document_html ──
     if not text_content:
