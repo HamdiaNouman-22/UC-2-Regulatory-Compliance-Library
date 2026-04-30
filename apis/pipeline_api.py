@@ -4076,21 +4076,6 @@ def delete_full_analysis(
     regulation_id: int,
     include_versions: bool = Query(False, description="Also delete archived compliance_analysis_versions"),
 ):
-    """
-    Delete all compliance analysis + requirement mapping data for a regulation.
- 
-    Deletes:
-      - compliance_analysis (current active rows)
-      - sama_requirement_mapping (requirement mappings)
-      - DEMO_REQUIREMENT_CONTROL_LINK (control links)
-      - DEMO_REQUIREMENT_KPI_LINK (KPI links)
- 
-    If include_versions=true also deletes:
-      - compliance_analysis_versions (CBB archived history only)
- 
-    Does NOT delete: regulation record, regulation_versions content snapshots.
-    Use this before re-running /trigger/full-analysis/{id}?force=true.
-    """
     deleted = {}
     try:
         with repo._get_conn() as conn:
@@ -4147,17 +4132,6 @@ def delete_full_analysis(
         logger.exception(f"Error deleting analysis for regulation {regulation_id}")
         raise HTTPException(500, str(e))
  
- """
-Add this endpoint to pipeline_api.py
-
-POST /regulations/add
-─────────────────────────────────────────────────────────────────────────────
-Creates a regulation record directly from JSON — no file upload required.
-Useful for adding regulations from frontend forms or external sources.
-
-After adding, you can trigger analysis separately:
-  POST /trigger/full-analysis/{regulation_id}
-"""
 
 # ── 6. POST /regulations/add — with Arabic response ──────────────────────────
  
