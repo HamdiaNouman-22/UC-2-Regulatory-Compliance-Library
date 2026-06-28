@@ -120,7 +120,7 @@ class Downloader:
             head = self.session.head(url, allow_redirects=True, timeout=15)
             content_type = head.headers.get("Content-Type", "").lower()
             if "pdf" in content_type:
-                print(f"[Downloader] HEAD detected PDF → binary download: {url}")
+                print(f"[Downloader] HEAD detected PDF, using binary download: {url}")
                 return self._download_binary(url, filename_safe, "pdf")
         except requests.exceptions.ConnectionError as e:
             print(f"[Downloader] HEAD request failed - DNS/Network error for {url}: {e}")
@@ -129,7 +129,7 @@ class Downloader:
         except Exception as e:
             print(f"[Downloader] HEAD request failed for {url}: {e}")
 
-        # Default: HTML → PDF using subprocess to avoid asyncio conflicts
+        # Default: HTML to PDF using subprocess to avoid asyncio conflicts
         return self._html_to_pdf_subprocess(url, filename_safe)
 
     def _extract_extension(self, url: str) -> str:
@@ -157,11 +157,11 @@ class Downloader:
                         f.write(chunk)
 
                 file_hash = self._compute_hash(file_path)
-                print(f"[Downloader] ✓ Saved binary: {file_path}")
+                print(f"[Downloader] Saved binary: {file_path}")
                 return str(file_path), file_hash
 
             except requests.exceptions.ConnectionError as e:
-                print(f"[Downloader] ✗ Network/DNS error ({attempt}/{self.retries}): {e}")
+                print(f"[Downloader] Network/DNS error ({attempt}/{self.retries}): {e}")
                 if "Failed to resolve" in str(e) or "getaddrinfo failed" in str(e):
                     print(f"[Downloader] DNS resolution failed for: {urlparse(url).hostname}")
                     print(f"[Downloader] Check: Internet connection, VPN, firewall, or domain accessibility")
@@ -178,7 +178,7 @@ class Downloader:
                     )
 
             except requests.exceptions.Timeout as e:
-                print(f"[Downloader] ✗ Timeout error ({attempt}/{self.retries}): {e}")
+                print(f"[Downloader] Timeout error ({attempt}/{self.retries}): {e}")
                 if attempt < self.retries:
                     wait_time = self.backoff * attempt
                     print(f"[Downloader] Retrying in {wait_time}s...")
@@ -187,7 +187,7 @@ class Downloader:
                     raise RuntimeError(f"Timeout: Server took too long to respond for {url}")
 
             except requests.exceptions.HTTPError as e:
-                print(f"[Downloader] ✗ HTTP error ({attempt}/{self.retries}): {e}")
+                print(f"[Downloader] HTTP error ({attempt}/{self.retries}): {e}")
                 if e.response.status_code in [429, 500, 502, 503, 504]:
                     # Retryable errors
                     if attempt < self.retries:
@@ -199,7 +199,7 @@ class Downloader:
                     raise RuntimeError(f"HTTP {e.response.status_code}: {url}")
 
             except Exception as e:
-                print(f"[Downloader] ✗ Unexpected error ({attempt}/{self.retries}): {e}")
+                print(f"[Downloader] Unexpected error ({attempt}/{self.retries}): {e}")
                 if attempt < self.retries:
                     wait_time = self.backoff * attempt
                     print(f"[Downloader] Retrying in {wait_time}s...")
@@ -207,7 +207,7 @@ class Downloader:
                 else:
                     raise
 
-        raise RuntimeError(f"[Downloader] FAILED to download file after {self.retries} retries → {url}")
+        raise RuntimeError(f"[Downloader] FAILED to download file after {self.retries} retries for {url}")
 
     def _html_to_pdf_subprocess(self, url: str, filename: str):
         """
@@ -268,7 +268,7 @@ if __name__ == "__main__":
                     raise RuntimeError(f"Subprocess failed: {result.stderr}")
 
             except Exception as e:
-                print(f"[Downloader] HTML→PDF failed ({attempt}/{self.retries}): {e}")
+                print(f"[Downloader] HTML-to-PDF conversion failed ({attempt}/{self.retries}): {e}")
                 time.sleep(self.backoff * attempt)
 
-        raise RuntimeError(f"[Downloader] FAILED to render PDF after retries → {url}")
+        raise RuntimeError(f"[Downloader] FAILED to render PDF after retries for {url}")

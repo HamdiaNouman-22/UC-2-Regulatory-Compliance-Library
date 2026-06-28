@@ -38,12 +38,13 @@ class MSSQLRepository(DocumentRepository):
 
     def _get_conn(self):
         conn_str = (
-            f"DRIVER={self.conn_params.get('driver', '{ODBC Driver 17 for SQL Server}')};"
-            f"SERVER={self.conn_params['server']};"
-            f"DATABASE={self.conn_params['database']};"
-            f"UID={self.conn_params['username']};"
-            f"PWD={self.conn_params['password']}"
-        )
+    f"DRIVER={self.conn_params['driver']};"
+    f"SERVER={self.conn_params['server']};"
+    f"DATABASE={self.conn_params['database']};"
+    f"UID={self.conn_params['username']};"
+    f"PWD={self.conn_params['password']};"
+    f"TrustServerCertificate=yes;"
+)
         return pyodbc.connect(conn_str)
 
     # ================================================================== #
@@ -82,6 +83,23 @@ class MSSQLRepository(DocumentRepository):
         row = cursor.fetchone()
         conn.commit()
         return int(row[0])
+
+    def regulation_exists_for_category(self, compliancecategory_id: int) -> bool:
+        """True if a regulation already points to this exact category node.
+        Used when resolving the leaf (final) segment of a doc_path: if a
+        node with the same (title, parent_id) already has a different
+        regulation attached, it must not be reused for another one -- doing
+        so silently merges two distinct documents into a single tree slot,
+        making one of them unreachable in the tree."""
+        query = "SELECT TOP 1 1 FROM regulations WHERE compliancecategory_id = ?"
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, [compliancecategory_id])
+                return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"regulation_exists_for_category check failed: {e}")
+            return False
     # ================================================================== #
     #  REGULATION INSERT / UPDATE                                          #
     # ================================================================== #
@@ -231,6 +249,28 @@ class MSSQLRepository(DocumentRepository):
 
     def document_exists_by_source_url(self, source_page_url: str) -> bool:
         return self.get_regulation_id_by_source_url(source_page_url) is not None
+
+    def document_exists_by_url(self, document_url: str, category: Optional[str] = None) -> bool:
+        """Existence check by document_url -- used as a fallback for documents
+        that have no published_date, so they don't get silently re-inserted
+        on every crawl run. Scoped by category when provided, since some
+        documents (e.g. SAMA) are intentionally cross-listed under more than
+        one category for the same document_url -- a bare url check would
+        wrongly treat the second category's copy as a duplicate."""
+        if category is not None:
+            query = "SELECT TOP 1 id FROM regulations WHERE document_url = ? AND category = ?"
+            params = (document_url, category)
+        else:
+            query = "SELECT TOP 1 id FROM regulations WHERE document_url = ?"
+            params = (document_url,)
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"document_url existence check failed: {e}")
+            return False
 
     def get_regulation_id_by_source_url(self, source_page_url: str) -> Optional[int]:
         query = """

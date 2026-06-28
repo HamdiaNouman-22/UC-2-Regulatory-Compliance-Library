@@ -2,6 +2,7 @@ import logging
 from typing import List
 from crawler.sama_circulars_crawler import SAMARulebookCrawler
 from crawler.sama_laws_and_regs_crawler import SAMALawsCrawler
+from crawler.sama_rulebook_crawler import SAMAFullRulebookCrawler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -12,36 +13,47 @@ logger = logging.getLogger(__name__)
 
 class SAMACombinedCrawler:
     """
-    Combined SAMA crawler that runs both:
+    Combined SAMA crawler that runs:
     1. SAMA Rulebook Circulars Crawler
-    2. SAMA Laws and Implementing Regulations Crawler
+    2. SAMA Full Rulebook Crawler -- all sectors (Laws and Implementing
+       Regulations, All Financial Institutions, Banking Sector, Finance
+       Sector, Payment Systems, Money Exchange Sector, Credit Bureaus,
+       Regulatory Sandbox), recursively, superseding the old SAMALawsCrawler's
+       narrower "Laws and Implementing Regulations"-only coverage.
+    3. SBP FE Manual Appendix III notifications -- unrelated to SAMA, but
+       this crawl has always lived inside SAMALawsCrawler as a bundled side
+       fetch; kept as-is (via SAMALawsCrawler.fetch_appendix3_documents) so
+       this existing behavior isn't lost when its SAMA-laws half is replaced.
     """
 
     def __init__(self, headless: bool = True):
         self.headless = headless
         self.circulars_crawler = SAMARulebookCrawler(headless=headless)
-        self.laws_crawler = SAMALawsCrawler(headless=headless)
+        self.full_rulebook_crawler = SAMAFullRulebookCrawler(use_selenium=False)
+        self.sbp_appendix3_crawler = SAMALawsCrawler(headless=headless)
         logger.info(f"Initialized SAMACombinedCrawler (headless={headless})")
 
     def fetch_documents(self, limit: dict = None) -> List:
         """
-        Fetch documents from both SAMA sources sequentially
+        Fetch documents from all SAMA/bundled sources sequentially.
 
         Args:
-            limit: Optional dict with keys 'circulars' and 'laws' to limit results
-                   Example: {'circulars': 5, 'laws': 3}
+            limit: Optional dict with keys 'circulars', 'rulebook' and
+                   'appendix3' to limit results.
+                   Example: {'circulars': 5, 'rulebook': 2, 'appendix3': 3}
 
         Returns:
-            Combined list of RegulatoryDocument objects from both sources
+            Combined list of RegulatoryDocument objects from all sources
         """
         all_documents = []
 
-        # Set limits
         circulars_limit = None
-        laws_limit = None
+        rulebook_limit = None
+        appendix3_limit = None
         if limit and isinstance(limit, dict):
             circulars_limit = limit.get('circulars')
-            laws_limit = limit.get('laws')
+            rulebook_limit = limit.get('rulebook')
+            appendix3_limit = limit.get('appendix3')
 
         logger.info("=" * 80)
         logger.info("STARTING SAMA COMBINED CRAWLER")
@@ -49,23 +61,40 @@ class SAMACombinedCrawler:
 
         # 1. Fetch SAMA Circulars
         try:
-            logger.info("\n[1/2] Fetching SAMA Rulebook Circulars...")
+            logger.info("\n[1/3] Fetching SAMA Rulebook Circulars...")
             circulars = self.circulars_crawler.fetch_documents(limit=circulars_limit)
             all_documents.extend(circulars)
-            logger.info(f"✓ Fetched {len(circulars)} circulars")
+            logger.info(f"Fetched {len(circulars)} circulars")
         except Exception as e:
-            logger.error(f"✗ Error fetching SAMA Circulars: {e}")
+            logger.error(f"Error fetching SAMA Circulars: {e}")
             import traceback
             logger.error(traceback.format_exc())
 
-        # 2. Fetch SAMA Laws
+        # 2. Fetch full SAMA Rulebook (all sectors except Circulars)
         try:
-            logger.info("\n[2/2] Fetching SAMA Laws and Implementing Regulations...")
-            laws = self.laws_crawler.fetch_documents(limit=laws_limit)
-            all_documents.extend(laws)
-            logger.info(f"✓ Fetched {len(laws)} laws")
+            logger.info("\n[2/3] Fetching full SAMA Rulebook (all sectors)...")
+            rulebook_docs = self.full_rulebook_crawler.fetch_documents(limit=rulebook_limit)
+            all_documents.extend(rulebook_docs)
+            logger.info(f"Fetched {len(rulebook_docs)} rulebook documents")
         except Exception as e:
-            logger.error(f"✗ Error fetching SAMA Laws: {e}")
+            logger.error(f"Error fetching SAMA Rulebook: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+        # 3. Fetch SBP FE Manual Appendix III (unrelated to SAMA, but bundled
+        #    here historically -- preserved as its own driver lifecycle so a
+        #    failure here can't take down the rulebook fetch above or vice versa)
+        try:
+            logger.info("\n[3/3] Fetching SBP FE Manual Appendix III...")
+            self.sbp_appendix3_crawler._init_driver()
+            try:
+                appendix3_docs = self.sbp_appendix3_crawler.fetch_appendix3_documents(limit=appendix3_limit)
+            finally:
+                self.sbp_appendix3_crawler._close_driver()
+            all_documents.extend(appendix3_docs)
+            logger.info(f"Fetched {len(appendix3_docs)} SBP Appendix III notifications")
+        except Exception as e:
+            logger.error(f"Error fetching SBP Appendix III: {e}")
             import traceback
             logger.error(traceback.format_exc())
 
@@ -73,7 +102,8 @@ class SAMACombinedCrawler:
         logger.info(f"SAMA COMBINED CRAWLING COMPLETE")
         logger.info(f"Total Documents: {len(all_documents)}")
         logger.info(f"  - Circulars: {len([d for d in all_documents if d.category == 'SAMA Circulars'])}")
-        logger.info(f"  - Laws: {len([d for d in all_documents if d.category == 'Laws and Implementing Regulations'])}")
+        logger.info(f"  - Rulebook (non-Circulars): {len([d for d in all_documents if d.regulator == 'SAMA' and d.category != 'SAMA Circulars'])}")
+        logger.info(f"  - SBP Appendix III: {len([d for d in all_documents if d.regulator == 'SBP'])}")
         logger.info("=" * 80)
 
         return all_documents
@@ -88,7 +118,7 @@ class SAMACombinedCrawler:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-        logger.info(f"✓ Saved {len(documents)} documents to {filename}")
+        logger.info(f"Saved {len(documents)} documents to {filename}")
 
 
 # Example usage
@@ -97,7 +127,7 @@ if __name__ == "__main__":
     crawler = SAMACombinedCrawler(headless=False)
 
     # Fetch documents with optional limits
-    documents = crawler.fetch_documents(limit={'circulars': 3, 'laws': 2})
+    documents = crawler.fetch_documents(limit={'circulars': 3, 'rulebook': 2})
 
     # Print summary
     print("\n" + "=" * 80)
@@ -106,15 +136,15 @@ if __name__ == "__main__":
 
     # Group by category
     circulars = [d for d in documents if d.category == 'SAMA Circulars']
-    laws = [d for d in documents if d.category == 'Laws and Implementing Regulations']
+    rulebook = [d for d in documents if d.regulator == 'SAMA' and d.category != 'SAMA Circulars']
 
     print(f"\nCirculars: {len(circulars)}")
     if circulars:
         print(f"  Example: {circulars[0].title}")
 
-    print(f"\nLaws: {len(laws)}")
-    if laws:
-        print(f"  Example: {laws[0].title}")
+    print(f"\nRulebook (non-Circulars): {len(rulebook)}")
+    if rulebook:
+        print(f"  Example: {rulebook[0].title}")
 
     # Save to JSON
     crawler.save_to_json(documents)

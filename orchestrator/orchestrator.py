@@ -107,7 +107,7 @@ class Orchestrator:
                 # Check if this is a CBB regulation
                 reg_data = self.repo.get_regulation_by_id(regulation_id)
                 if reg_data and reg_data.get("regulator") == "Central Bank of Bahrain":
-                    logger.info(f"  → CBB regulation detected, fetching from regulation_versions...")
+                    logger.info(f"  CBB regulation detected, fetching from regulation_versions...")
 
                     # Get the ACTIVE version
                     version_data = self.repo.get_active_regulation_version(regulation_id)
@@ -117,36 +117,36 @@ class Orchestrator:
                         content_html = (version_data.get("content_html") or "").strip()
 
                         if len(content_text) >= MIN_TEXT_LEN:
-                            logger.info(f"  ✓ CBB VERSION: content_text ({len(content_text):,} chars)")
+                            logger.info(f"  CBB VERSION: content_text ({len(content_text):,} chars)")
                             return content_text, "html"
 
                         if len(content_html) >= MIN_TEXT_LEN:
-                            logger.info(f"  ✓ CBB VERSION: content_html ({len(content_html):,} chars)")
+                            logger.info(f"  CBB VERSION: content_html ({len(content_html):,} chars)")
                             return content_html, "html"
 
-                        logger.warning(f"  ⚠ CBB version exists but text too short")
+                        logger.warning(f"  CBB version exists but text too short")
             except Exception as e:
-                logger.warning(f"  ⚠ Failed to fetch CBB version content: {e}")
+                logger.warning(f"  Failed to fetch CBB version content: {e}")
 
         # Tier 1a: SAMA pre-OCR'd PDF text
         org_pdf_text = (extra_meta.get("org_pdf_text") or "").strip()
         if len(org_pdf_text) >= MIN_TEXT_LEN:
-            logger.info(f"  ✓ TIER 1a: org_pdf_text ({len(org_pdf_text):,} chars)")
+            logger.info(f"  TIER 1a: org_pdf_text ({len(org_pdf_text):,} chars)")
             return org_pdf_text, "pdf_text"
 
         # Tier 1b: CBB / pre-extracted HTML content_text (from extra_meta)
         content_text = (extra_meta.get("content_text") or "").strip()
         if len(content_text) >= MIN_TEXT_LEN:
-            logger.info(f"  ✓ TIER 1b: content_text ({len(content_text):,} chars)")
+            logger.info(f"  TIER 1b: content_text ({len(content_text):,} chars)")
             return content_text, "html"
 
         # Tier 2: Stored document HTML
         document_html = (getattr(doc, "document_html", None) or "").strip()
         if len(document_html) >= MIN_TEXT_LEN:
-            logger.info(f"  ✓ TIER 2: document_html ({len(document_html):,} chars)")
+            logger.info(f"  TIER 2: document_html ({len(document_html):,} chars)")
             return document_html, "html"
         # Tier 3: Download & OCR
-        logger.info("  → TIER 3: no pre-extracted text, trying downloads...")
+        logger.info("  TIER 3: no pre-extracted text, trying downloads...")
 
         org_pdf_link = extra_meta.get("org_pdf_link")
         if org_pdf_link:
@@ -173,7 +173,7 @@ class Orchestrator:
                 return text, "pdf_text"
 
         if document_url and not document_url.lower().endswith(".pdf"):
-            logger.info("  → Tier 3e: fetching HTML from document_url...")
+            logger.info("  Tier 3e: fetching HTML from document_url...")
             try:
                 resp = requests.get(
                     document_url,
@@ -183,12 +183,12 @@ class Orchestrator:
                 resp.raise_for_status()
                 html = resp.text
                 if html and len(html) >= MIN_TEXT_LEN:
-                    logger.info(f"  ✓ Tier 3e: HTML ({len(html):,} chars)")
+                    logger.info(f"  Tier 3e: HTML ({len(html):,} chars)")
                     return html, "html"
             except Exception as e:
-                logger.warning(f"  ⚠ Tier 3e HTML fetch failed: {e}")
+                logger.warning(f"  Tier 3e HTML fetch failed: {e}")
 
-        logger.warning("  ✗ All extraction tiers exhausted")
+        logger.warning("  All extraction tiers exhausted")
         return None, None
 
     def _download_and_extract_pdf(
@@ -199,7 +199,7 @@ class Orchestrator:
         import tempfile
         tmp_path = None
         try:
-            logger.info(f"    ⬇ PDF: {pdf_url[:80]}")
+            logger.info(f"    PDF: {pdf_url[:80]}")
             resp = requests.get(
                 pdf_url,
                 headers={"User-Agent": (
@@ -221,7 +221,7 @@ class Orchestrator:
 
             if text_content:
                 logger.info(
-                    f"    ✓ Extracted {len(text_content):,} chars "
+                    f"    Extracted {len(text_content):,} chars "
                     f"(method={metadata.get('method', '?')})"
                 )
                 if regulation_id:
@@ -229,11 +229,11 @@ class Orchestrator:
                              f"{len(text_content):,} chars, {metadata.get('method', '?')}")
                 return text_content
             else:
-                logger.warning("    ⚠ Empty text from PDF")
+                logger.warning("    Empty text from PDF")
                 return None
 
         except Exception as e:
-            logger.warning(f"    ⚠ PDF download/extract failed: {e}")
+            logger.warning(f"    PDF download/extract failed: {e}")
             if regulation_id:
                 self.log(regulation_id, "pdf_extraction", "ERROR", str(e))
             return None
@@ -396,8 +396,8 @@ class Orchestrator:
         Run the 4-stage LLM pipeline and store results in compliance_analysis.
 
         Works for ALL regulators:
-          - version_id=None  → SAMA / SBP / SECP (no content versioning)
-          - version_id=<int> → CBB (links analysis row to a regulation_versions snapshot)
+          - version_id=None  -> SAMA / SBP / SECP (no content versioning)
+          - version_id=<int> -> CBB (links analysis row to a regulation_versions snapshot)
 
         Returns True on success, False on failure.
         """
@@ -574,14 +574,34 @@ class Orchestrator:
                 (existing_docs if exists else new_docs).append(doc)
                 continue
 
+            # Fallback for any regulator/source whose documents may lack a
+            # published_date (e.g. SAMA Rulebook hub/listing-page documents)
+            # -- dedupe by (document_url, category) instead of dropping the
+            # document. Category-scoped because some documents (e.g. SAMA) are
+            # intentionally cross-listed under more than one category for the
+            # same document_url -- a bare url check would wrongly skip the
+            # second category's copy as a "duplicate".
+            document_url = getattr(doc, "document_url", None)
+            if document_url:
+                exists = self.repo.document_exists_by_url(document_url, getattr(doc, "category", None))
+                (existing_docs if exists else new_docs).append(doc)
+                continue
+
             logger.warning(f"Skipping {doc.title} (missing published_date)")
 
         return new_docs, existing_docs
 
     def _get_or_create_compliance_category(self, hierarchy: list) -> int:
         parent_id = None
-        for title in hierarchy:
+        last_index = len(hierarchy) - 1
+        for i, title in enumerate(hierarchy):
             folder_id = self.repo.get_folder_id(title, parent_id)
+            if folder_id is not None and i == last_index:
+                # Leaf segment: if a different regulation already owns this
+                # exact (title, parent) slot, don't merge into it -- create a
+                # separate node so this document gets its own tree position.
+                if self.repo.regulation_exists_for_category(folder_id):
+                    folder_id = None
             parent_id = folder_id if folder_id else self.repo.insert_folder(title, parent_id)
         return parent_id
 
@@ -632,7 +652,7 @@ class Orchestrator:
             self._process_cbb_doc(doc)
             return
 
-        # SAMA / SBP / SECP: simple insert → extract → analyze
+        # SAMA / SBP / SECP: simple insert -> extract -> analyze
         try:
             regulation_id = self.repo._insert_regulation(doc)
             doc.id = regulation_id
@@ -657,16 +677,16 @@ class Orchestrator:
           1. Insert regulation record
           2. Create regulation_versions snapshot (version_id=N)
           3. Store content hash on regulations row
-          4. Run analysis → store in compliance_analysis with version_id=N
+          4. Run analysis -> store in compliance_analysis with version_id=N
 
         MODIFIED document:
           1. Fetch old content from regulations
-          2. Archive old content → regulation_versions (version_id=A)
-          3. Archive old analysis → compliance_analysis_versions (status=inactive)
+          2. Archive old content -> regulation_versions (version_id=A)
+          3. Archive old analysis -> compliance_analysis_versions (status=inactive)
              AND delete from compliance_analysis
           4. Create new regulation_versions snapshot (version_id=B)
           5. Update regulations row with new content + hash
-          6. Run analysis → store in compliance_analysis with version_id=B
+          6. Run analysis -> store in compliance_analysis with version_id=B
         """
         extra_meta        = getattr(doc, "extra_meta", {}) or {}
         monitoring_status = extra_meta.get("monitoring_status", "new")
@@ -711,9 +731,9 @@ class Orchestrator:
                     )
                     rows_updated = cursor.rowcount
                     conn.commit()
-                    logger.info(f"  ✓ Marked {rows_updated} existing version(s) as inactive")
+                    logger.info(f"  Marked {rows_updated} existing version(s) as inactive")
 
-                # Step 3: archive old CONTENT → regulation_versions (as inactive)
+                # Step 3: archive old CONTENT -> regulation_versions (as inactive)
                 old_version_id = self.repo.insert_regulation_version(
                     regulation_id=existing_reg_id,
                     regulator="Central Bank of Bahrain",
@@ -724,17 +744,17 @@ class Orchestrator:
                     change_summary=(
                         f"Previous version archived on {date.today().isoformat()}"
                     ),
-                    status='inactive',  # ← Explicitly set as inactive
+                    status='inactive',
                 )
-                logger.info(f"  ✓ Archived old content as version {old_version_id}")
+                logger.info(f"  Archived old content as version {old_version_id}")
 
-                # Step 4: archive old ANALYSIS → compliance_analysis_versions
+                # Step 4: archive old ANALYSIS -> compliance_analysis_versions
                 #         AND clear compliance_analysis
                 archived = self.repo.archive_current_analysis(
                     existing_reg_id, old_version_id
                 )
                 logger.info(
-                    f"  ✓ Archived {archived} analysis rows "
+                    f"  Archived {archived} analysis rows "
                     f"(version={old_version_id}, status=inactive)"
                 )
 
@@ -748,7 +768,7 @@ class Orchestrator:
                     updated_date=doc.published_date,
                     change_summary=f"Updated content on {date.today().isoformat()}",
                 )
-                logger.info(f"  ✓ Created new version {current_version_id}")
+                logger.info(f"  Created new version {current_version_id}")
 
                 # Step 6: update regulations row
                 self.repo.update_cbb_content_hash(existing_reg_id, content_hash)
@@ -760,7 +780,7 @@ class Orchestrator:
 
                 self.log(
                     existing_reg_id, "cbb_version", "SUCCESS",
-                    f"Versions: {old_version_id} (archived) → "
+                    f"Versions: {old_version_id} (archived) -> "
                     f"{current_version_id} (active)"
                 )
                 regulation_id = existing_reg_id
@@ -790,7 +810,7 @@ class Orchestrator:
                     change_summary="Initial crawl",
                 )
                 logger.info(
-                    f"  ✓ Created initial version {current_version_id} "
+                    f"  Created initial version {current_version_id} "
                     f"for regulation {regulation_id}"
                 )
                 self.log(
@@ -815,7 +835,7 @@ class Orchestrator:
 
         # Run analysis with version_id
         logger.info(
-            f"  → Running analysis for regulation {regulation_id}, "
+            f"  Running analysis for regulation {regulation_id}, "
             f"version {current_version_id}"
         )
         self._extract_and_analyze(doc, regulation_id, version_id=current_version_id)
@@ -834,11 +854,11 @@ class Orchestrator:
         Run content extraction then 4-stage LLM analysis.
 
         Works for ALL regulators. version_id is:
-          - None        → SAMA / SBP / SECP (no content versioning)
-          - <int>       → CBB (links compliance_analysis row to regulation_versions)
+          - None        -> SAMA / SBP / SECP (no content versioning)
+          - <int>       -> CBB (links compliance_analysis row to regulation_versions)
         """
         logger.info(
-            f"  → Extraction (regulation_id={regulation_id}, version_id={version_id})"
+            f"  Extraction (regulation_id={regulation_id}, version_id={version_id})"
         )
 
         text_content, content_type = self.extract_text_content_unified(
@@ -847,7 +867,7 @@ class Orchestrator:
 
         if not text_content or len(text_content) < MIN_TEXT_LEN:
             msg = f"Insufficient text: {len(text_content or '')} chars"
-            logger.error(f"  ✗ {msg}")
+            logger.error(f"  {msg}")
             self.log(regulation_id, "validation", "ERROR", msg)
             return
 
@@ -861,12 +881,12 @@ class Orchestrator:
 
         if success:
             logger.info(
-                f"  ✓ Analysis complete "
+                f"  Analysis complete "
                 f"(regulation_id={regulation_id}, version_id={version_id})"
             )
         else:
             logger.warning(
-                f"  ⚠ Analysis failed "
+                f"  Analysis failed "
                 f"(regulation_id={regulation_id}, version_id={version_id})"
             )
 

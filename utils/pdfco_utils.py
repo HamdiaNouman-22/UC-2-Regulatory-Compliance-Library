@@ -32,7 +32,7 @@ def pdfco_pdf_to_html(pdf_path: str, lang: str = "eng") -> str:
     headers = {"x-api-key": PDFCO_KEY}
 
     # --------------------------------------------------
-    # 1️⃣ Upload PDF
+    # 1. Upload PDF
     # --------------------------------------------------
     with open(pdf_path, "rb") as f:
         upload_resp = requests.post(
@@ -49,7 +49,7 @@ def pdfco_pdf_to_html(pdf_path: str, lang: str = "eng") -> str:
     file_url = upload_json.get("url")
 
     # --------------------------------------------------
-    # 2️⃣ Start async PDF → HTML conversion (OCR enabled)
+    # 2. Start async PDF to HTML conversion (OCR enabled)
     # --------------------------------------------------
     params = {
         "url": file_url,
@@ -85,7 +85,7 @@ def pdfco_pdf_to_html(pdf_path: str, lang: str = "eng") -> str:
     if not job_id:
         raise RuntimeError("PDF.co did not return jobId")
     # --------------------------------------------------
-    # 3️⃣ Poll job status
+    # 3. Poll job status
     # --------------------------------------------------
     while True:
         time.sleep(3)
@@ -107,7 +107,7 @@ def pdfco_pdf_to_html(pdf_path: str, lang: str = "eng") -> str:
             raise RuntimeError(f"PDF.co job failed: {check_json}")
 
     # --------------------------------------------------
-    # 4️⃣ Retrieve HTML output
+    # 4. Retrieve HTML output
     # --------------------------------------------------
 
     # Case 1: Inline HTML

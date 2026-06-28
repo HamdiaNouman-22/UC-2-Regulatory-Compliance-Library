@@ -242,14 +242,14 @@ DIRECT_JOB_MAPPING = {
     "sbp_pipeline": run_sbp_pipeline,
     "secp_pipeline": run_secp_pipeline,
     "sama_pipeline": run_sama_pipeline,
-    "cbb_monitoring": run_cbb_monitoring,  # ← ADD THIS
+    "cbb_monitoring": run_cbb_monitoring,
 }
 
 API_JOB_MAPPING = {
     "sbp_pipeline": trigger_sbp_via_api,
     "secp_pipeline": trigger_secp_via_api,
     "sama_pipeline": trigger_sama_via_api,
-    "cbb_monitoring": trigger_cbb_via_api,  # ← ADD THIS
+    "cbb_monitoring": trigger_cbb_via_api,
     "full_pipeline": trigger_full_pipeline_via_api,
 }
 
@@ -311,7 +311,7 @@ if __name__ == "__main__":
         )
 
         jobs_added += 1
-        logger.info(f"✓ Loaded job: {job_name.upper()}")
+        logger.info(f"Loaded job: {job_name.upper()}")
         logger.info(f"  Trigger: {trigger}")
         logger.info(f"  Schedule: {schedule}")
 

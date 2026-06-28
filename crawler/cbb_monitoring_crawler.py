@@ -1,10 +1,9 @@
 """
-CBB Monitoring Crawler - FIXED VERSION
-=======================================
-Fixes:
-1. doc_path now reads sidebar active trail (same as full crawler) → exact match
-2. Compliance items now include content_html
-3. TR pages store document_html and pdf_link correctly
+CBB Monitoring Crawler
+========================
+Checks for CBB regulation changes since the last crawl: queries Thomson
+Reuters for what changed in the date range, then re-scrapes only the
+affected pages (sidebar doc_path, compliance content, TR document_html/pdf_link).
 """
 
 import requests
@@ -54,13 +53,13 @@ def _fetch(url: str, params: dict = None) -> Optional[BeautifulSoup]:
         try:
             resp = SESSION.get(url, params=params, timeout=30)
             resp.raise_for_status()
-            log.info(f"✓ [{resp.status_code}] {url}")
+            log.info(f"[{resp.status_code}] {url}")
             return BeautifulSoup(resp.content, "lxml")
         except requests.RequestException as e:
             log.warning(f"Attempt {attempt}/{MAX_RETRIES} failed: {e}")
             if attempt < MAX_RETRIES:
                 time.sleep(2 ** attempt)
-    log.error(f"✗ All retries exhausted: {url}")
+    log.error(f"All retries exhausted: {url}")
     return None
 
 
@@ -230,7 +229,7 @@ def _get_laws_and_regulations_hashes() -> List[Dict]:
             "url":          LAWS_REGULATIONS_URL,
             "content_hash": content_hash,
             "content_text": content_text,
-            "content_html": content_html,       # ← fixed: was missing
+            "content_html": content_html,
             "source":       "laws_regulations",
         })
 
@@ -270,7 +269,7 @@ def _get_compliance_hashes() -> List[Dict]:
                 continue
 
             content_text = content_div.get_text(separator=" ", strip=True)
-            content_html = str(content_div)                  # ← fixed: was missing
+            content_html = str(content_div)
             content_hash = hashlib.md5(content_text.encode("utf-8")).hexdigest()
 
             items.append({
@@ -278,7 +277,7 @@ def _get_compliance_hashes() -> List[Dict]:
                 "url":          COMPLIANCE_URL,
                 "content_hash": content_hash,
                 "content_text": content_text,
-                "content_html": content_html,                # ← fixed: was missing
+                "content_html": content_html,
                 "source":       "compliance",
                 "section":      section_name,
                 "doc_path":     [REGULATOR, "Compliance", section_name, accordion_title],
@@ -397,10 +396,10 @@ def _scrape_changed_tr_page(
         year            = None,
         source_page_url = url,
         file_type       = "PDF" if primary_pdf else None,
-        document_html   = content["document_html"],   # ← stored in regulations.document_html
+        document_html   = content["document_html"],
         extra_meta      = {
-            "pdf_link":              primary_pdf,           # ← primary PDF
-            "pdf_links":             pdf_links,             # ← all PDFs
+            "pdf_link":              primary_pdf,
+            "pdf_links":             pdf_links,
             "org_pdf_link":          content["english_pdf"],
             "arabic_pdf_link":       content["arabic_pdf"],
             "download_links":        content["download_links"],
@@ -436,7 +435,7 @@ def _create_cbb_gov_bh_doc(
         year            = None,
         source_page_url = item["url"],
         file_type       = None,
-        document_html   = item.get("content_html", ""),   # ← fixed: now populated
+        document_html   = item.get("content_html", ""),
         extra_meta      = {
             "pdf_link":          None,
             "pdf_links":         [],
@@ -474,7 +473,7 @@ class CBBMonitoringCrawler:
     def fetch_documents(self, timeout=None) -> List[RegulatoryDocument]:
         from_date = self._get_last_crawl_date()
         to_date   = date.today()
-        log.info(f"=== CBB MONITORING: {from_date} → {to_date} ===")
+        log.info(f"=== CBB MONITORING: {from_date} to {to_date} ===")
 
         all_docs: List[RegulatoryDocument] = []
 
@@ -579,7 +578,7 @@ def monitor_cbb_changes():
     try:
         changed_docs = monitoring_crawler.fetch_documents()
         if not changed_docs:
-            log.info("✓ No changes detected.")
+            log.info("No changes detected.")
             return {"status": "success", "changes_detected": 0,
                     "new_processed": 0, "modified_processed": 0,
                     "message": "No CBB content changes detected"}
