@@ -88,7 +88,7 @@ MAX_RETRIES    = 3
 CBB_RULEBOOK_INDEX = "https://cbben.thomsonreuters.com/rulebook/common-volume"
 LAWS_REGULATIONS_URL = "https://www.cbb.gov.bh/laws-regulations/"
 COMPLIANCE_URL       = "https://www.cbb.gov.bh/compliance/"
-CAPITAL_MARKET_URL   = "https://cbben.thomsonreuters.com/rulebook/capital-market-regulations"
+CAPITAL_MARKET_URL = "https://cbben.thomsonreuters.com/cbb-capital-market-regulations"
 RESOLUTIONS_URL      = "https://cbben.thomsonreuters.com/rulebook/cbb-regulations-and-resolutions"
 
 SESSION = requests.Session()
@@ -356,49 +356,99 @@ def _scrape_capital_market_regulations() -> List[RegulatoryDocument]:
     docs = []
     category = "CBB Capital Market Regulations"
 
-    nav = soup.find("nav", id=re.compile(r"book-block-menu-"))
-    root = nav if nav else soup
-    seen = set()
+    marketlist = soup.find("ul", class_="marketlist")
+    if not marketlist:
+        log.error("Mode 4 — marketlist not found")
+        return []
 
-    for a in root.find_all("a", href=True):
+    try:
+        from Aml_crawler_v2 import _parse_viewall_tree, RulebookDocument as AmlDoc
+    except ImportError:
+        from cbb_test_crawlers.Aml_crawler_v2 import _parse_viewall_tree, RulebookDocument as AmlDoc
+
+    for a in marketlist.find_all("a", href=True):
         href = a["href"]
-        full_url = urljoin(BASE_URL, href)
-        if full_url in seen or not href.startswith("/rulebook/"):
-            continue
-        seen.add(full_url)
         title = a.get_text(strip=True)
-        if not title:
+        if not title or not href or href.startswith("#"):
             continue
 
+        # External PDF links — store directly as leaf regulation
+        if href.startswith("http") and "legalaffairs" in href:
+            hash_val = hashlib.md5(title.encode()).hexdigest()
+            docs.append(RegulatoryDocument(
+                regulator       = REGULATOR,
+                source_system   = "CBB-Capital-Market-Regulations",
+                category        = category,
+                title           = title,
+                document_url    = href,
+                source_page_url = CAPITAL_MARKET_URL,
+                document_html   = f'<a href="{href}">{title}</a>',
+                doc_path        = [category, title],
+                extra_meta      = {"content_text": title, "content_hash": hash_val},
+                content_hash    = hash_val,
+            ))
+            continue
+
+        # Internal links — crawl via entiresection
+        full_url = urljoin(BASE_URL, href)
+        log.info(f"Mode 4 — Crawling: {title}")
+
+        section_soup = _fetch(full_url)
+        if not section_soup:
+            continue
         time.sleep(REQUEST_DELAY)
-        page_soup = _fetch(full_url)
-        if not page_soup:
+
+        entiresection_url = None
+        for a2 in section_soup.find_all("a", href=True):
+            if "entiresection" in a2["href"]:
+                entiresection_url = urljoin(BASE_URL, a2["href"])
+                break
+
+        if not entiresection_url:
+            log.warning(f"Mode 4 — No entiresection for {title}")
             continue
 
-        body = page_soup.find("div", class_="field--name-body")
-        html = str(body) if body else ""
-        text = body.get_text(separator=" ", strip=True) if body else title
-        hash_val = hashlib.md5(text.encode()).hexdigest()
+        entire_soup = _fetch(entiresection_url)
+        if not entire_soup:
+            continue
+        time.sleep(REQUEST_DELAY)
 
-        docs.append(RegulatoryDocument(
-            regulator       = REGULATOR,
-            source_system   = "CBB-Capital-Market-Regulations",
-            category        = category,
-            title           = title,
-            document_url    = full_url,
-            source_page_url = full_url,
-            document_html   = html,
-            doc_path        = [REGULATOR, category, title],
-            extra_meta      = {
-                "content_text": text,
-                "content_hash": hash_val,
-            },
-            content_hash    = hash_val,
-        ))
+        viewall = entire_soup.find("div", id="viewall")
+        if not viewall:
+            continue
 
-    log.info(f"Mode 4 — Found {len(docs)} documents")
+        results = []
+        top_ul = viewall.find("ul", recursive=False) or viewall
+        _parse_viewall_tree(
+            top_ul,
+            [category],  # ← fixed: no duplicate section title
+            "capital_market",
+            category,
+            results,
+        )
+
+        leaves = [d for d in results if d.row_type == "R"]
+        log.info(f"Mode 4 — {title}: {len(leaves)} leaf docs")
+
+        for doc in leaves:
+            docs.append(RegulatoryDocument(
+                regulator       = REGULATOR,
+                source_system   = "CBB-Capital-Market-Regulations",
+                category        = category,
+                title           = doc.title,
+                document_url    = doc.url,
+                source_page_url = doc.url,
+                document_html   = doc.content_html,
+                doc_path        = doc.path,
+                extra_meta      = {
+                    "content_text": doc.content_text,
+                    "content_hash": doc.content_hash,
+                },
+                content_hash    = doc.content_hash,
+            ))
+
+    log.info(f"Mode 4 — Total: {len(docs)} documents")
     return docs
-
 
 # ─── Mode 5: Compliance (cbb.gov.bh #aml/#eofi) ──────────────────────────────
 def _scrape_compliance_section(section_id: str, category: str) -> List[RegulatoryDocument]:

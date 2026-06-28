@@ -1,6 +1,7 @@
 import logging
 import time
 import re
+from urllib.parse import urljoin
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -17,6 +18,21 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+_SAMA_BASE = "https://rulebook.sama.gov.sa"
+
+
+def _absolutify_links(html: str, base_url: str = _SAMA_BASE) -> str:
+    """Rewrite all relative href/src values to absolute URLs so they work when rendered outside the origin."""
+    if not html:
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(True):
+        for attr in ("href", "src"):
+            val = tag.get(attr)
+            if val and not val.startswith(("http", "mailto:", "tel:", "#", "javascript:")):
+                tag[attr] = urljoin(base_url, val)
+    return str(soup)
 
 
 @dataclass
@@ -84,7 +100,7 @@ class SAMALawsCrawler:
 
         self.driver = webdriver.Chrome(options=options)
         self.driver.implicitly_wait(10)
-        logger.info("✓ Chrome WebDriver initialized")
+        logger.info("Chrome WebDriver initialized")
 
     def _close_driver(self):
         """Close WebDriver"""
@@ -146,7 +162,7 @@ class SAMALawsCrawler:
                         'url': href
                     })
 
-            logger.info(f"✓ Found {len(tabs_data)} law tabs")
+            logger.info(f"Found {len(tabs_data)} law tabs")
 
         except Exception as e:
             logger.error(f"Error extracting law tabs: {e}")
@@ -296,14 +312,14 @@ class SAMALawsCrawler:
                 if pdf_url and not pdf_url.startswith('http'):
                     pdf_url = f"https://rulebook.sama.gov.sa{pdf_url}"
                 result['org_pdf_link'] = pdf_url
-                logger.info(f"✓ Found PDF link: {pdf_url}")
+                logger.info(f"Found PDF link: {pdf_url}")
 
                 if pdf_link:
                     pdf_url = pdf_link.get('href', '')
                     if pdf_url and not pdf_url.startswith('http'):
                         pdf_url = f"https://rulebook.sama.gov.sa{pdf_url}"
                     result['org_pdf_link'] = pdf_url
-                    logger.info(f"✓ Found PDF link: {pdf_url}")
+                    logger.info(f"Found PDF link: {pdf_url}")
 
             except Exception as e:
                 logger.warning(f"PDF download link not found: {e}")
@@ -337,8 +353,8 @@ class SAMALawsCrawler:
                         tag.decompose()
 
                     # **Convert layout tables to clean HTML**
-                    result['document_html'] = self._convert_tables_to_clean_html(str(content_copy))
-                    logger.info(f"✓ Extracted document HTML ({len(result['document_html'])} chars)")
+                    result['document_html'] = _absolutify_links(self._convert_tables_to_clean_html(str(content_copy)))
+                    logger.info(f"Extracted document HTML ({len(result['document_html'])} chars)")
                 else:
                     logger.warning("Could not find content div")
 
@@ -631,12 +647,12 @@ class SAMALawsCrawler:
                         doc.doc_path = [doc.regulator, doc.source_system, doc.category, doc.title]
 
                         documents.append(doc)
-                        logger.info(f"✓ Law {i} processed successfully")
+                        logger.info(f"Law {i} processed successfully")
 
                         time.sleep(1)
 
                     except Exception as e:
-                        logger.error(f"✗ Error processing law {i}: {e}")
+                        logger.error(f"Error processing law {i}: {e}")
                         import traceback
                         logger.error(traceback.format_exc())
                         continue
@@ -679,7 +695,7 @@ class SAMALawsCrawler:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-        logger.info(f"✓ Saved {len(documents)} documents to {filename}")
+        logger.info(f"Saved {len(documents)} documents to {filename}")
 
     def _extract_notification_number(self, text: str) -> Optional[str]:
         """Extract notification number from SBP Appendix III text"""
@@ -743,7 +759,7 @@ class SAMALawsCrawler:
                 'anchor_name': str(i)
             })
 
-            logger.info(f"✓ Found Appendix III-{i}: {notification_no or 'No ref'}")
+            logger.info(f"Found Appendix III-{i}: {notification_no or 'No ref'}")
 
         return sections
 
@@ -840,10 +856,10 @@ class SAMALawsCrawler:
                     ]
 
                     documents.append(doc)
-                    logger.info(f"✓ Section {section_num} processed")
+                    logger.info(f"Section {section_num} processed")
 
                 except Exception as e:
-                    logger.error(f"✗ Error processing section {section.get('section_number')}: {e}")
+                    logger.error(f"Error processing section {section.get('section_number')}: {e}")
                     import traceback
                     logger.error(traceback.format_exc())
                     continue

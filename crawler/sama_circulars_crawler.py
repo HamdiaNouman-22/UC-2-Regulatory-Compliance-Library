@@ -1,6 +1,7 @@
 import logging
 import time
 import re
+from urllib.parse import urljoin
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
@@ -17,6 +18,21 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+_SAMA_BASE = "https://rulebook.sama.gov.sa"
+
+
+def _absolutify_links(html: str, base_url: str = _SAMA_BASE) -> str:
+    """Rewrite all relative href/src values to absolute URLs so they work when rendered outside the origin."""
+    if not html:
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(True):
+        for attr in ("href", "src"):
+            val = tag.get(attr)
+            if val and not val.startswith(("http", "mailto:", "tel:", "#", "javascript:")):
+                tag[attr] = urljoin(base_url, val)
+    return str(soup)
 
 
 @dataclass
@@ -84,7 +100,7 @@ class SAMARulebookCrawler:
 
         self.driver = webdriver.Chrome(options=options)
         self.driver.implicitly_wait(10)
-        logger.info("✓ Chrome WebDriver initialized")
+        logger.info("Chrome WebDriver initialized")
 
     def _close_driver(self):
         """Close WebDriver"""
@@ -119,7 +135,7 @@ class SAMARulebookCrawler:
                     elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
                     if elements and elements[0].is_displayed():
                         select_element = elements[0]
-                        logger.info(f"✓ Found select element: {selector}")
+                        logger.info(f"Found select element: {selector}")
                         break
                 except:
                     continue
@@ -135,7 +151,7 @@ class SAMARulebookCrawler:
             try:
                 select = Select(select_element)
                 select.select_by_value('-1')
-                logger.info("✓ Selected 'All' via value=-1")
+                logger.info("Selected 'All' via value=-1")
             except:
                 # JavaScript fallback
                 self.driver.execute_script("""
@@ -145,7 +161,7 @@ class SAMARulebookCrawler:
                         select.dispatchEvent(new Event('change', { bubbles: true }));
                     }
                 """)
-                logger.info("✓ Selected 'All' via JavaScript")
+                logger.info("Selected 'All' via JavaScript")
 
             time.sleep(5)
 
@@ -246,13 +262,13 @@ class SAMARulebookCrawler:
                     }
 
                     rows_data.append(row_data)
-                    logger.debug(f"✓ Row {idx}: {circular_no}")
+                    logger.debug(f"Row {idx}: {circular_no}")
 
                 except Exception as e:
                     logger.error(f"Error extracting row {idx}: {e}")
                     continue
 
-            logger.info(f"✓ Extracted {len(rows_data)} rows")
+            logger.info(f"Extracted {len(rows_data)} rows")
 
         except Exception as e:
             logger.error(f"Error in _extract_table_rows: {e}")
@@ -284,7 +300,7 @@ class SAMARulebookCrawler:
                     if not pdf_url.startswith('http'):
                         pdf_url = f"https://rulebook.sama.gov.sa{pdf_url}"
                     result['org_pdf_link'] = pdf_url
-                    logger.info(f"✓ Found PDF link: {pdf_url}")
+                    logger.info(f"Found PDF link: {pdf_url}")
             else:
                 # Strategy 2: Look for any icopdf class link
                 pdf_link = soup.select_one('a.icopdf[href*=".pdf"]')
@@ -294,7 +310,7 @@ class SAMARulebookCrawler:
                         if not pdf_url.startswith('http'):
                             pdf_url = f"https://rulebook.sama.gov.sa{pdf_url}"
                         result['org_pdf_link'] = pdf_url
-                        logger.info(f"✓ Found PDF link: {pdf_url}")
+                        logger.info(f"Found PDF link: {pdf_url}")
                 else:
                     logger.warning("PDF download link not found on this circular page")
 
@@ -314,8 +330,8 @@ class SAMARulebookCrawler:
                     for tag in content_div.find_all(['div'], class_='book-notification'):
                         tag.decompose()
 
-                    result['document_html'] = str(content_div)
-                    logger.info(f"✓ Extracted document HTML ({len(result['document_html'])} chars)")
+                    result['document_html'] = _absolutify_links(str(content_div))
+                    logger.info(f"Extracted document HTML ({len(result['document_html'])} chars)")
                 else:
                     logger.warning("Could not find main content area")
 
@@ -397,13 +413,13 @@ class SAMARulebookCrawler:
                     )
                     doc.doc_path= [doc.regulator, doc.source_system, doc.category, doc.title]
                     documents.append(doc)
-                    logger.info(f"✓ Document {i} processed successfully")
+                    logger.info(f"Document {i} processed successfully")
 
                     # Small delay between requests
                     time.sleep(1)
 
                 except Exception as e:
-                    logger.error(f"✗ Error processing row {i}: {e}")
+                    logger.error(f"Error processing row {i}: {e}")
                     import traceback
                     logger.error(traceback.format_exc())
                     continue
@@ -432,7 +448,7 @@ class SAMARulebookCrawler:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-        logger.info(f"✓ Saved {len(documents)} documents to {filename}")
+        logger.info(f"Saved {len(documents)} documents to {filename}")
 
 
 # Example usage

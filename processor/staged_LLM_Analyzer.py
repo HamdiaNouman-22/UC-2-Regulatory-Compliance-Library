@@ -7,6 +7,9 @@ from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 from utils.lang_detector import detect_language
+import os
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
 LANGUAGE_NAMES = {
     "ar": "Arabic",
@@ -64,7 +67,8 @@ class StagedLLMAnalyzer:
         # Stage 1: Extract
         s1_raw = self._call_llm(
             self._prompt_stage1(text, document_title, regulator, reference, publication_date, doc_language),
-            temperature=0.1
+            temperature=0.1,
+            max_tokens=16000,
         )
         s1_data = self._parse_json(s1_raw)
         if not s1_data.get("requirements"):
@@ -72,7 +76,7 @@ class StagedLLMAnalyzer:
             return []
 
         # Stage 2+2.5: Normalize + classify
-        s2_raw  = self._call_llm(self._prompt_stage2(json.dumps(s1_data, ensure_ascii=False), doc_language), temperature=0.1)
+        s2_raw  = self._call_llm(self._prompt_stage2(json.dumps(s1_data, ensure_ascii=False), doc_language), temperature=0.1, max_tokens=16000)
         s2_data = self._parse_json(s2_raw)
 
         # Stage 3: Control design — only for Ongoing_Control obligations
