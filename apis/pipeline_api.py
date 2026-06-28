@@ -33,8 +33,8 @@ from utils.lang_translator import (
     translate_v2_gap_result,
 )
 print("=" * 100)
-print("🚀 PIPELINE_API.PY MODULE LOADED!")
-print("🔧 Python is executing this file")
+print("PIPELINE_API.PY MODULE LOADED!")
+print("Python is executing this file")
 print("=" * 100)
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,14 @@ repo = MSSQLRepository({
     "password": os.getenv("MSSQL_PASSWORD"),
     "driver":   os.getenv("MSSQL_DRIVER"),
 })
-
+_diag_logger = logging.getLogger("db_diagnostic")
+_diag_logger.info("=" * 60)
+_diag_logger.info(f"DB SERVER:   {os.getenv('MSSQL_SERVER')}")
+_diag_logger.info(f"DB NAME:     {os.getenv('MSSQL_DATABASE')}")
+_diag_logger.info(f"DB USER:     {os.getenv('MSSQL_USERNAME', '(empty = Trusted Connection)')}")
+_diag_logger.info(f"DB DRIVER:   {os.getenv('MSSQL_DRIVER')}")
+_diag_logger.info(f"DB PASS SET: {'YES' if os.getenv('MSSQL_PASSWORD') else 'NO (empty)'}")
+_diag_logger.info("=" * 60)
 gap_analyzer = GapAnalyzer()
 staged_analyzer = StagedLLMAnalyzer()
 requirement_matcher = RequirementMatcher()
@@ -574,60 +581,6 @@ _V2_GAP_TRANSLATABLE_FIELDS = [
 # These return counts/IDs/status, not document text — no translation needed.
 # Just add lang: str = Query("en") to each signature.
  
-@app.post("/trigger/full-analysis/{regulation_id}", tags=["V2 Staged Analysis"])
-def trigger_full_analysis(
-    regulation_id: int,
-    force: bool = Query(False),
-    lang: str = Query("en"),
-):
-    # body unchanged — just added lang param
-    analysis_result = {}
-    try:
-        analysis_result = trigger_staged_analysis(regulation_id, force=force)
-    except HTTPException as e:
-        raise HTTPException(
-            e.status_code,
-            f"Staged analysis failed: {e.detail if isinstance(e.detail, str) else json.dumps(e.detail)}"
-        )
- 
-    matching_result = {}
-    matching_error  = None
-    try:
-        matching_result = trigger_requirement_matching_v2(regulation_id)
-    except HTTPException as e:
-        matching_error = e.detail if isinstance(e.detail, str) else json.dumps(e.detail)
-        logger.warning(f"[full-analysis] matching failed for {regulation_id}: {matching_error}")
-    except Exception as e:
-        matching_error = str(e)
-        logger.error(f"[full-analysis] matching unexpected error {regulation_id}: {e}")
- 
-    return {
-        "success":       True,
-        "regulation_id": regulation_id,
-        "force":         force,
-        "lang":          lang,
-        "analysis": {
-            "skipped":                analysis_result.get("skipped", False),
-            "requirements_extracted": analysis_result.get("analysis", {}).get("requirements_extracted", 0),
-            "version_id":             analysis_result.get("version_id"),
-            "content_type":           analysis_result.get("content_type"),
-            "text_length":            analysis_result.get("text_length"),
-            "by_execution_category":  analysis_result.get("analysis", {}).get("by_execution_category", {}),
-            "by_criticality":         analysis_result.get("analysis", {}).get("by_criticality", {}),
-        },
-        "matching": {
-            "success": matching_error is None,
-            "error":   matching_error,
-            "summary": matching_result.get("summary", {}),
-        },
-        "next_steps": {
-            "view_full_analysis": f"GET  /compliance-analysis/{regulation_id}",
-            "view_mapping":       f"GET  /requirement-mapping/{regulation_id}",
-            "gap_analysis":       f"POST /gap-analysis/single  (form: regulation_id={regulation_id})",
-            "delete_and_rerun":   f"DELETE /admin/analysis/{regulation_id}  →  POST /trigger/full-analysis/{regulation_id}?force=true",
-        },
-    }
-
 def _run_gap_for_regulation_v2(
     session_id: int, regulation_id: int, uploaded_text: str
 ) -> RegulationGapSummary:
@@ -2392,7 +2345,61 @@ def trigger_requirement_matching_v2(regulation_id: int):
         },
     }
 
+@app.post("/trigger/full-analysis/{regulation_id}", tags=["V2 Staged Analysis"])
+def trigger_full_analysis(
+    regulation_id: int,
+    force: bool = Query(False),
+    lang: str = Query("en"),
+):
+    # body unchanged — just added lang param
+    analysis_result = {}
+    try:
+        analysis_result = trigger_staged_analysis(regulation_id, force=force)
+    except HTTPException as e:
+        raise HTTPException(
+            e.status_code,
+            f"Staged analysis failed: {e.detail if isinstance(e.detail, str) else json.dumps(e.detail)}"
+        )
+ 
+    matching_result = {}
+    matching_error  = None
+    try:
+        matching_result = trigger_requirement_matching_v2(regulation_id)
+    except HTTPException as e:
+        matching_error = e.detail if isinstance(e.detail, str) else json.dumps(e.detail)
+        logger.warning(f"[full-analysis] matching failed for {regulation_id}: {matching_error}")
+    except Exception as e:
+        matching_error = str(e)
+        logger.error(f"[full-analysis] matching unexpected error {regulation_id}: {e}")
+ 
+    return {
+        "success":       True,
+        "regulation_id": regulation_id,
+        "force":         force,
+        "lang":          lang,
+        "analysis": {
+            "skipped":                analysis_result.get("skipped", False),
+            "requirements_extracted": analysis_result.get("analysis", {}).get("requirements_extracted", 0),
+            "version_id":             analysis_result.get("version_id"),
+            "content_type":           analysis_result.get("content_type"),
+            "text_length":            analysis_result.get("text_length"),
+            "by_execution_category":  analysis_result.get("analysis", {}).get("by_execution_category", {}),
+            "by_criticality":         analysis_result.get("analysis", {}).get("by_criticality", {}),
+        },
+        "matching": {
+            "success": matching_error is None,
+            "error":   matching_error,
+            "summary": matching_result.get("summary", {}),
+        },
+        "next_steps": {
+            "view_full_analysis": f"GET  /compliance-analysis/{regulation_id}",
+            "view_mapping":       f"GET  /requirement-mapping/{regulation_id}",
+            "gap_analysis":       f"POST /gap-analysis/single  (form: regulation_id={regulation_id})",
+            "delete_and_rerun":   f"DELETE /admin/analysis/{regulation_id}  →  POST /trigger/full-analysis/{regulation_id}?force=true",
+        },
+    }
 
+    
 @app.get("/requirement-mapping/{regulation_id}", tags=["Step 2"])
 def get_requirement_mapping(regulation_id: int, lang: str = Query("en")):
     lang = _validate_lang(lang)
@@ -4076,21 +4083,6 @@ def delete_full_analysis(
     regulation_id: int,
     include_versions: bool = Query(False, description="Also delete archived compliance_analysis_versions"),
 ):
-    """
-    Delete all compliance analysis + requirement mapping data for a regulation.
- 
-    Deletes:
-      - compliance_analysis (current active rows)
-      - sama_requirement_mapping (requirement mappings)
-      - DEMO_REQUIREMENT_CONTROL_LINK (control links)
-      - DEMO_REQUIREMENT_KPI_LINK (KPI links)
- 
-    If include_versions=true also deletes:
-      - compliance_analysis_versions (CBB archived history only)
- 
-    Does NOT delete: regulation record, regulation_versions content snapshots.
-    Use this before re-running /trigger/full-analysis/{id}?force=true.
-    """
     deleted = {}
     try:
         with repo._get_conn() as conn:
@@ -4147,17 +4139,6 @@ def delete_full_analysis(
         logger.exception(f"Error deleting analysis for regulation {regulation_id}")
         raise HTTPException(500, str(e))
  
- """
-Add this endpoint to pipeline_api.py
-
-POST /regulations/add
-─────────────────────────────────────────────────────────────────────────────
-Creates a regulation record directly from JSON — no file upload required.
-Useful for adding regulations from frontend forms or external sources.
-
-After adding, you can trigger analysis separately:
-  POST /trigger/full-analysis/{regulation_id}
-"""
 
 # ── 6. POST /regulations/add — with Arabic response ──────────────────────────
  
