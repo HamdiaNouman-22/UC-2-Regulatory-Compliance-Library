@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, UploadFile, File, Form,Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -32,11 +32,6 @@ from utils.lang_translator import (
     translate_texts_batch,
     translate_v2_gap_result,
 )
-print("=" * 100)
-print("PIPELINE_API.PY MODULE LOADED!")
-print("Python is executing this file")
-print("=" * 100)
-
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Regulatory Pipeline API", version="2.0.0")
 
@@ -1748,7 +1743,7 @@ async def gap_analysis_multi(
             logger.error(f"[gap-multi] reg_id={reg_id} unexpected: {e}", exc_info=True)
  
     # Return 200 with errors array instead of raising 500
-    # Raising 500 causes frontend RxJS to call .toString() on null → crash
+    # Raising 500 causes frontend RxJS to call .toString() on null -> crash
     if not regulation_summaries:
         return JSONResponse(
             status_code=200,
@@ -2395,7 +2390,7 @@ def trigger_full_analysis(
             "view_full_analysis": f"GET  /compliance-analysis/{regulation_id}",
             "view_mapping":       f"GET  /requirement-mapping/{regulation_id}",
             "gap_analysis":       f"POST /gap-analysis/single  (form: regulation_id={regulation_id})",
-            "delete_and_rerun":   f"DELETE /admin/analysis/{regulation_id}  →  POST /trigger/full-analysis/{regulation_id}?force=true",
+            "delete_and_rerun":   f"DELETE /admin/analysis/{regulation_id} -> POST /trigger/full-analysis/{regulation_id}?force=true",
         },
     }
 
@@ -2568,11 +2563,11 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
             if len(content_text) >= 200:
                 text_content = content_text
                 content_type = "html"
-                logger.info(f"✓ Using content_text from regulation_versions ({len(text_content)} chars)")
+                logger.info(f"Using content_text from regulation_versions ({len(text_content)} chars)")
             elif len(content_html) >= 200:
                 text_content = content_html
                 content_type = "html"
-                logger.info(f"✓ Using content_html from regulation_versions ({len(text_content)} chars)")
+                logger.info(f"Using content_html from regulation_versions ({len(text_content)} chars)")
 
     # ── FOR SAMA/SBP/SECP: Check extra_meta and document_html ──
     if not text_content:
@@ -3413,7 +3408,7 @@ async def upload_regulation(
     1. Extract text (OCR/docx)
     2. LLM metadata extraction
     3. Insert into regulations table
-    4. 4-stage LLM analysis → stored in compliance_analysis (version_id=None for uploads)
+    4. 4-stage LLM analysis -> stored in compliance_analysis (version_id=None for uploads)
     5. Requirement matching
     """
     filename = file.filename or "upload"
@@ -4362,3 +4357,89 @@ def update_regulation(
         },
     }
  
+
+@app.post("/admin/fetch-and-analyze/{regulation_id}", tags=["Admin"])
+def fetch_and_analyze(regulation_id: int):
+    import httpx, tempfile
+
+    regulation = repo.get_regulation_by_id(regulation_id)
+    if not regulation:
+        raise HTTPException(404, f"Regulation {regulation_id} not found")
+
+    extra_meta = regulation.get("extra_meta") or {}
+    if isinstance(extra_meta, str):
+        try:
+            extra_meta = json.loads(extra_meta)
+        except Exception:
+            extra_meta = {}
+
+    # Get English PDF URL
+    doc_url = regulation.get("document_url")
+    download_links = extra_meta.get("download_links", [])
+    for link in download_links:
+        if link.get("language") == "english" and link.get("type") == "pdf":
+            doc_url = link.get("url")
+            break
+
+    if not doc_url:
+        raise HTTPException(422, "No document_url found")
+
+    # Download PDF with browser-like headers to avoid 403
+    tmp_path = None
+    try:
+        logger.info(f"Downloading PDF from {doc_url}")
+        resp = httpx.get(
+            doc_url,
+            timeout=60,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/pdf,application/octet-stream,*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Referer": "https://cbben.thomsonreuters.com/",
+                "Connection": "keep-alive",
+            }
+        )
+        if resp.status_code != 200:
+            raise HTTPException(422, f"PDF download failed: HTTP {resp.status_code}")
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+
+        text, _ = OCRProcessor.extract_text_from_pdf_smart(tmp_path)
+        if not text or len(text) < 200:
+            raise HTTPException(422, f"Extracted text too short: {len(text or '')} chars")
+
+        logger.info(f"Extracted {len(text)} chars from PDF")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    # Store text in extra_meta
+    extra_meta["org_pdf_text"] = text
+    with repo._get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE regulations SET extra_meta = ?, updated_at = GETUTCDATE() WHERE id = ?",
+            [json.dumps(extra_meta, ensure_ascii=False), regulation_id]
+        )
+        conn.commit()
+
+    # Now run full analysis
+    analysis_result = trigger_staged_analysis(regulation_id, force=True)
+    matching_result = {}
+    try:
+        matching_result = trigger_requirement_matching_v2(regulation_id)
+    except Exception as e:
+        matching_result = {"error": str(e)}
+
+    return {
+        "success": True,
+        "regulation_id": regulation_id,
+        "pdf_url": doc_url,
+        "text_extracted_chars": len(text),
+        "analysis": analysis_result,
+        "matching": matching_result,
+    }
