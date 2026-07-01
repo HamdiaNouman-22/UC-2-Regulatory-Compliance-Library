@@ -46,6 +46,17 @@ jobs:
       minute: 46
 
   # --------------------------------------------------------
+  # CBB Monitoring
+  # --------------------------------------------------------
+  cbb_monitoring:
+    enabled: true
+    trigger: cron
+    schedule:
+      # Run every day at 5:00 AM (Karachi time)
+      hour: 5
+      minute: 0
+
+  # --------------------------------------------------------
   # Full Pipeline (All Regulators)
   # --------------------------------------------------------
   # This is only available when using API mode
