@@ -22,14 +22,14 @@ buttons)** with its **title** — then writes it all to Excel + JSON.
 ## Run it (recommended: the Streamlit UI)
 Use the **venv** python (it has Playwright + Streamlit installed):
 ```
-venv/Scripts/python.exe -m streamlit run sidebar_crawler_standalone/app.py
+venv/Scripts/python.exe -m streamlit run generic_crawler/app.py
 ```
 Paste a start URL, choose a scope, set the page cap, press **Start**. Watch it crawl
 live, inspect the **Pages** and **Documents** tabs, download the Excel.
 
 ## Run it (command line)
 ```
-venv/Scripts/python.exe sidebar_crawler_standalone/crawler.py \
+venv/Scripts/python.exe generic_crawler/crawler.py \
   --url https://www.secp.gov.pk/laws/acts/ \
   --out output/standalone_crawler/secp_acts \
   --scope prefix --max-pages 100 --max-depth 4

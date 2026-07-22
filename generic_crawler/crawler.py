@@ -57,7 +57,7 @@ It is laid out in the order a crawl actually happens:
   E. Excel writer + CLI
 
 Run directly:
-  venv/Scripts/python.exe sidebar_crawler_standalone/crawler.py \
+  venv/Scripts/python.exe generic_crawler/crawler.py \
       --url https://rulebook.sama.gov.sa/en/regulatory-sandbox \
       --out output/standalone_crawler/sama_sandbox --scope breadcrumb --max-pages 150
 """

@@ -2,7 +2,7 @@
 Streamlit test harness for the standalone sidebar crawler.
 
 Run it with the VENV python (it has playwright + streamlit):
-  venv/Scripts/python.exe -m streamlit run sidebar_crawler_standalone/app.py
+  venv/Scripts/python.exe -m streamlit run generic_crawler/app.py
 
 Paste a URL (e.g. https://rulebook.sama.gov.sa/en/regulatory-sandbox), pick how
 far to go, press Start. You watch it walk the tree live, then see the results
