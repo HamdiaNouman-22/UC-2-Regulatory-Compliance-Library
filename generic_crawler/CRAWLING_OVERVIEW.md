@@ -108,7 +108,7 @@ the site (`dynamic_crawler/auto/`, the `generated/.../adapter.py` files).
   still needs setup, and the LLM's proposed selectors aren't always right.
 - ⚠️ More moving parts (configs, adapters, validation) — harder for a newcomer to grasp.
 
-### Approach 3 — Generic Playwright crawler  *(this folder: `sidebar_crawler_standalone/`)* — **PRESENT**
+### Approach 3 — Generic Playwright crawler  *(this folder: `generic_crawler/`)* — **PRESENT**
 A single crawler that needs **no per-site code and no per-site selectors** — just a
 **start URL** and one **scope** setting. It drives a real browser (Playwright) and uses
 general rules that work across site types: expand menus, walk every level, read frames,
@@ -200,7 +200,7 @@ Rule of thumb: **menu/tree site → `breadcrumb`; list-of-documents site → `pr
 See **`README.md`** in this folder for exact commands. In short:
 
 ```
-venv/Scripts/python.exe -m streamlit run sidebar_crawler_standalone/app.py
+venv/Scripts/python.exe -m streamlit run generic_crawler/app.py
 ```
 Paste a start URL, pick a scope, press **Start**, watch it crawl, download the Excel.
 
