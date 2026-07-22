@@ -1,0 +1,29 @@
+# ---- secrets: NEVER commit these ----
+.env
+.env.local
+*.pem
+*.key
+
+# ---- python virtual env & caches ----
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- crawl outputs / generated data (large, regenerated locally) ----
+output/
+outputs/
+downloads/
+logs/
+*.log
+html_output_all/
+html_output_common/
+
+# ---- OS / editor cruft ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
