@@ -130,7 +130,7 @@ scroll to load lazy lists, click JS pagination, and recognise "Download" buttons
 | Breaks when site redesigns | Yes, badly | Often (selectors move) | **Rarely (uses general rules)** |
 | Handles unknown site types | No | Somewhat | **Yes (frames, SPA, tables…)** |
 | Structured-field precision | Highest | High | Medium (good enough to start) |
-| Easy for a newcomer to run | No | No | **Yes (a Streamlit button)** |
+
 
 For the goal — *cover many regulators quickly and get all their documents* — the
 generic crawler wins on **coverage and speed of onboarding**. The older approaches
@@ -152,7 +152,7 @@ Honest, qualitative picture (from testing on SAMA, SBP, CMA, SECP):
 - **Structured metadata: partial.** Title, date-in-context, category, and links come
   through; very specific fields (exact reference number formats, hijri dates) are not
   yet parsed as cleanly as the hand-tuned configs did.
-- **Not magic.** Sites behind logins, CAPTCHAs, or private data APIs still need help.
+- **Weak Point:** Sites behind logins, CAPTCHAs, or private data APIs still need help.
   And a page it never *links to* can't be found by link-walking alone (that needs a
   sitemap/search index).
 
