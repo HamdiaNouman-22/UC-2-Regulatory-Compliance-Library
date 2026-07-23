@@ -1,4 +1,4 @@
-# Sidebar Crawler — standalone (the present "dynamic" crawler)
+# Generic Crawler — standalone (the present "dynamic" crawler)
 
 A **generic** web crawler for regulator sites. Give it **one start URL** and **one
 scope** setting; it discovers the documents on that site — no per-site code.
@@ -11,7 +11,7 @@ only writes into `output/standalone_crawler/`.
 
 ---
 
-## What it does (in one breath)
+## What it does 
 Opens the URL in a real browser → expands menus / reads frames / scrolls to load lists
 → walks every level → on each page records the **breadcrumb (folder path)**, the
 **page content (HTML + text)**, and every **document link (PDF, DOCX, "Download"
