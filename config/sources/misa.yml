@@ -1,0 +1,29 @@
+# MISA — Ministry of Investment of Saudi Arabia
+#
+# One file per regulator. A regulator is a LIST OF SOURCES; each source is one
+# seed URL and says how it is crawled:
+#
+#   mode: generic  -> the shared engine. No python, no selectors. Just a seed URL.
+#   mode: custom   -> a hand-written crawler class, for sites the engine can't do.
+#
+# Both produce List[RegulatoryDocument], so the pipeline cannot tell them apart.
+#
+# Run it:
+#   venv/Scripts/python.exe jobs/run_regulator.py MISA --dry-run     # nothing written
+#   venv/Scripts/python.exe jobs/run_regulator.py MISA               # full pipeline
+
+regulator: MISA
+owner: teammate B
+
+sources:
+  - name: "Laws and Regulations"
+    mode: generic
+    seed_url: "https://misa.gov.sa/activities/laws/"
+    scope: prefix          # 'auto' once auto-scope is merged
+    source_system: "MISA-LAWS"
+    category: "Laws and Regulations"
+    max_pages: 150
+    max_depth: 8
+    # Measured 2026-08-01: 94 documents — 68 PDF, 24 external law-portal pages
+    # (laws.boe.gov.sa, mc.gov.sa, moj.gov.sa, pr.gov.sa), 2 content pages,
+    # across 17 folder paths. See generic_crawler/MERGE_LOG.md.
