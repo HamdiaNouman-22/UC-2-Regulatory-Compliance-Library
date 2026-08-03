@@ -1,0 +1,80 @@
+# SDAIA — Laws and Regulations. ONE ROW PER FILE, not per card.
+#
+# The first version of this form used `div.card` as the row and took the first
+# link inside it. That captured 29 documents and silently dropped 7: six cards
+# attach more than one PDF.
+#
+#   Personal Data Protection Law …  ->  The law
+#                                       The implementing Regulation
+#                                       Regulation on Personal Data Transfer Outside the Kingdom
+#   Data classification Policy …    ->  Policies
+#                                       The implementation regulation
+#
+# 29 rows looked like a complete, stable, 100%-filled answer. It was a complete,
+# stable, 100%-filled answer to the wrong question — which is the exact failure
+# the gate cannot catch, because nothing about it is inconsistent.
+#
+# WHY NOT A LIST OF URLs PER ROW: the library's unit is one document = one file.
+# RegulatoryDocument.document_url is a single string, each file needs its own
+# content_hash for change detection, and each gets its own DB row. A list field
+# would have to be exploded back into one-row-per-file by the adapter anyway.
+# Making the ROW the file gets the same result with no new vocabulary — the card
+# it belongs to becomes the section instead.
+#
+# From `formfill inspect` (after the digest's short-text floor was fixed — it had
+# been hiding these, because "The law" is 7 characters):
+#   div.file-link-row   x36  links:36  docs:32
+#   div.card            x29  links:29  docs:29
+
+version: 1
+name: sdaia.regs
+seed_url: "https://sdaia.gov.sa/en/SDAIA/about/Pages/RegulationsAndPolicies.aspx"
+shape: list
+scope: prefix
+
+row_selector: "div.file-link-row"
+detail_link_selector: "a[href]"
+
+pagination:
+  mode: none
+  max_pages: 1
+
+fields:
+  # "The law", "Policies", "The implementing Regulation" — deliberately short,
+  # because the card title above them carries the subject. The section path is
+  # what makes each one identifiable.
+  title:
+    from: css
+    selector: "a[href]"
+    attr: text
+  document_url:
+    from: css
+    selector: "a[href]"
+    attr: href
+
+section_path:
+  prefix: ["SDAIA", "Laws and Regulations"]
+  levels:
+    # The card is the grouping: every file inside it belongs to that instrument.
+    - {ancestor: "div.card", title: "h5.card-title"}
+
+# Every row is already a PDF link — there is no detail page to open.
+fetch_details: false
+notes: "One row per PDF. Cards with several attachments produce several documents."
+meta:
+  approved: true
+  approved_by: ai.team@benchmatrix.com
+  approved_at: '2026-08-02T15:58:22+00:00'
+  form_hash: 4389353c3416
+  verify:
+    verdict: PASS
+    counts:
+    - 36
+    - 36
+    - 36
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-02T15:57:59+00:00'
+    forced: false
