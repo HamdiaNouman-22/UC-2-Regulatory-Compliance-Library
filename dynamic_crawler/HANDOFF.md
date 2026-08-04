@@ -146,6 +146,7 @@ hand-written from the digest.
 | `sama.sandbox` | 40 | PASS | ✓ | **URL set matches `generic_crawler`'s baseline exactly, 40/40.** |
 | `sdaia.regs` | 36 | PASS | ✓ | One row per PDF; 6 cards carry several files. |
 | `simah.rules` | 2 | — | ✗ | **BLOCKED by Cloudflare.** See §6. |
+| `mhrsd.regs` | **63** | PASS | ✗ | First `mode: click` pager. 4 pages (18/18/18/9), matches a manual count. `published_date` 100%. Awaiting a reviewer's approval. |
 
 "pre-hash" means approved before form hashing existed; it clears next time each
 is verified.
@@ -164,9 +165,11 @@ is verified.
 4. **SBP phase 2** has never been run: 4,160 detail pages, several hours. The
    inventory alone is what change detection needs, so this is only required if
    you want each circular's HTML.
-5. **`pagination.mode: click` walks only the first page.** SECP's "Show N
-   entries" tables need it finished; that is also the first real test of the
-   `table` shape, which is declared but untested.
+5. **`pagination.mode: click` now walks a next-button pager** (done 2026-08-03 for
+   MHRSD: 63 rows / 4 pages, 63/63/63 on verify; each turn verified against a
+   row-set fingerprint, so a dead control stops the walk). **Still open:** a
+   page-size control ("Show N entries") — that, not a next button, is what SECP
+   needs, and with it the first real test of the `table` shape.
 6. **Wire `mode: formfill` into `config/sources/*.yml`** — `pipeline.py` has
    `build_formfill_source()` ready; `build_source()` in
    `crawler/generic_crawler_wrapper.py` needs one branch added. I did not touch

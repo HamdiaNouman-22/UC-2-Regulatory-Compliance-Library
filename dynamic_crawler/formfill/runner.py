@@ -191,6 +191,45 @@ JS_EXPAND = r"""(sel) => {
   return clicked;
 }"""
 
+# --- click pagination -------------------------------------------------------
+# A JS pager offers no URL to plan with (MHRSD: <a href="#">, and ?page=N there
+# silently returns page 1). So it is walked by clicking, under the same rule as
+# generic_crawler's reveal_all_links(): CLICK AND VERIFY — a click counts as a
+# page turn only if the ROW SET changed. Without that, a dead control re-reads
+# page 1 forever and the run reports a clean multiple of the real count.
+
+# Fingerprint of the row set: count + each row's link. Cheap to poll, and page 2
+# cannot look like page 1.
+JS_ROW_SIG = r"""(a) => {
+  const rows = Array.from(document.querySelectorAll(a.rowSel));
+  return rows.length + '|' + rows.map(r => {
+    const l = r.querySelector(a.linkSel);
+    return (l && l.getAttribute('href')) || (r.innerText || '').slice(0, 40);
+  }).join('~');
+}"""
+
+# Some pagers keep "next" on the last page, hidden or disabled — existing is not
+# enough. el.click() rather than a pointer click: the pager sits below the fold
+# and these sites float chat widgets over it.
+JS_CLICK_NEXT = r"""(sel) => {
+  const usable = e => {
+    const r = e.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return false;
+    const st = getComputedStyle(e);
+    if (st.display === 'none' || st.visibility === 'hidden') return false;
+    if (e.disabled || e.getAttribute('aria-disabled') === 'true') return false;
+    return !/\bdisabled\b/.test(e.className || '');
+  };
+  const el = Array.from(document.querySelectorAll(sel)).find(usable);
+  if (!el) return 'no-control';
+  try { el.scrollIntoView({block: 'center'}); } catch (e) {}
+  try { el.click(); } catch (e) { return 'click-failed'; }
+  return 'clicked';
+}"""
+
+CLICK_SETTLE_MS = 8000    # how long a click gets to change the rows
+CLICK_POLL_MS = 250
+
 JS_TREE = r"""(cfg) => {
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
   const txt = el => clean(el.innerText || el.textContent);
@@ -307,6 +346,88 @@ def _expand(page, selector: str, rounds: int = 6) -> int:
             break
         page.wait_for_timeout(400)
     return clicked
+
+
+def _row_signature(page, row_sel: str, link_sel: str) -> str:
+    try:
+        return page.evaluate(JS_ROW_SIG, {"rowSel": row_sel, "linkSel": link_sel})
+    except Exception:
+        return ""
+
+
+def _click_through(page, pagination: dict, row_sel: str, link_sel: str,
+                   css_fields: dict, rx_fields: dict, rows: list, seen: set,
+                   section_prefix, section_levels, wait_ms: int,
+                   page_log: list) -> dict:
+    """Walk a JavaScript pager, harvesting each page. Page 1 is already harvested.
+
+    Returns {"note": ..., "warnings": [...]}. Every turn is verified against the
+    row fingerprint, so the walk stops rather than looping on a dead control.
+    """
+    next_sel = pagination.get("next_selector") or ""
+    max_pages = int(pagination.get("max_pages", 200))
+    note = {"mode": "click", "pages_walked": 1, "stopped": "", "max_pages": max_pages}
+    warns: list[str] = []
+
+    empty_streak = 0
+    page_no = 1
+    for page_no in range(2, max_pages + 1):
+        sig_before = _row_signature(page, row_sel, link_sel)
+        url_before = page.url
+        try:
+            outcome = page.evaluate(JS_CLICK_NEXT, next_sel)
+        except Exception as e:
+            outcome = f"click-error: {str(e)[:60]}"
+        if outcome != "clicked":
+            note["stopped"] = f"page {page_no}: {outcome}"
+            if page_no == 2:
+                warns.append(f"pagination.next_selector {next_sel!r} matched no usable "
+                             f"control on the seed page ({outcome}) — only page 1 was "
+                             "walked. Check it against `formfill inspect`.")
+            break
+
+        changed, waited = False, 0
+        while waited < CLICK_SETTLE_MS:
+            page.wait_for_timeout(CLICK_POLL_MS)
+            waited += CLICK_POLL_MS
+            if _row_signature(page, row_sel, link_sel) != sig_before:
+                changed = True
+                break
+        if not changed:
+            # On the last page this is normal — the control is often still there.
+            # On the FIRST turn it means the selector never worked at all.
+            note["stopped"] = f"page {page_no}: rows unchanged after click"
+            if page_no == 2:
+                warns.append(f"pagination.next_selector {next_sel!r} was clicked but the "
+                             "row set never changed — only page 1 was walked. Wrong "
+                             "selector, or this pager needs mode: custom.")
+            break
+
+        page.wait_for_timeout(wait_ms)
+        h = _harvest(page, row_sel, link_sel, css_fields, rx_fields,
+                     page.url, rows, seen, section_prefix, section_levels)
+        page_log.append({"url": f"{page.url}#page-{page_no}", "matched": h["matched"],
+                         "new": h["new"],
+                         "status": "ok-clicked" + ("-navigated" if page.url != url_before else "")})
+        note["pages_walked"] = page_no
+        emit({"event": "click_page", "page": page_no, "matched": h["matched"],
+              "new": h["new"], "rows": len(rows)})
+
+        if h["new"] == 0:
+            empty_streak += 1
+            if empty_streak >= 2:
+                note["stopped"] = f"page {page_no}: two consecutive pages added no new rows"
+                break
+        else:
+            empty_streak = 0
+    else:
+        # Ran the whole budget without the pager ending: the count is the cap.
+        note["capped_by_max_pages"] = True
+        note["planned_pages"] = note["pages_walked"]
+        note["pages_wanted"] = f"more than {note['pages_walked']}"
+        note["stopped"] = f"hit max_pages ({max_pages})"
+
+    return {"note": note, "warnings": warns}
 
 
 def _load(page, url: str, wait_ms: int, tries: int = 3) -> bool:
@@ -484,9 +605,13 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
 
             # PHASE 1 over. This is the inventory, and on its own it is what
             # change detection consumes.
-            if pagination.get("mode") == "click":
-                warnings.append("pagination mode 'click' walks only the first page in "
-                                "this version — use url_offset/url_page where possible")
+            if pagination.get("mode") == "click" and not is_tree:
+                res = _click_through(page, pagination, row_sel, link_sel, css_fields,
+                                     rx_fields, rows, seen, section_prefix,
+                                     section_levels, wait_ms, page_log)
+                plan_note = res["note"]
+                warnings.extend(res["warnings"])
+                emit({"event": "plan", "pages": plan_note["pages_walked"], **plan_note})
         finally:
             page.close()
 
