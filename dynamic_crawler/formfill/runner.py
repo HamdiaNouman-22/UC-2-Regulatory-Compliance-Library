@@ -154,7 +154,17 @@ JS_ROWS = r"""(cfg) => {
 }"""
 
 JS_DETAIL = r"""() => {
-  const pick = document.querySelector('main, [role="main"], article, #content, .content, #main');
+  // querySelector with a comma list returns the first match in DOCUMENT ORDER, not
+  // the first selector that matches: hrsd.gov.sa's stray <div class="content"> (7
+  // chars) beat <main class="main-content"> (3,639). Take the LONGEST candidate;
+  // empty ones are skipped so a page with no container still falls back to <body>.
+  let pick = null, best = 0;
+  for (const sel of ['main', '[role="main"]', 'article', '#content', '.content', '#main']) {
+    for (const el of document.querySelectorAll(sel)) {
+      const n = (el.innerText || '').trim().length;
+      if (n > best) { best = n; pick = el; }
+    }
+  }
   const src = pick || document.body || document.documentElement;
   if (!src) return {html:'', text:'', links:[]};
   const clone = src.cloneNode(true);
