@@ -22,6 +22,14 @@ import re, hashlib
 from collections import deque
 from urllib.parse import urlparse
 
+# One WAF check for both engines. It lives in its own module because crawler.py
+# imports THIS file and never the reverse, so a helper both use cannot live in
+# either of them.
+try:
+    from blockcheck import blocked_reason
+except ImportError:  # when imported as a package
+    from .blockcheck import blocked_reason
+
 # --------------------------------------------------------------------------- #
 # Shape detection
 # --------------------------------------------------------------------------- #
@@ -267,12 +275,21 @@ JS_TREE_LEAF = r"""() => {
 }"""
 
 def crawl_tree(ctx, seed_norm, out_dir, max_pages=400, max_depth=12, wait_ms=2500):
-    """Recursive rulebook-tree walk. Returns (records, documents)."""
+    """Recursive rulebook-tree walk. Returns (records, documents, note)."""
+    note = {"blocked_pages": 0, "errors": 0, "stopped": "", "resume": {}}
     seed_host = urlparse(seed_norm).netloc.lower()
     # scope anchor = the seed's own breadcrumb leaf (keeps us inside this section)
     p0 = ctx.new_page()
     try:
         p0.goto(seed_norm, wait_until="domcontentloaded", timeout=90000); p0.wait_for_timeout(wait_ms)
+        # A blocked seed makes the anchor — and therefore the scope of the whole
+        # walk — the WAF's idea of a breadcrumb.
+        reason = blocked_reason(p0)
+        if reason:
+            note["blocked_pages"] += 1
+            note["stopped"] = f"seed blocked by bot protection ({reason})"
+            print(json.dumps({"event": "blocked", "url": seed_norm,
+                              "reason": reason}), flush=True)
         seed_leaf = p0.evaluate(JS_TREE_LEAF)
     finally:
         p0.close()
@@ -297,8 +314,16 @@ def crawl_tree(ctx, seed_norm, out_dir, max_pages=400, max_depth=12, wait_ms=250
                     timeout=8000)
             except Exception:
                 pass
+            reason = blocked_reason(pg)
+            if reason:
+                note["blocked_pages"] += 1
+                if note["blocked_pages"] <= 3:
+                    print(json.dumps({"event": "blocked", "url": url,
+                                      "reason": reason}), flush=True)
+                pg.close(); continue
             d = pg.evaluate(JS_TREE_LEAF); nodes = pg.evaluate(JS_TREE_NODES)
         except Exception:
+            note["errors"] += 1
             pg.close(); continue
         pg.close()
         if d["not_found"]: continue
@@ -348,7 +373,12 @@ def crawl_tree(ctx, seed_norm, out_dir, max_pages=400, max_depth=12, wait_ms=250
                 ku = k["url"]
                 if ku not in seen and urlparse(ku).netloc.lower() == seed_host:
                     seen.add(ku); q.append((ku, depth + 1))
-    return records, list(documents.values())
+    if len(records) >= max_pages and q:
+        note["stopped"] = (f"page cap: {len(records)} of max_pages={max_pages}, "
+                           f"{len(q)} nodes still queued")
+        note["resume"] = {"pages_walked": len(records), "queued": len(q),
+                          "next_urls": [u for u, _ in list(q)[:5]]}
+    return records, list(documents.values()), note
 
 # --------------------------------------------------------------------------- #
 # TABLE strategy  (ported from the validated SAMA circulars / SECP runners)
@@ -407,12 +437,22 @@ def _table_show_all_and_pages(page, wait_ms):
     return header, list(seen.values())
 
 def crawl_table(ctx, seed_norm, out_dir, max_pages=5000, wait_ms=1200):
-    """Paginated document-table extraction. Returns (records, documents)."""
+    """Paginated document-table extraction. Returns (records, documents, note)."""
+    note = {"blocked_pages": 0, "errors": 0, "stopped": "", "resume": {}}
     page = ctx.new_page()
     try:
         page.goto(seed_norm, wait_until="domcontentloaded", timeout=90000); page.wait_for_timeout(max(3000, wait_ms))
         try: page.mouse.wheel(0, 2500); page.wait_for_timeout(800)
         except Exception: pass
+        # A table site is ONE page: if it is a challenge page there is nothing
+        # else to harvest, so stop rather than reading rows off the WAF.
+        reason = blocked_reason(page)
+        if reason:
+            note["blocked_pages"] += 1
+            note["stopped"] = f"blocked by bot protection ({reason})"
+            print(json.dumps({"event": "blocked", "url": seed_norm,
+                              "reason": reason}), flush=True)
+            return [], [], note
         # section label from breadcrumb leaf or <h1>
         sec = page.evaluate(r"""() => {
           const bc = document.querySelectorAll('.breadcrumb a, .bread-crumb a');
@@ -441,7 +481,10 @@ def crawl_table(ctx, seed_norm, out_dir, max_pages=5000, wait_ms=1200):
         "text": f"[table shape] {len(documents)} documents across {len(header)} columns: {header}",
         "html": "", "breadcrumb": [sec] if sec else [],
     }]
-    return records, list(documents.values())
+    if len(rows) > max_pages:
+        note["stopped"] = (f"row cap: kept {max_pages} of {len(rows)} table rows")
+        note["resume"] = {"rows_kept": max_pages, "rows_found": len(rows)}
+    return records, list(documents.values()), note
 
 
 # --------------------------------------------------------------------------- #
@@ -531,6 +574,8 @@ class _ResilientPage:
         self.wait_ms = wait_ms
         self.crashes = 0
         self.dead = False          # the whole context died; nothing more is possible
+        self.blocked = 0           # loads that came back as a bot-protection wall
+        self.load_failures = 0     # loads that never arrived at all
         try:
             self.page = ctx.new_page()
         except Exception:
@@ -573,18 +618,30 @@ class _ResilientPage:
                     self.page.wait_for_timeout(250)
                 if self.page.evaluate(
                         "()=>document.querySelectorAll('a[href]').length") > 15:
+                    # One check here covers every page a list crawl touches —
+                    # both phases, seed included. Retrying a challenge page only
+                    # convinces the WAF harder, so report it and give up on it.
+                    reason = blocked_reason(self.page)
+                    if reason:
+                        self.blocked += 1
+                        if self.blocked <= 3:
+                            print(json.dumps({"event": "blocked", "url": url,
+                                              "reason": reason}), flush=True)
+                        return False
                     return True
             except Exception as e:
                 msg = str(e).lower()
                 if "crash" in msg or "closed" in msg or "target" in msg:
                     self._recreate()
                     if self.dead:
+                        self.load_failures += 1
                         return False
             if attempt < tries - 1:
                 try:
                     self.page.wait_for_timeout(1500)
                 except Exception:
                     self._recreate()
+        self.load_failures += 1
         return False
 
     def evaluate(self, js):
@@ -606,7 +663,12 @@ class _ResilientPage:
 def crawl_list(ctx, seed_norm, out_dir, max_pages=200, wait_ms=1200,
                fetch_details=True, max_details=None):
     """Walk a paginated listing; optionally open each entry.
-    Returns (records, documents) in the same schema as every other walker."""
+
+    Returns (records, documents, note) in the same schema as every other walker.
+    `note` is what the walk learned about itself — blocked pages, failed loads,
+    and where it stopped — which crawler.py turns into the run's status."""
+
+    note = {"blocked_pages": 0, "errors": 0, "stopped": "", "resume": {}}
 
     # ---------------- PHASE 1: the listing ----------------
     page = _ResilientPage(ctx, wait_ms)
@@ -629,6 +691,13 @@ def crawl_list(ctx, seed_norm, out_dir, max_pages=200, wait_ms=1200,
             for i, lp in enumerate(list_pages, 1):
                 if i > 1 and not page.load(lp):
                     if page.dead:
+                        # INCOMPLETE was already the honest word here; it just had
+                        # nowhere to go but stdout. Now it reaches the run status,
+                        # with the page number a resumed run would restart from.
+                        note["stopped"] = (f"browser died on listing page {i} of "
+                                           f"{total} — listing INCOMPLETE")
+                        note["resume"] = {"listing_page": i, "of": total,
+                                          "next_url": lp}
                         print(json.dumps({"event": "error", "url": lp,
                                           "message": "browser died — listing INCOMPLETE",
                                           "pages_done": i - 1, "of": total}),
@@ -678,7 +747,9 @@ def crawl_list(ctx, seed_norm, out_dir, max_pages=200, wait_ms=1200,
 
     if not targets:
         records = [_row_record(r) for r in rows]
-        return records, []
+        note["blocked_pages"] += page.blocked
+        note["errors"] += page.load_failures
+        return records, [], note
 
     dp = _ResilientPage(ctx, wait_ms)
     try:
@@ -686,6 +757,13 @@ def crawl_list(ctx, seed_norm, out_dir, max_pages=200, wait_ms=1200,
             if not dp.load(r["href"], tries=2):
                 records.append(_row_record(r))       # keep the row even if it failed
                 if dp.dead:
+                    # Keep the rows with no detail content rather than raising, so
+                    # a crash cannot look like "this site has no documents". Record
+                    # which row to resume at.
+                    note["stopped"] = (f"browser died on detail page {i} of "
+                                       f"{len(targets)} — details INCOMPLETE")
+                    note["resume"] = {"detail_index": i, "of": len(targets),
+                                      "next_url": r["href"]}
                     print(json.dumps({"event": "error", "url": r["href"],
                                       "message": "browser died — details INCOMPLETE",
                                       "details_done": i - 1, "of": len(targets)}),
@@ -726,4 +804,6 @@ def crawl_list(ctx, seed_norm, out_dir, max_pages=200, wait_ms=1200,
     finally:
         dp.close()
 
-    return records, list(documents.values())
+    note["blocked_pages"] += page.blocked + dp.blocked
+    note["errors"] += page.load_failures + dp.load_failures
+    return records, list(documents.values()), note
