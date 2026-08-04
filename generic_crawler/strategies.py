@@ -35,7 +35,14 @@ JS_SHAPE = r"""() => {
   });
   const body = document.querySelector('.node__content');
   const hasNodeContent = !!body;
-  const hasBookMenu = document.querySelectorAll('li.menu-item a[href], .book-block-menu a[href], .book-navigation a[href]').length >= 5;
+  // Only REAL Drupal book markers. `li.menu-item` was dropped: it is the class any
+  // nav menu uses, so any site with a nav bar looked like a rulebook -- MHRSD's 40
+  // such links made it 'tree', and crawl_tree() then returned 0 pages, 0 documents.
+  // SECP has 20 and survives only because the table rule fires first.
+  // Measured 2026-08-03 (real book / generic nav links): SAMA sandbox 15/33, SAMA
+  // CB law 41/35 -- both keep 'tree'; SECP 0/20, MHRSD 0/40, SBP/MISA/SDAIA 0/0 --
+  // unchanged. Gated by calibrate_shape.py.
+  const hasBookMenu = document.querySelectorAll('.book-block-menu a[href], .book-navigation a[href], nav[id^=book-block-menu-] a[href], [id^="book-navigation"] a[href]').length >= 5;
   const hasBreadcrumb = !!document.querySelector('.breadcrumb a, .bread-crumb a');
   const hasDataTables = document.querySelectorAll('.dt-paging-button, .dataTables_paginate, .paginate_button').length > 0;
   // same-host content links in the MAIN area (exclude chrome + article citations) --
@@ -69,11 +76,15 @@ JS_SHAPE = r"""() => {
 # Only real tree markers count now: a Drupal book body, or a sizeable book/menu
 # navigation. Both SAMA tabs are detected earlier by strong signals on the seed
 # itself (hasNodeContent + hasBookMenu), so tightening this costs them nothing.
+# `li.menu-item` was removed here too, and had to be: fixing JS_SHAPE alone left
+# MHRSD falling through to this probe, whose children carry the same 40 nav links
+# and 0 book markers -- misread as a tree by a second rule. Now false for MHRSD;
+# SDAIA already was; SECP/SBP decided earlier; SAMA never reaches here (no children).
 JS_IS_TREE_NODE = r"""() => {
   if (document.querySelector('.node__content')) return true;
   const menu = document.querySelectorAll(
-    'li.menu-item a[href], .book-block-menu a[href], .book-navigation a[href], '
-    + 'nav[id^=book-block-menu-] a[href]').length;
+    '.book-block-menu a[href], .book-navigation a[href], '
+    + 'nav[id^=book-block-menu-] a[href], [id^="book-navigation"] a[href]').length;
   return menu >= 5;
 }"""
 
