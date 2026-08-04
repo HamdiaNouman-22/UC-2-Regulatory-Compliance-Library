@@ -490,9 +490,11 @@ of us arguing about it.
 
 ## 11. Limits, honestly
 
-- **`pagination.mode: click` only walks the first page.** URL-based pagination
-  (`url_offset` / `url_page`) is fully supported. SECP's "Show N entries"
-  in-page tables will need this finished.
+- **`pagination.mode: click` walks a next-button pager** (added 2026-08-03 for
+  MHRSD: 63 rows over 4 pages, 63/63/63 on verify). Each click is verified against
+  a fingerprint of the row set, so a dead control stops the walk instead of
+  re-reading page 1. **A page-size control ("Show N entries") is still not
+  handled** — that, not a next button, is what SECP needs.
 - **Trees are walked, but only via the menu.** A page reachable by no menu link
   cannot be found by walking one — that needs a sitemap or the site's search.
   `crawl_tree` has the same limit.

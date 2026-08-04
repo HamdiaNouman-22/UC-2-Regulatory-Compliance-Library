@@ -1,0 +1,63 @@
+version: 1
+name: mhrsd.regs
+seed_url: "https://www.hrsd.gov.sa/en/ministry/about-ministry/policies-strategies/regulation-and-procedures"
+shape: list
+scope: host              # documents live under /knowledge-centre/, not the seed path
+                         # (formfill records scope but does not act on it)
+
+row_selector: "div.card.has-shadow"
+detail_link_selector: "a[href]"
+
+pagination:
+  mode: click
+  next_selector: 'a[title="Go to next page"]'
+  # Must sit ABOVE the real page count (4), so the walk can attempt one more turn
+  # and observe the pager end. Exhausting max_pages is reported as a capped run,
+  # which verify treats as a failure.
+  max_pages: 12
+
+fields:
+  title:
+    from: css
+    selector: "h2.text-lg"
+    attr: text
+  document_url:
+    from: css
+    selector: "a[href]"
+    attr: href
+  published_date:
+    from: css
+    selector: "span.gregorian-date"
+    attr: text
+
+section_path:
+  prefix: ["Regulations and procedural guidelines"]
+
+fetch_details: true
+
+notes: >
+  63 regulations over 4 pages (18/18/18/9), matching a manual count of the site.
+  The pager is JavaScript — <a href="#" title="Go to next page"> — and ?page=N
+  silently returns page 1, so url_page would crawl page 1 four times and report
+  4x the rows. Hence mode: click, which walks it by clicking and verifies each
+  turn changed the row set. The walk stops on 'no-control' at page 5.
+  published_date comes from span.gregorian-date (the Gregorian half of the
+  dual Hijri date); reference numbers appear on only 3 of 63, so none is declared.
+meta:
+  approved: true
+  approved_by: Mohammad Fakih
+  approved_at: '2026-08-04T03:53:18+00:00'
+  form_hash: 8d26cdeaf63e
+  verify:
+    verdict: PASS
+    counts:
+    - 63
+    - 63
+    - 63
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+      published_date: 100.0
+    verified_at: '2026-08-04T03:49:13+00:00'
+    forced: false
