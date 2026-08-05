@@ -155,10 +155,25 @@ is verified.
 
 ## 6. Open items, in the order I would do them
 
-1. **SIMAH is blocked by Cloudflare.** We tripped it with repeated runs. The
-   crawler now detects WAF challenge pages and fails the run instead of storing
-   them, but SIMAH still needs a way through: slower pacing, or `mode: custom`.
-   Someone owns this already.
+1. **SIMAH is blocked by Cloudflare — and "slower pacing" was the wrong theory.**
+   Evidence (2026-08-04): the stored block page is a **1020-class firewall block**
+   ("Sorry, you have been blocked"), not a challenge, so there is nothing to solve
+   by rendering harder. And a full run of `simah.rules` is **two loads of one URL**
+   — volume never tripped it, **iteration did** (every selector fix, every
+   `verify --runs 3`). The blocked IP was residential (TELUS, BC), so it is not a
+   hosting-ASN ban either.
+
+   What now exists (§12): snapshots, so all development is offline, and
+   `crawler/simah_wrapper.py` — `mode: custom` owning the *fetch policy* only.
+   **What is untested: whether a headed browser profile gets through.** That is one
+   request, via `formfill snapshot`. Do not test it any other way.
+
+   If that attempt is blocked too, no local change fixes it. The routes are an
+   allowlist request to SIMAH (their block page asks for exactly that), or SAMA's
+   rulebook, which publishes both instruments in *better* shape — the Law as 17
+   articles and the Implementing Regulations as **55 articles** with a reference
+   number and Hijri date, rather than one opaque PDF. SAMA is the issuing regulator;
+   SIMAH is the licensed bureau republishing them. See `config/sources/simah.yml`.
 2. **Approve SBP.** Needs three full 139-page verify runs, ~1.5 hours. Until
    then the pipeline will refuse to run it.
 3. **Re-verify MISA and AML** so their approvals carry a form hash.
@@ -282,11 +297,30 @@ a day if it needs a new word, and the wrong tool entirely for anything in row 3.
 - **Keying documents on (url, section) double-counts.** SDAIA's "Save as PDF"
   link sits on every page of a section: three files became thirty-nine
   documents. Key on the URL; keep the other placements in `also_in`.
+- **First-sighting-wins gave anchor text the last word on titles.** With
+  `include_page`, a page links its own declared row, so the anchor lands first and
+  SIMAH's PDF became "Download PDF" — the exact thing its form file warns about.
+  `_add_document(declared=True)` now lets a form-declared title replace a scraped
+  one, and never the reverse. A no-op for any URL with only one kind of sighting,
+  which is every other form today.
 - **"Enough links" is a bad page-loaded test.** SIMAH's law page has one anchor
   until the nav renders; a >15 threshold threw the whole page away as a failed
   load. Check text length too.
 - **A WAF challenge page returns 200 and looks like content.** SIMAH's Cloudflare
   block was stored as 1,054 characters of "law" and passed every check.
+- **Deleting `<form>` deletes a SharePoint page.** ASP.NET WebForms wraps the whole
+  document in `<form id="aspnetForm">`, so `JS_DETAIL`'s cleanup step removed
+  SIMAH's entire law — 8,182 characters to 0, with 444 characters of markup left
+  and every other check still green. Forms are unwrapped now. `aml.rules` is
+  SharePoint too and only dodged this because its rows link straight to PDFs, so
+  phase 2 never ran.
+- **An exclusive accordion cannot be opened all at once.** SIMAH's 17 articles
+  share `data-bs-parent`, so bootstrap closes each panel as the next opens:
+  `expand_selector` can never have more than one open, and rendered text sees one
+  article of seventeen. `textContent` is the only fix; clicking harder is not.
+- **All three of those would have ruined a perfectly successful live crawl**, and
+  none were findable until a snapshot let the form run repeatedly offline. That is
+  the argument for §12 in one line.
 - **Do not fetch a PDF as a detail page.** It loads, has no HTML, and books as a
   failed fetch — so the file never reaches `documents` at all.
 
@@ -309,3 +343,47 @@ never by eyeballing a sample, and never by a passing verify.
 
 Every `verify_report.md` says this at the bottom on purpose. Please leave it
 there.
+
+---
+
+## 12. Snapshots — for sites that ration what we may ask (2026-08-04)
+
+Built for SIMAH, useful for any blocked or rate-limited site. **One function
+touches the live site** (`snapshot.capture`); everything else replays a saved page.
+
+```bash
+formfill snapshot <hints.yml>            # ONE live request, headed, no retry
+formfill snapshot <hints.yml> --status   # what we hold, when the next try is due
+formfill run    <hints.yml> --snapshot   # replay: zero requests
+formfill verify <hints.yml> --snapshot   # replay N times: zero requests
+```
+
+The clock, in `SnapshotStore`, is the part that matters — nobody decides by hand
+when to poke a blocked site, because a human under deadline always decides *now*:
+
+| | |
+|---|---|
+| blocked attempt | backs off 6h → 24h → 72h → 7d → 14d, and **never retries** |
+| load failure (timeout/DNS) | recorded, but does **not** earn the block backoff — the site did not refuse us |
+| successful capture | resets the backoff, and **diffs the content hash** — a change is the monitoring signal |
+| `fresh` / `aging` / `stale` | within `max_age_days` / past it and due for refresh / past `grace_days` with every refresh blocked |
+| `stale` | the crawler **raises**. A replay served forever would tell change detection "unchanged" while the law was amended |
+
+**A snapshot is ONE page, so it replays a one-page form and nothing else.** `run`
+and `verify` refuse `--snapshot` on a paginated form or a tree, because both
+alternatives are worse than an error: fetching pages 2..N would generate exactly
+the traffic the flag promises to avoid, and skipping them would report a fraction
+of the site as the whole of it. SBP's 139 listing pages and SAMA's 40-node tree
+need the network; SIMAH's single law page does not.
+
+Two more deliberate limits:
+
+- **A challenge page is never saved.** That is how the block became 1,054
+  characters of "law" in the first place.
+- **A snapshot verify cannot approve a form.** N runs against one saved file agree
+  by construction; it proves the form reads *that page*, not that the site is
+  stable. `approve` refuses it, and a `--force` override is stamped into the form.
+
+`<base href>` is injected into every replay. Fields read `el.href` — the resolved
+property — so without it SIMAH's relative PDF link resolves against `about:blank`
+and `document_url` is quietly wrong.

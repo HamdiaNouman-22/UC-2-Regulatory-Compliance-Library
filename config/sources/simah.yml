@@ -1,0 +1,60 @@
+# SIMAH — Saudi Credit Bureau
+#
+# ⚠ DISABLED ON PURPOSE. Uncomment the source below only when BOTH are true:
+#     1. a snapshot exists            (formfill snapshot dynamic_crawler/hints/simah.rules.yml)
+#     2. a human has approved the form after seeing a real capture
+#   Until then this file documents the intent and nothing runs — the same pattern
+#   as SAMA's disabled generic sources in sama.yml.
+#
+# WHY THIS SOURCE IS `mode: custom` WHEN A FORM ALREADY DESCRIBES THE PAGE
+#
+#   The page is easy: dynamic_crawler/hints/simah.rules.yml reads it in twelve
+#   fields. What a form cannot express is HOW OFTEN WE MAY ASK. simah.com sits
+#   behind a Cloudflare firewall rule that returns "Sorry, you have been blocked"
+#   (a 1020-class block, not a challenge — there is nothing to solve), and on
+#   2026-07-30 that page was stored as 1,054 characters of "law".
+#
+#   So crawler/simah_wrapper.py owns the FETCH POLICY only — snapshot-first, at
+#   most one live navigation per run, never a retry after a block, exponential
+#   backoff (6h/24h/72h/7d/14d), and a hard refusal once the snapshot is past its
+#   grace period. Extraction still comes from the form and mapping from
+#   FormfillCrawler, so no selectors and no mapping logic live in that file.
+#
+# WHAT WE KNOW (2026-08-04)
+#   * A full run of this form is TWO loads of one URL, so volume never tripped the
+#     rule — repeated ITERATION did.
+#   * The blocked IP was residential (TELUS fibre, BC), not a datacentre range, so
+#     this is not a blanket hosting-ASN ban. Untested: whether a headed browser
+#     profile passes, which is what `formfill snapshot` exists to find out in one
+#     request.
+#   * The same two instruments are on SAMA's rulebook in BETTER shape — the Law as
+#     17 articles and the Implementing Regulations as 55 articles with a reference
+#     number and Hijri date, rather than one opaque PDF. If SIMAH stays blocked,
+#     that is the route, and SAMA is the issuing regulator anyway.
+
+regulator: SIMAH
+owner: ai.team
+
+sources: []
+
+# - name: "Rules and Regulations"
+#   mode: custom
+#   crawler_class: "crawler.simah_wrapper.SimahCrawler"
+#   init_kwargs:
+#     regulator: "SIMAH"
+#     source_system: "SIMAH-RULES"
+#     category: "Rules and Regulations"
+#     # The form cannot be approved from a snapshot (three runs against one saved
+#     # page agree by construction), and it cannot be verified live while access is
+#     # this fragile — so running it at all needs this. It bypasses the GATE only:
+#     # it does not cause a request. Whether the network is touched is decided by
+#     # the snapshot clock below, never by this flag.
+#     require_approved: false
+#     # Refresh the snapshot after this many days; refuse to publish past grace.
+#     max_age_days: 30
+#     grace_days: 90
+#     # allow_live: false makes the crawler provably incapable of generating
+#     # traffic, whatever the clock says — use it while the block is active, or any
+#     # time you want a guaranteed-offline run.
+#     allow_live: true
+#     headed: true

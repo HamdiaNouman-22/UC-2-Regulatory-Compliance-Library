@@ -158,21 +158,54 @@ JS_DETAIL = r"""() => {
   // the first selector that matches: hrsd.gov.sa's stray <div class="content"> (7
   // chars) beat <main class="main-content"> (3,639). Take the LONGEST candidate;
   // empty ones are skipped so a page with no container still falls back to <body>.
+  // Platform conventions belong here, the same way [id^="book-navigation"] encodes
+  // Drupal: DeltaPlaceHolderMain is SharePoint's main-content placeholder. On
+  // SIMAH it holds the law and nothing else (9,016 chars) while the next container
+  // up adds the ribbon, "Sign In" and the footer (29,555).
+  const SELS = ['main', '[role="main"]', 'article', '#content', '.content', '#main',
+                '[id^="DeltaPlaceHolderMain"]', '.article-content'];
   let pick = null, best = 0;
-  for (const sel of ['main', '[role="main"]', 'article', '#content', '.content', '#main']) {
+  for (const sel of SELS) {
     for (const el of document.querySelectorAll(sel)) {
       const n = (el.innerText || '').trim().length;
       if (n > best) { best = n; pick = el; }
     }
   }
+  // SECOND PASS, only when nothing scored: innerText reports RENDERED text, so a
+  // page whose content sits in collapsed panels scores zero everywhere. SIMAH's law
+  // is 17 articles in an EXCLUSIVE bootstrap accordion (data-bs-parent), so at most
+  // one can be open at a time and clicking cannot defeat that — innerText sees one
+  // article of seventeen. textContent does not care about rendering. Kept as a
+  // fallback rather than the default so that on a normal page the visible main
+  // content still wins, exactly as before.
+  if (!pick) {
+    for (const sel of SELS) {
+      for (const el of document.querySelectorAll(sel)) {
+        const n = (el.textContent || '').trim().length;
+        if (n > best) { best = n; pick = el; }
+      }
+    }
+  }
   const src = pick || document.body || document.documentElement;
   if (!src) return {html:'', text:'', links:[]};
   const clone = src.cloneNode(true);
-  clone.querySelectorAll('script,style,noscript,nav,aside,header,footer,form').forEach(n=>n.remove());
+  clone.querySelectorAll('script,style,noscript,nav,aside,header,footer').forEach(n=>n.remove());
+  // <form> is UNWRAPPED, not removed. SharePoint / ASP.NET WebForms wrap the entire
+  // page in <form id="aspnetForm">, so removing forms deleted SIMAH's whole law:
+  // 8,182 characters of articles became 0, with a 444-character husk of markup left
+  // behind and every other check still passing. Unwrapping drops the form semantics
+  // and keeps the content.
+  clone.querySelectorAll('form').forEach(f => {
+    while (f.firstChild) f.parentNode.insertBefore(f.firstChild, f);
+    f.remove();
+  });
   const links = Array.from(src.querySelectorAll('a[href]'))
     .filter(a => !a.closest('header, footer, nav, [role="banner"], [role="contentinfo"]'))
     .map(a => ({href:a.href, text:(a.innerText||'').replace(/\s+/g,' ').trim().slice(0,200)}));
-  return {html: clone.innerHTML, text:(clone.innerText||'').trim(), links};
+  // The clone is detached, so it has no layout and innerText is unreliable on it —
+  // another reason textContent has to be the fallback here.
+  return {html: clone.innerHTML,
+          text:(clone.innerText || clone.textContent || '').trim(), links};
 }"""
 
 JS_HREFS = "() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href)"
@@ -440,9 +473,37 @@ def _click_through(page, pagination: dict, row_sel: str, link_sel: str,
     return {"note": note, "warnings": warns}
 
 
-def _load(page, url: str, wait_ms: int, tries: int = 3) -> bool:
+# SNAPSHOTS — develop a form against a page we already have.
+#
+# One full run of SIMAH's form is TWO loads of one URL, so volume never tripped
+# Cloudflare: ITERATION did. Every selector fix and every `verify --runs 3` was
+# more live traffic for no new information. Capture once, then run offline.
+#
+# `<base href>` is not optional. Fields read `el.href` (the RESOLVED property, see
+# JS_ROWS), so without it every relative link resolves against about:blank and
+# document_url comes out quietly wrong.
+_BASE_RE = re.compile(r"<base\b", re.I)
+
+
+def snapshot_html(html: str, base_url: str) -> str:
+    """Saved page + a <base>, so relative links resolve as they did live."""
+    if _BASE_RE.search(html or ""):
+        return html
+    tag = f'<base href="{base_url}">'
+    m = re.search(r"<head[^>]*>", html or "", re.I)
+    return (html[:m.end()] + tag + html[m.end():]) if m else tag + (html or "")
+
+
+def _load(page, url: str, wait_ms: int, tries: int = 3, snap: str | None = None) -> bool:
     """These sites are flaky. An empty page must never be read as 'no rows' —
-    that is exactly the silent failure that puts holes in the library."""
+    that is exactly the silent failure that puts holes in the library.
+
+    `snap` is saved HTML: serve it instead of fetching, and touch no network.
+    """
+    if snap is not None:
+        page.set_content(snapshot_html(snap, url), wait_until="domcontentloaded")
+        page.wait_for_timeout(min(wait_ms, 300))
+        return True
     for _ in range(tries):
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=90000)
@@ -480,8 +541,15 @@ def _load(page, url: str, wait_ms: int, tries: int = 3) -> bool:
 
 def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 1200,
         fetch_details: bool | None = None, max_details: int | None = None,
-        max_pages: int | None = None, write_excel: bool = True) -> dict:
-    """Crawl `hints['seed_url']` exactly as the form says. Returns a run summary."""
+        max_pages: int | None = None, write_excel: bool = True,
+        snapshot: str | Path | None = None) -> dict:
+    """Crawl `hints['seed_url']` exactly as the form says. Returns a run summary.
+
+    `snapshot` is a saved copy of the seed page. Given one, the run makes NO
+    network requests: the same form, the same extraction, replayed against the
+    saved HTML. The summary records `source: snapshot` so a replay can never be
+    mistaken for a crawl of the live site.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -512,6 +580,40 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
     is_tree = hints.get("shape") == "tree"
     tree_max_nodes = int((hints.get("tree") or {}).get("max_nodes", 1000))
 
+    # Read the snapshot ONCE. A missing file is a hard error, not a silent
+    # fallthrough to the live site: the whole point is that this run cannot
+    # generate traffic, and quietly crawling instead is the surprise that costs
+    # an IP block.
+    snap_html: str | None = None
+    if snapshot is not None:
+        snap_path = Path(snapshot)
+        if not snap_path.exists():
+            raise FileNotFoundError(
+                f"snapshot not found: {snap_path}. Capture one with "
+                f"`formfill snapshot {hints.get('name')}` — this run will not go live.")
+        snap_html = snap_path.read_text(encoding="utf-8")
+
+        # A SNAPSHOT IS ONE PAGE, so it can only replay a one-page form.
+        #
+        # Refused rather than half-served, because both alternatives are worse than
+        # an error: fetching pages 2..N would generate exactly the live traffic a
+        # snapshot exists to avoid, and skipping them would report a fraction of the
+        # site as if it were the whole thing. SBP's 139 listing pages and SAMA's
+        # 40-node tree need the network; SIMAH's single law page does not.
+        mode = (pagination.get("mode") or "none").lower()
+        if mode != "none":
+            raise ValueError(
+                f"{hints.get('name')}: --snapshot only works on a single-page form, "
+                f"and this one paginates (mode: {mode}). One saved page cannot stand "
+                f"in for a walk of many, and serving it for page 1 while fetching the "
+                f"rest would put live traffic behind a flag that promises none.")
+        if hints.get("shape") == "tree":
+            raise ValueError(
+                f"{hints.get('name')}: --snapshot only works on a single-page form, "
+                f"and shape: tree discovers its nodes by visiting them — the seed's "
+                f"menu shows a fraction of the tree (20 of SAMA's 40), so a replay "
+                f"would silently report that fraction as the whole rulebook.")
+
     rows: list[dict] = []
     seen: set[str] = set()
     page_log: list[dict] = []
@@ -529,7 +631,7 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
 
         # ---------------- PHASE 1: the listing ----------------
         try:
-            if not _load(page, seed, wait_ms):
+            if not _load(page, seed, wait_ms, snap=snap_html):
                 warnings.append("seed page failed to load after 3 attempts")
             blocked_reason = _blocked(page)
             if blocked_reason:
@@ -648,10 +750,21 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                     if r["href"] and _is_doc(r["href"]):
                         _add_document(documents, r["href"], r["title"],
                                       r.get("found_on") or seed,
-                                      " > ".join(r.get("section_trail") or []) or section)
+                                      " > ".join(r.get("section_trail") or []) or section,
+                                      declared=True)      # the form named this row
                         records.append(_record(r, section, seed))
                         continue
-                    if not r["href"] or not _load(dp, r["href"], wait_ms, tries=2):
+                    # On a snapshot run the only page we hold is the seed, so a
+                    # row pointing at it (include_page) replays; any other row
+                    # would need the network and is left without detail content
+                    # rather than quietly fetched.
+                    row_snap = snap_html if (snap_html is not None
+                                             and r["href"] == seed) else None
+                    if snap_html is not None and row_snap is None:
+                        records.append(_record(r, section, seed))
+                        continue
+                    if not r["href"] or not _load(dp, r["href"], wait_ms, tries=2,
+                                                  snap=row_snap):
                         records.append(_record(r, section, seed))
                         continue
                     # Phase 2 loads a fresh tab, so anything the form expanded in
@@ -706,8 +819,10 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                         h = l.get("href") or ""
                         if h.startswith("http") and _is_doc(h):
                             doc_links.append(h)
+                            # Scraped from an anchor: keeps the title only if no
+                            # declared row claims this file (see _add_document).
                             _add_document(documents, h, l.get("text") or r["title"],
-                                          r["href"], row_path)
+                                          r["href"], row_path, declared=False)
                     records.append(_record(r, section, seed, {
                         "n_pdfs": len(doc_links),
                         "pdf_links": " | ".join(doc_links),
@@ -726,7 +841,8 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
             for r in rows:
                 if r["href"] and _is_doc(r["href"]):
                     _add_document(documents, r["href"], r["title"], seed,
-                                  " > ".join(r.get("section_trail") or []) or section)
+                                  " > ".join(r.get("section_trail") or []) or section,
+                                  declared=True)
 
         browser.close()
 
@@ -754,6 +870,12 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
         "phase2_ran": bool(targets),
         "fill_rates": _fill_rates(rows, hints),
         "blocked_pages": blocked,
+        # Provenance. A replay produces the same rows as a crawl, which is what
+        # makes it useful and also what makes it dangerous: unlabelled, a snapshot
+        # run would tell change detection "unchanged" forever while the site moved
+        # on. Everything downstream reads this.
+        "source": "snapshot" if snap_html is not None else "live",
+        "snapshot": str(snapshot) if snap_html is not None else "",
         "warnings": warnings,
         "pages": page_log,
     }
@@ -765,6 +887,7 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
 
     (out / "pages.json").write_text(json.dumps(
         {"seed": seed, "shape": hints.get("shape"), "engine": "formfill",
+         "source": summary["source"], "snapshot": summary["snapshot"],
          "pages": records, "documents": docs}, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "rows.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "run.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -932,7 +1055,8 @@ def _fill_rates(rows: list[dict], hints: dict) -> dict:
             for t in targets}
 
 
-def _add_document(documents: dict, url: str, title: str, found_on: str, section: str) -> None:
+def _add_document(documents: dict, url: str, title: str, found_on: str, section: str,
+                  declared: bool = False) -> None:
     """One row per FILE, not one per place the file is linked from.
 
     generic_crawler keys documents on (url, section_path) so a document
@@ -945,6 +1069,22 @@ def _add_document(documents: dict, url: str, title: str, found_on: str, section:
     is the shallowest one), and the other placements are kept in `also_in` rather
     than thrown away. Deduplicated, the sandbox reports 3 — which is what
     generic_crawler's baseline says too.
+
+    `declared` says WHERE the title came from, and it is the one thing that can
+    overwrite an existing one:
+
+        declared=True   the form named this row a document entry and the gate
+                        measured how often that field fills. SIMAH's <h6> is
+                        "The Implementing Regulations for Credit Information Law".
+        declared=False  scraped from an anchor while scanning a page. SIMAH's
+                        anchor text is "Download PDF", which is not a title — the
+                        form file says so in a comment.
+
+    First-sighting-wins gave the anchor the last word whenever a page linked its own
+    declared row (`include_page`), so the library got "Download PDF". A declared
+    title now replaces a scraped one; nothing else about precedence changes, and a
+    declared title is never downgraded. Where a URL has only one kind of sighting —
+    every other form today — this is a no-op.
     """
     d = documents.get(url)
     if d is None:
@@ -956,9 +1096,13 @@ def _add_document(documents: dict, url: str, title: str, found_on: str, section:
             "section_path": section,
             "times_linked": 1,
             "also_in": "",
+            "title_declared": bool(declared),
         }
         return
     d["times_linked"] += 1
+    if declared and not d.get("title_declared") and (title or "").strip():
+        d["title"] = title
+        d["title_declared"] = True
     if section and section != d["section_path"]:
         others = [s for s in d["also_in"].split(" | ") if s]
         if section not in others and len(others) < 20:
