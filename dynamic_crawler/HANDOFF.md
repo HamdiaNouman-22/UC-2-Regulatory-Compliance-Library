@@ -147,6 +147,8 @@ hand-written from the digest.
 | `sdaia.regs` | 36 | PASS | ✓ | One row per PDF; 6 cards carry several files. |
 | `simah.rules` | 2 | — | ✗ | **BLOCKED by Cloudflare.** See §6. |
 | `mhrsd.regs` | **63** | PASS | ✗ | First `mode: click` pager. 4 pages (18/18/18/9), matches a manual count. `published_date` 100%. Awaiting a reviewer's approval. |
+| `gosi.social_insurance` | **6** | PASS | ✗ | First `panels`. Live 3× verify **6/6/6, 0% spread**, phase 2 included: 6 instruments (366,269 chars) + 6 PDFs. Awaiting a reviewer's approval. |
+| `gosi.saned` | **2** | PASS | ✗ | Live 3× verify **2/2/2, 0% spread**, 41,874 chars, no attached PDFs. Awaiting a reviewer's approval. |
 
 "pre-hash" means approved before form hashing existed; it clears next time each
 is verified.
@@ -185,11 +187,24 @@ is verified.
    row-set fingerprint, so a dead control stops the walk). **Still open:** a
    page-size control ("Show N entries") — that, not a next button, is what SECP
    needs, and with it the first real test of the `table` shape.
-6. **Wire `mode: formfill` into `config/sources/*.yml`** — `pipeline.py` has
+6. **GOSI is verified live and needs only approval** (2026-08-05). Both forms
+   PASS 3 live runs with phase 2 included — `gosi.social_insurance` 6/6/6 (6
+   instruments, 366,269 chars, 6 PDFs) and `gosi.saned` 2/2/2 (41,874 chars) —
+   and both live totals match the earlier snapshot figures to the character, which
+   is two independent page loads agreeing. Run `approve --by "<name>"` after
+   eyeballing the page against the inventory sheet (§7.1 step 4).
+
+   **The five sibling law pages are OUT OF SCOPE** — `/Civil`, `/Military`,
+   `/BenefitExchange`, `/InsuranceProtection`, `/Books`. This UC covers the Social
+   Insurance Law and the SANED Law only; an earlier draft of this list told the
+   next person to crawl the family, which would have pulled in five instruments
+   nobody asked for. Do not inspect them without a scope change.
+   See `UC-2-Scratch/GOSI_FINDINGS.md`.
+7. **Wire `mode: formfill` into `config/sources/*.yml`** — `pipeline.py` has
    `build_formfill_source()` ready; `build_source()` in
    `crawler/generic_crawler_wrapper.py` needs one branch added. I did not touch
    that file because another session was editing it.
-7. **Audit MISA's 89 for multi-file rows**, the way SDAIA turned out to have
+8. **Audit MISA's 89 for multi-file rows**, the way SDAIA turned out to have
    them. AML is checked (11 rows, 11 files). MISA is not.
 
 ---
@@ -323,6 +338,11 @@ a day if it needs a new word, and the wrong tool entirely for anything in row 3.
   the argument for §12 in one line.
 - **Do not fetch a PDF as a detail page.** It loads, has no HTML, and books as a
   failed fetch — so the file never reaches `documents` at all.
+- **A new shape-ish word must be added to `verify`'s phase-2 list too.** `verify`
+  runs phase 1 only, and excepts `shape: tree` and `include_page` because their
+  documents are *made* in phase 2. `panels` was not added, so GOSI passed
+  **6/6/6, 0% spread, fill 100%, `documents: 0`** — a green gate over a form that
+  had captured nothing. Ask of every new word: does phase 1 alone prove anything?
 
 ---
 

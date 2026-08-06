@@ -495,6 +495,16 @@ of us arguing about it.
   a fingerprint of the row set, so a dead control stops the walk instead of
   re-reading page 1. **A page-size control ("Show N entries") is still not
   handled** — that, not a next button, is what SECP needs.
+- **`panels` covers tab strips whose tabs are fragments** (added 2026-08-05 for
+  GOSI: six legal instruments on one url, 1 captured before). Panels are read
+  with `textContent` and never clicked — on GOSI the *active* panel reports 279
+  characters of innerText against 82,064, because its accordions are collapsed.
+  **Still open:** a row inside a panel that holds more than one file yields only
+  the first, so the section-level GOSI form gets 3 of 6 PDFs — SDAIA's bug in §9,
+  and the same fix applies (make the row the file). Verified live 2026-08-05:
+  6/6/6 and 2/2/2, 0% spread, and both text totals matched the snapshot figures
+  to the character. `verify` had to be taught that a `panels` form needs phase 2
+  — see `HANDOFF.md` §9.
 - **Trees are walked, but only via the menu.** A page reachable by no menu link
   cannot be found by walking one — that needs a sitemap or the site's search.
   `crawl_tree` has the same limit.

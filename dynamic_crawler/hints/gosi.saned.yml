@@ -1,0 +1,48 @@
+# GOSI — SANED (unemployment insurance). TWO instruments on one url, same tabbed
+# shape as gosi.social_insurance.yml:
+#
+#   #1  Laws of Unemployment Insurance (SANED)   29 sections
+#   #2  Regulations for Implementations          22 sections
+#
+# generic_crawler kept panel #2 only, because it is the longer of the two — which
+# is why "the crawler picked the right one" is never a safe assumption here.
+
+version: 1
+name: gosi.saned
+seed_url: "https://www.gosi.gov.sa/en/SystemsAndRegulations/Saned"
+shape: list
+scope: prefix
+
+panels:
+  tabs: "ul.tabs.blocksTabs li.tab a"
+  include_panel: true
+
+pagination:
+  mode: none
+  max_pages: 1
+
+section_path:
+  from_breadcrumb: "ul.cmBreadcrumb a"
+  drop_first: 1
+  prefix: ["GOSI", "Systems and Regulations"]
+
+fetch_details: true
+notes: "Two instruments in fragment-addressed tab panels; each panel's text is the document."
+meta:
+  approved: true
+  approved_by: Mohammad Fakih
+  approved_at: '2026-08-06T03:20:34+00:00'
+  form_hash: 2239e87e2b95
+  verify:
+    verdict: PASS
+    counts:
+    - 2
+    - 2
+    - 2
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-06T03:04:02+00:00'
+    source: live
+    forced: false
