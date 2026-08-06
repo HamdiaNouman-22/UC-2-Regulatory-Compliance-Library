@@ -70,7 +70,8 @@ class SimahCrawler(FormfillCrawler):
                  max_age_days: int = DEFAULT_MAX_AGE_DAYS,
                  grace_days: int = DEFAULT_GRACE_DAYS,
                  allow_live: bool = True,
-                 headed: bool = True):
+                 headed: bool = True,
+                 repo=None):
         super().__init__(hints_path=hints_path, regulator=regulator,
                          source_system=source_system, category=category,
                          out_dir=out_dir, require_approved=require_approved,
@@ -84,6 +85,11 @@ class SimahCrawler(FormfillCrawler):
         self.allow_live = allow_live
         self.headed = headed
         self.last_capture: dict = {}
+        # Optional: with a repo, fetch_documents() classifies each document as
+        # new or modified (see _classify). Without one it behaves exactly as
+        # before — every document arrives as `new`. Passing it is what turns
+        # change detection on, so a dry run stays a pure read.
+        self.repo = repo
 
     # ------------------------------------------------------------------ #
     #  the policy                                                          #
@@ -178,6 +184,82 @@ class SimahCrawler(FormfillCrawler):
 
     def _doc_from_document_row(self, d: dict, shape: str):
         return self._stamp(super()._doc_from_document_row(d, shape))
+
+    # ------------------------------------------------------------------ #
+    #  change detection                                                    #
+    # ------------------------------------------------------------------ #
+
+    def fetch_documents(self, *a, **kw):
+        """The parent's documents, each labelled `new` or `modified`.
+
+        Without a repo this is the parent's behaviour unchanged.
+        """
+        docs = super().fetch_documents(*a, **kw)
+        if self.repo is None:
+            logger.info("SIMAH: no repo supplied — every document arrives as `new`")
+            return docs
+        return [self._classify(d) for d in docs if d is not None]
+
+    def _classify(self, doc):
+        """Compare this document's hash against the stored one.
+
+        The runner already hashes every row, so this only compares. The page
+        row's hash covers ~9,000 chars of article text — the real signal.
+
+        BLIND SPOT: the runner hashes a PDF row as `url|title`, not content, so
+        an amended PDF at the same URL never reports modified. Fixing it means
+        hashing the downloaded bytes, or reading the PDF's ETag — simah.com is
+        SharePoint, which returns `ETag: "{GUID},<version>"` where the integer
+        is an edit counter, readable with a 2-byte range GET. Untested here;
+        the next live capture is the cheap place to try it. Flagged below rather
+        than left to look covered.
+        """
+        meta = doc.extra_meta
+        new_hash = (getattr(doc, "content_hash", "") or "").strip()
+        is_pdf = (getattr(doc, "file_type", "") or "").upper() == "PDF"
+        meta["hash_covers_content"] = not is_pdf
+        if is_pdf:
+            meta["hash_basis"] = "url+title (identity only — cannot detect an edit)"
+
+        rid = None
+        try:
+            rid = self.repo.get_regulation_id_by_document_url(
+                doc.document_url, self.regulator)
+        except Exception as e:                       # a lookup failure must not
+            logger.error("SIMAH: id lookup failed for %s: %s",  # lose the document
+                         doc.document_url, e)
+
+        if not rid:
+            meta["monitoring_status"] = "new"
+            return doc
+
+        stored = None
+        try:
+            stored = self.repo.get_cbb_content_hash(rid)   # generic despite the name:
+        except Exception as e:                             # plain content_hash on
+            logger.error("SIMAH: hash read failed for %s: %s", rid, e)  # regulations
+
+        meta["existing_regulation_id"] = rid
+        meta["content_hash"] = new_hash
+        meta["previous_content_hash"] = stored or ""
+
+        if stored and new_hash and stored == new_hash:
+            meta["monitoring_status"] = "unchanged"
+            logger.info("SIMAH: unchanged — %s", (doc.title or "")[:60])
+        elif not stored:
+            # Known to us but never hashed — a row inserted before change
+            # detection existed. Record the hash without claiming an amendment
+            # we cannot evidence.
+            meta["monitoring_status"] = "unchanged"
+            meta["hash_backfill"] = True
+            logger.info("SIMAH: no stored hash, backfilling — %s",
+                        (doc.title or "")[:60])
+        else:
+            meta["monitoring_status"] = "modified"
+            logger.warning("SIMAH: MODIFIED — %s (%s -> %s)",
+                           (doc.title or "")[:60], (stored or "")[:12],
+                           new_hash[:12])
+        return doc
 
 
 __all__ = ["SimahCrawler"]

@@ -540,6 +540,175 @@ class Orchestrator:
 
         logger.warning(f"  CBB pipeline complete. Processed {len(docs_to_process)} documents.")
 
+    # ================================================================== #
+    #  SIMAH — the only non-CBB path that versions a modified document     #
+    # ================================================================== #
+
+    def run_for_simah(self):
+        """New documents plus amended ones.
+
+        Separate from `run_for_regulator`, which discards existing docs and so
+        can never report a modification. Scoped to SIMAH on purpose — no shared
+        method is modified, and no other regulator calls this.
+        """
+        logger.warning("=== RUNNING REGULATOR: SIMAH ===")
+        docs = self.crawler.fetch_documents()
+        logger.warning(f"Fetched {len(docs)} documents from crawler")
+
+        buckets = {"new": [], "modified": [], "unchanged": []}
+        for d in docs:
+            status = (getattr(d, "extra_meta", {}) or {}).get(
+                "monitoring_status", "new")
+            buckets.get(status, buckets["new"]).append(d)
+
+        logger.warning(
+            f"  {len(buckets['new'])} new / {len(buckets['modified'])} modified"
+            f" / {len(buckets['unchanged'])} unchanged")
+
+        # Say what we cannot see; silence would read as coverage.
+        blind = [d for d in docs
+                 if not (getattr(d, "extra_meta", {}) or {}).get(
+                     "hash_covers_content", True)]
+        if blind:
+            logger.warning(
+                f"  {len(blind)} document(s) hashed on identity only — an edit "
+                f"at the same URL CANNOT be detected: "
+                + ", ".join((d.title or "?")[:40] for d in blind))
+
+        docs_to_process = buckets["new"] + buckets["modified"]
+        if not docs_to_process:
+            logger.warning("  Nothing to process.")
+            return
+
+        for idx, doc in enumerate(docs_to_process, start=1):
+            logger.info(f"  [{idx}/{len(docs_to_process)}] {(doc.title or '')[:60]}")
+            self._process_simah_doc(idx, doc)
+            gc.collect()
+
+        logger.warning(f"  SIMAH pipeline complete. "
+                       f"Processed {len(docs_to_process)} documents.")
+
+    def _process_simah_doc(self, idx, doc):
+        """Insert a new document, or version an amended one.
+
+        Mirrors `_process_cbb_doc`, which hardcodes CBB's regulator string and
+        log step — rewriting that would change a path three live regulators use.
+        """
+        meta = getattr(doc, "extra_meta", {}) or {}
+        status = meta.get("monitoring_status", "new")
+        existing_reg_id = meta.get("existing_regulation_id")
+        content_hash = meta.get("content_hash", "") or getattr(doc, "content_hash", "")
+        document_html = getattr(doc, "document_html", None)
+        content_text = meta.get("content_text", "")
+
+        try:
+            if hasattr(doc, "doc_path") and isinstance(doc.doc_path, list):
+                doc.compliancecategory_id = self._get_or_create_compliance_category(
+                    doc.doc_path)
+            else:
+                doc.compliancecategory_id = None
+        except Exception as e:
+            logger.error(f"Failed to assign compliance category: {e}")
+            doc.compliancecategory_id = None
+
+        # ── MODIFIED ────────────────────────────────────────────────────── #
+        if status == "modified" and existing_reg_id:
+            try:
+                logger.warning(f"  Versioning MODIFIED SIMAH document "
+                               f"(reg_id={existing_reg_id})")
+
+                existing = self.repo.get_regulation_by_id(existing_reg_id)
+                if existing:
+                    old_html = existing.get("document_html") or ""
+                    old_meta = existing.get("extra_meta") or {}
+                    old_text = old_meta.get("content_text") or ""
+                    old_hash = existing.get("content_hash") or ""
+                else:
+                    logger.warning(f"Could not fetch existing regulation "
+                                   f"{existing_reg_id}")
+                    old_html = old_text = old_hash = ""
+
+                # Deactivate before inserting, or two versions read as current.
+                with self.repo._get_conn() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        UPDATE regulation_versions
+                        SET status = 'inactive'
+                        WHERE regulation_id = ?
+                        AND status = 'active'
+                        """,
+                        (existing_reg_id,)
+                    )
+                    rows_updated = cursor.rowcount
+                    conn.commit()
+                    logger.info(f"  Marked {rows_updated} version(s) inactive")
+
+                old_version_id = self.repo.insert_regulation_version(
+                    regulation_id=existing_reg_id,
+                    regulator=doc.regulator,
+                    content_html=old_html,
+                    content_text=old_text,
+                    content_hash=old_hash,
+                    updated_date=date.today(),
+                    change_summary=(
+                        f"Previous version archived on {date.today().isoformat()}"),
+                    status='inactive',
+                )
+                logger.info(f"  Archived old content as version {old_version_id}")
+
+                archived = self.repo.archive_current_analysis(
+                    existing_reg_id, old_version_id)
+                logger.info(f"  Archived {archived} analysis rows")
+
+                current_version_id = self.repo.insert_regulation_version(
+                    regulation_id=existing_reg_id,
+                    regulator=doc.regulator,
+                    content_html=document_html,
+                    content_text=content_text,
+                    content_hash=content_hash,
+                    updated_date=doc.published_date,
+                    change_summary=(
+                        f"Content changed at source, detected "
+                        f"{date.today().isoformat()} "
+                        f"(snapshot captured {meta.get('captured_at', '?')})"),
+                )
+                logger.info(f"  Created new version {current_version_id}")
+
+                self.repo.update_cbb_content_hash(existing_reg_id, content_hash)
+                self.repo.update_regulation(
+                    existing_reg_id,
+                    document_html=document_html,
+                    published_date=doc.published_date,
+                )
+                self.log(existing_reg_id, "simah_version", "SUCCESS",
+                         f"Versions: {old_version_id} (archived) -> "
+                         f"{current_version_id} (active)")
+
+                self._extract_and_analyze_versioned(
+                    doc, existing_reg_id, current_version_id)
+            except Exception as e:
+                logger.error(f"Failed to version SIMAH doc {doc.title}: {e}")
+                self.log(existing_reg_id, "simah_version", "ERROR", str(e))
+            return
+
+        # ── NEW ─────────────────────────────────────────────────────────── #
+        try:
+            regulation_id = self.repo._insert_regulation(doc)
+            doc.id = regulation_id
+            # Store the hash now, or the next run backfills and misses the first
+            # real amendment.
+            self.repo.update_cbb_content_hash(regulation_id, content_hash)
+            self.log(regulation_id, "insert", "SUCCESS",
+                     "SIMAH document inserted")
+        except Exception as e:
+            logger.error(f"Failed to insert SIMAH document: {e}")
+            self.log(None, "insert", "ERROR", str(e),
+                     doc_url=getattr(doc, "document_url", None))
+            return
+
+        self._extract_and_analyze(doc, regulation_id)
+
     def filter_new_documents(self, all_documents: List):
         new_docs, existing_docs = [], []
 
