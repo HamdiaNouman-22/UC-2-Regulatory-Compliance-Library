@@ -62,7 +62,10 @@ def verify(hints_path: str | Path, out_dir: str | Path, runs: int = DEFAULT_RUNS
     # Same reasoning applies to include_page: the seed page's own text and HTML
     # are captured in phase 2, so skipping it would verify a form that never
     # produces the document the form exists to produce.
-    needs_phase2 = hints.get("shape") == "tree" or bool(hints.get("include_page"))
+    # And to panels: a panel row has no url, so phase 1 only proves the tabs
+    # exist. Skipping phase 2 passed GOSI 6/6/6 with `documents: 0`.
+    needs_phase2 = (hints.get("shape") == "tree" or bool(hints.get("include_page"))
+                    or bool(hints.get("panels")))
 
     results, url_sets = [], []
     for i in range(1, runs + 1):

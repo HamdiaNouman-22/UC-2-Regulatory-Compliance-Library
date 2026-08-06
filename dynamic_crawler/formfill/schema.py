@@ -141,6 +141,13 @@ section_path:
     - {ancestor: "div.showLawItems",      title: "h4"}
 
 fetch_details: true       # phase 2: open each entry for its HTML
+
+# Optional. Only when ONE url holds several documents in tab panels addressed by
+# fragment (<a href="#2"> revealing <div id="2">). Rows are read inside each
+# panel; with include_panel the panel itself is the document.
+# panels:
+#   tabs: "ul.tabs li.tab a"
+#   include_panel: true
 """
 
 
@@ -181,6 +188,7 @@ def validate_hints(h: dict) -> list[str]:
     if scope not in SCOPES:
         errs.append(f"scope must be one of {SCOPES}, got {scope!r}")
 
+    panels = h.get("panels") or {}
     if shape == "tree":
         # A tree names its menu instead of a row selector, and its title/link
         # come from the node itself — so neither row_selector nor fields is
@@ -190,13 +198,25 @@ def validate_hints(h: dict) -> list[str]:
             errs.append("row_selector does not apply to shape: tree — use tree.node_selector")
         if (h.get("pagination") or {}).get("mode", "none") != "none":
             errs.append("pagination does not apply to shape: tree — the menu is the index")
+        if panels:
+            errs.append("panels does not apply to shape: tree — a tree's nodes are "
+                        "separate pages, panels are sections of one page")
     else:
-        errs += _check_selector(h.get("row_selector"), "row_selector", required=True)
+        errs += _check_panels(panels)
+        # `panels.include_panel` supplies the rows itself — each panel is one
+        # entry, exactly as a tree node is — so a form may declare panels alone.
+        errs += _check_selector(h.get("row_selector"), "row_selector",
+                                required=not panels.get("include_panel"))
         errs += _check_pagination(h.get("pagination") or {"mode": "none"})
 
     errs += _check_selector(h.get("detail_link_selector"), "detail_link_selector",
                             required=False)
-    errs += _check_fields(h.get("fields") or {}, required=(shape != "tree"))
+    # Same reasoning as a tree: when the panels ARE the entries, title and
+    # document_url come from the tab and the panel's own URL, so `fields` is
+    # optional. Declaring one still works and still wins.
+    fields_required = (shape != "tree"
+                       and not (panels.get("include_panel") and not h.get("row_selector")))
+    errs += _check_fields(h.get("fields") or {}, required=fields_required)
     errs += _check_section_path(h.get("section_path") or {})
 
     if not isinstance(h.get("fetch_details", True), bool):
@@ -290,6 +310,29 @@ def _check_tree(t: dict) -> list[str]:
     mn = t.get("max_nodes", 1000)
     if not isinstance(mn, int) or not (1 <= mn <= 20000):
         errs.append("tree.max_nodes must be an integer between 1 and 20000")
+    return errs
+
+
+def _check_panels(p: dict) -> list[str]:
+    """Tabbed content panels addressed by fragment: `<a href="#N">` tabs
+    revealing `<div id="N">` blocks already in the DOM. Nothing navigates, so a
+    link walk never follows a tab (GOSI: six instruments, one captured).
+
+        tabs            the tab links whose href is a fragment
+        include_panel   the panel's own text IS a document (like include_page)
+
+    No `read:` knob — panels are always read with textContent. innerText reports
+    RENDERED text, so on GOSI the active panel gives 279 chars against 82,064.
+    """
+    if not p:
+        return []
+    if not isinstance(p, dict):
+        return ["panels must be a mapping"]
+    errs = _check_selector(p.get("tabs"), "panels.tabs", required=True)
+    if not isinstance(p.get("include_panel", False), bool):
+        errs.append("panels.include_panel must be true or false")
+    errs += [f"panels.{k}: unknown key (allowed: tabs, include_panel)"
+             for k in p if k not in ("tabs", "include_panel")]
     return errs
 
 
@@ -511,6 +554,11 @@ def summarise(h: dict) -> str:
             f"fetch_details {h.get('fetch_details', True)}",
         ]
     else:
+        pn = h.get("panels") or {}
+        if pn:
+            lines.append(f"panels        tabs {pn.get('tabs')!r}"
+                         + ("   include_panel: the panel IS the document"
+                            if pn.get("include_panel") else "   (rows are read inside each panel)"))
         lines += [
             f"row_selector  {h.get('row_selector')!r}",
             f"detail_link   {h.get('detail_link_selector') or '(the row itself)'!r}",
