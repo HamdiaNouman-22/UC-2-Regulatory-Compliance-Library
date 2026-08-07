@@ -1,0 +1,73 @@
+# SAMA Regulatory Sandbox — a TREE, not a listing.
+#
+# From `formfill inspect`:
+#   menu #book-navigation-1   node li.menu-item   20 nodes, 16 nested, depth 1
+#   menu #sidebar_first       node li.menu-item   13 nodes   <- other rulebook books, NOT this one
+#
+# The id matters. There are 13 separate `ul.menu` elements on this page; only
+# #book-navigation-1 is the sandbox's own tree. A class-based selector would
+# have swept in the site's other menus.
+#
+# HOW A TREE IS WALKED HERE
+# The sidebar is a Drupal book menu: it renders only the branch you are standing
+# in. The seed page therefore shows 20 nodes, and the deeper ones appear only
+# once you are on a child page. So the walk re-reads the menu on every page it
+# visits and `rows` grows as it goes — breadth-first, not a fixed list.
+#
+# There is no expand_selector because nothing here is click-to-expand; the
+# "collapsed" items are ordinary links.
+#
+# WHY THE DOCUMENT COUNT LOOKS LOW: on the SAMA rulebook the rules are written
+# on the web pages themselves. The page text IS the document. Compare MISA,
+# where the page is only a list of links and every document is a PDF.
+
+version: 1
+name: sama.sandbox
+seed_url: "https://rulebook.sama.gov.sa/en/regulatory-sandbox"
+shape: tree
+scope: breadcrumb
+
+tree:
+  # A PREFIX match, not the exact id. The seed page's menu is #book-navigation-1,
+  # but deeper pages render theirs under a different node id — pinning the exact
+  # one makes discovery stop dead on those pages, silently.
+  menu_selector: '[id^="book-navigation"]'
+  node_selector: "li.menu-item"
+  link_selector: "a[href]"
+  max_depth: 8
+  max_nodes: 400
+
+section_path:
+  # The site states the full path on every page. Menu nesting cannot compete:
+  # a book menu only renders the branch you are standing in, so a node found
+  # three levels down inherits whatever that one page happened to show — which
+  # is how "A1 Identification/Contact Details" was filed directly under
+  # "Regulatory Sandbox" instead of five levels deep.
+  from_breadcrumb: ".breadcrumb a"
+  # Fallback only, for any page that has no breadcrumb.
+  prefix: ["SAMA Rulebook", "Regulatory Sandbox"]
+
+# title and document_url come from the node itself on a tree, so `fields` is
+# only needed for anything extra. Nothing here publishes dates or reference
+# numbers on the menu.
+fields: {}
+
+fetch_details: true      # the page text IS the content — phase 2 is not optional here
+notes: "Hand-written from the inspect digest. Menu re-read on every page (Drupal book nav)."
+meta:
+  approved: true
+  approved_by: ai.team@benchmatrix.com
+  approved_at: '2026-08-02T14:53:17+00:00'
+  verify:
+    verdict: PASS
+    counts:
+    - 40
+    - 40
+    - 40
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-02T14:52:11+00:00'
+    forced: false
+  form_hash: a1b650d82140

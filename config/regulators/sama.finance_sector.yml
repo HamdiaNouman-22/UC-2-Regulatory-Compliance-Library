@@ -1,0 +1,106 @@
+# SAMA Finance Sector tab -- Phase 1 pilot config for dynamic_crawler.
+#
+# Hand-authored (not LLM-proposed) by reading crawler/sama_finance_sector_crawler.py
+# as ground truth, so the first pilot run has the best chance of an exact match
+# against that crawler's output in the diff harness. The onboarding agent
+# (dynamic_crawler/onboarding/propose_config.py) is still available for
+# proposing configs for new tabs/regulators going forward.
+
+regulator: SAMA
+tab_name: "Finance Sector"
+source_system: "SAMA RULEBOOK"
+base_url: "https://rulebook.sama.gov.sa"
+seed_url: "https://rulebook.sama.gov.sa/en/book-category/1365"
+
+fetch:
+  backend: requests
+  timeout_seconds: 30
+  max_retries: 3
+  retry_backoff_seconds: 2
+  request_delay_seconds: 1.2
+  headless: true
+
+discovery:
+  strategy: sidebar_tree
+  top_level:
+    selector: "div.views-row"
+    link_selector: "a[href]"
+    href_prefix_filter: "/en/"
+  sidebar:
+    nav_id_template: "book-block-menu-{category_id}"
+    category_id_regex: "book-category/(\\d+)"
+    folder_li_classes:
+      - "menu-item--collapsed"
+      - "menu-item--expanded"
+  body_links:
+    container_selector: "div.node__content"
+    href_prefix_filters:
+      - "/en/"
+      - "https://rulebook.sama.gov.sa"
+    generic_link_text_pattern: "^(click here|here|view|view here|download|read more|see here|see more|link|more)\\.?$"
+
+extraction:
+  structured_indicator_selector: "table.info-table"
+  page_title:
+    strip_suffix_regex: "\\s*\\|\\s*SAMA Rulebook\\s*$"
+  plain_content_container_selector: "div.node__content"
+  fields:
+    reference_no:
+      source: regex
+      container_selector: "table.info-table"
+      pattern: "No:\\s*([^\\s]+)"
+    published_date:
+      source: regex
+      container_selector: "table.info-table"
+      pattern: "Date\\(g\\):\\s*([^\\s|]+)"
+    date_hijri:
+      source: regex
+      container_selector: "table.info-table"
+      pattern: "Date\\(h\\):\\s*([^\\s]+)"
+      post_process:
+        - sub: "Status:.*$"
+          repl: ""
+      target: "extra_meta.issue_date_hijri"
+    status:
+      source: css_text
+      selector: "span.document_status"
+      strip_prefix: "Status:"
+      target: "extra_meta.status"
+    org_pdf_link:
+      source: css_attr
+      selector: "a.icopdf[href*='.pdf']"
+      attr: "href"
+      absolutize: true
+      target: "extra_meta.org_pdf_link"
+    document_html:
+      source: html_container
+      selector: "#viewall-entire-section|div.node__content"
+      strip_selectors:
+        - "table.info-table"
+        - "script"
+        - "style"
+        - "nav"
+        - "header"
+        - "footer"
+      absolutize_links: true
+
+validation:
+  required_fields:
+    - regulator
+    - source_system
+    - category
+    - title
+    - document_url
+    - source_page_url
+  expected_doc_count_min: 550
+  expected_doc_count_max: 750
+  baseline_reference_file: "sama_finance_sector_requests.json"
+
+metadata:
+  approved: true
+  approved_by: "hand-authored from crawler/sama_finance_sector_crawler.py as ground truth"
+  approved_date: "2026-07-14"
+  notes: >
+    Initial Phase 1 config, mirrors existing SAMAFinanceSectorCrawler logic
+    exactly so dynamic_crawler/diff/compare.py can prove the generic engine
+    reproduces its output before this pattern is trusted for other tabs.

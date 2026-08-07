@@ -1,0 +1,41 @@
+# SAMA — Saudi Central Bank
+#
+# Shows the HYBRID: this regulator mixes a hand-written crawler with generic
+# ones, and the pipeline treats them identically. Add or flip a source by
+# editing this file — no python changes.
+
+regulator: SAMA
+owner: lead
+
+sources:
+  # ── the existing hand-written crawler, unchanged and still in charge ──
+  # It reads the DataTables grid columns (Circular No., Issue Date (G),
+  # Issue Date (H), Status, Scope). A generic link walk sees links, not table
+  # columns, so it cannot produce those fields at all. This stays custom for a
+  # METADATA reason, not a coverage one.
+  - name: "SAMA Combined (circulars + full rulebook + SBP Appendix III)"
+    mode: custom
+    crawler_class: "crawler.sama_crawler_wrapper.SAMACombinedCrawler"
+    init_kwargs:
+      headless: true
+
+  # ── generic sources, currently disabled ────────────────────────────────
+  # Enable one at a time, and only after db_compare.py shows it matches or beats
+  # what the hand-written crawler already put in the database. Uncomment to test.
+  #
+  # - name: "Regulatory Sandbox"
+  #   mode: generic
+  #   seed_url: "https://rulebook.sama.gov.sa/en/regulatory-sandbox"
+  #   scope: breadcrumb
+  #   source_system: "SAMA-RULEBOOK"
+  #   category: "Regulatory Sandbox"
+  #
+  # - name: "Saudi Central Bank Law"
+  #   mode: generic
+  #   seed_url: "https://rulebook.sama.gov.sa/en/saudi-central-bank-law"
+  #   scope: breadcrumb
+  #   source_system: "SAMA-RULEBOOK"
+  #   category: "Laws and Implementing Regulations"
+  #   # Measured 2026-08-01: 36 pages -> 28 documents (27 short articles kept by
+  #   # the leaf rule; 9 chapter folders correctly excluded). 27 carry
+  #   # org_pdf_link so short articles are analysed from their PDF.

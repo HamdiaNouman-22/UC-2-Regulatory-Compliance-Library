@@ -1,0 +1,61 @@
+# SIMAH — Rules and Regulations. TWO documents, not one.
+#
+# This page is not a listing. It is one law rendered as 17 collapsible articles,
+# with a second instrument offered as a PDF at the bottom:
+#
+#   1. Rules and Regulations                 <- the page itself, 17 articles of
+#                                               law text (~8,000 characters)
+#   2. The Implementing Regulations for      <- a PDF
+#      Credit Information Law
+#
+# Both are captured now. The first version of this form took only the PDF and
+# reported "1 document" — stable, 100% filled, and missing the actual law.
+#
+# TWO SETTINGS DO THE WORK
+#
+#   expand_selector: the articles are collapsed until clicked. Captured closed,
+#     the saved HTML is 17 lines saying "Article-N" and no law at all. Clicking
+#     them first is also what makes the stored HTML match what a person sees.
+#
+#   include_page: the seed URL is itself a document, not just an index of other
+#     documents. True of any regulation published as a single page.
+#
+# fetch_details must be true for include_page: the page's text and HTML are
+# captured by phase 2, the same way any detail page is.
+
+version: 1
+name: simah.rules
+seed_url: "https://www.simah.com/english/Pages/rules-and-regulations.aspx"
+shape: list
+scope: prefix
+
+# Open every article before reading anything.
+expand_selector: "button.accordion-button"
+
+# The page itself is document #1.
+include_page: true
+
+# Document #2: the block holding the heading, the blurb and the download button.
+row_selector: "div.accordion-sub-hd"
+detail_link_selector: "a[href]"
+
+pagination:
+  mode: none
+  max_pages: 1
+
+fields:
+  # The <h6>, not the button. "Download PDF" is not a document title.
+  title:
+    from: css
+    selector: "h6"
+    attr: text
+  document_url:
+    from: css
+    selector: "a[href]"
+    attr: href
+
+section_path:
+  prefix: ["SIMAH", "Rules and Regulations"]
+
+fetch_details: true
+notes: "Page-as-document plus one attached PDF; accordions expanded before capture."
