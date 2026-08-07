@@ -1,0 +1,64 @@
+# SBP — circulars. Written BY HAND from `formfill inspect`, no LLM involved.
+#
+# That is the point worth noticing: the digest printed
+#
+#   div.publication-box-new   x30  links:30  dated:30  ref:30
+#   pagination  .../P{n}      numbers seen: [30, 60, 4140]
+#
+# and the form below is just those facts typed out. Reach for `formfill propose`
+# when the digest is ambiguous — not by default.
+#
+# Sizing: 4140 / 30 = 139 listing pages. Phase 2 (opening each entry) is another
+# 4,160 page loads, so it is run only for rows the inventory shows are new.
+#
+# MEASURED 2026-08-02, full phase-1 run: 139 pages, 32.5 minutes, 4,160 rows,
+# 4,160 distinct URLs, 1990-2026, no warnings. Fill rates: title 100%,
+# document_url 100%, published_date 99.6%, department 90.9%, reference_no 89.1%.
+# See output/formfill/sbp.circulars/full/results.xlsx.
+#
+# Known gap: reference_no misses ~11%, mostly "F.E. Circular"-style references
+# the [A-Z]{2,6} class below does not allow. Widen it when someone needs those.
+
+version: 1
+name: sbp.circulars
+seed_url: "https://www.sbp.org.pk/circulars/"
+shape: list
+scope: prefix
+
+# The whole entry box, not the h4 heading inside it. The box carries the
+# reference number, date and department in its text; the h4 carries only the
+# title (the digest says dated:30 vs dated:0).
+row_selector: "div.publication-box-new"
+detail_link_selector: "a[href]"
+
+pagination:
+  mode: url_offset
+  # Exactly the href the site's own pager links to, double slash included.
+  pattern: "https://www.sbp.org.pk/circulars//P{offset}"
+  step: 30
+  max_offset: 4140      # frozen on purpose — a discovered value can move between runs
+  max_pages: 200
+
+fields:
+  title:
+    from: css
+    selector: "h4.mb-2"
+    attr: text
+  document_url:
+    from: css
+    selector: "a[href]"
+    attr: href
+  # Applied to the row's visible text: "… DMMD Circular Letter No.10 of 2026
+  # July 31 2026 | DMMMD | Circular Letters"
+  reference_no:
+    from: regex
+    pattern: '([A-Z]{2,6}[- ]?Circular(?: Letter)? No\.?\s*\d+ of \d{4})'
+  published_date:
+    from: regex
+    pattern: '([A-Z][a-z]{2,8} \d{1,2},? \d{4})'
+  department:
+    from: regex
+    pattern: '\|\s*([A-Z]{2,8})\s*\|'
+
+fetch_details: true
+notes: "Hand-written from the inspect digest; verify before approving."

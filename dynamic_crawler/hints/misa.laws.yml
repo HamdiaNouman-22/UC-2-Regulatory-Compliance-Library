@@ -1,0 +1,58 @@
+version: 1
+name: misa.laws
+seed_url: https://misa.gov.sa/activities/laws/
+shape: list
+scope: prefix
+row_selector: div.showLawItems a.showLawDocItem
+detail_link_selector: a.showLawDocItem
+pagination:
+  mode: none
+  max_pages: 1
+fields:
+  title:
+    from: css
+    selector: span.showLawTitle
+    attr: text
+  document_url:
+    from: css
+    selector: a.showLawDocItem
+    attr: href
+section_path:
+  prefix:
+  - Laws
+  levels:
+  - ancestor: div.regulationContent
+    title: h4
+  - ancestor: div.showLawItems
+    title: h4
+fetch_details: false
+notes: Unsure if the row_selector scoped to div.showLawItems will capture all laws
+  on all possible page variations.
+meta:
+  proposed_by: default (see llm_client.DEFAULT_MODEL)
+  proposed_at: '2026-08-02T10:29:35+00:00'
+  instruction: ''
+  approved: true
+  approved_by: ai.team@benchmatrix.com
+  approved_at: '2026-08-02T10:36:48+00:00'
+  verify:
+    verdict: PASS
+    counts:
+    - 89
+    - 89
+    - 89
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-02T10:36:18+00:00'
+    forced: false
+  refined_from: dynamic_crawler/hints/misa.laws.yml
+  feedback: 'Still wrong. I ran it: 55 laws came out as ''Laws > Sectoral Legislations''
+    and 34 as just ''Laws''. The sector name is missing everywhere. The page renders
+    each law TWICE - once in the desktop layout inside div.showLawItems (which has
+    the sector name in its h4), and once in a hidden mobile layout that has no sector
+    heading. My rows are matching the mobile copies. So scope the row_selector to
+    the desktop copies only, and build the path from the tab pane (div.regulationContent
+    h4) and then the sector (div.showLawItems h4). Drop the Left/Right layout containers,
+    they are not sections.'

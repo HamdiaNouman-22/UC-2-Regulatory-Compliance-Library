@@ -33,8 +33,12 @@ with st.sidebar:
     st.header("Settings")
     url = st.text_input("Seed URL", "https://rulebook.sama.gov.sa/en/regulatory-sandbox")
     run_name = st.text_input("Run name (folder)", "sama_sandbox")
-    max_pages = st.slider("Max pages", 5, 500, 100, step=5)
-    max_depth = st.slider("Max depth (folder levels)", 1, 12, 8)
+    max_pages = st.number_input("Max pages", min_value=5, max_value=20000, value=100, step=50,
+                                help="For a full listing site set this high, e.g. SBP has ~3,989 "
+                                     "circulars → use ~4,300+. Big runs take hours (slow servers).")
+    max_depth = st.slider("Max depth (folder levels)", 1, 12, 8,
+                          help="How many levels of real content pages to follow. Pagination/Next "
+                               "links do NOT count toward this, so long paginated lists still finish.")
     scope = st.selectbox(
         "Scope",
         ["breadcrumb", "prefix", "host"],

@@ -1,0 +1,59 @@
+# AML — Anti-Money Laundering Permanent Committee, Rules and Regulations.
+# A SharePoint page, and a third distinct site shape:
+#
+#   li.dfwp-item   x11  links:11  docs:11        <- every row links straight to a PDF
+#   headings       "Laws and Regulations" (4 rows) / "Rules and Instructions" (7)
+#
+# The groups here are NOT wrappers — the two <h3>s simply sit above their links,
+# so the section level is "the nearest heading BEFORE this row" rather than
+# "walk up to the block that contains it". That is what `preceding` means.
+#
+# Every row's link is a PDF, so fetch_details is off: there is no detail page to
+# open, and the documents are captured from phase 1 alone.
+
+version: 1
+name: aml.rules
+seed_url: "https://www.aml.gov.sa/en-us/Pages/RulesandRegulations.aspx"
+shape: list
+scope: prefix
+
+row_selector: "li.dfwp-item"
+detail_link_selector: "a[href]"
+
+pagination:
+  mode: none
+  max_pages: 1
+
+fields:
+  title:
+    from: css
+    selector: "a[href]"
+    attr: text
+  document_url:
+    from: css
+    selector: "a[href]"
+    attr: href
+
+section_path:
+  prefix: ["Rules and Regulations"]
+  levels:
+    - preceding: "h3"
+
+fetch_details: false
+notes: "Hand-written from the inspect digest. Two h3 groups, no wrappers."
+meta:
+  approved: true
+  approved_by: ai.team@benchmatrix.com
+  approved_at: '2026-08-02T10:43:49+00:00'
+  verify:
+    verdict: PASS
+    counts:
+    - 11
+    - 11
+    - 11
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-02T10:43:49+00:00'
+    forced: false

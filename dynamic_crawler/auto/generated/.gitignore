@@ -1,0 +1,4 @@
+# Auto-generated crawler adapters are quarantined here and never committed.
+# They are untrusted LLM output, run only in a sandboxed subprocess.
+*
+!.gitignore
