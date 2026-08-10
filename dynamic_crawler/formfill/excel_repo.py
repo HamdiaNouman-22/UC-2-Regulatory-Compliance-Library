@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -81,10 +82,16 @@ class ExcelRepo:
             "processing_log": [], "run_history": [],
         }
         self._next = {k: 0 for k in self.t}
+        # The orchestrator processes documents on a thread pool
+        # (DOC_MAX_WORKERS, default 4). `self._next[t] += 1` is a read-modify-
+        # write and is NOT atomic, so without this two documents could be handed
+        # the same primary key — silently, with the workbook still looking fine.
+        self._lock = threading.RLock()
 
     def _id(self, table: str) -> int:
-        self._next[table] += 1
-        return self._next[table]
+        with self._lock:
+            self._next[table] += 1
+            return self._next[table]
 
     # ---------------- regulations ----------------------------------------- #
 
@@ -127,11 +134,47 @@ class ExcelRepo:
         return any(r.get("source_page_url") == source_page_url
                    for r in self.t["regulations"])
 
+    @staticmethod
+    def _norm_path(v) -> str:
+        """doc_path in ONE canonical form, whatever it was stored as.
+
+        The same field has three representations in this codebase and a plain
+        string compare matches none of them:
+
+            MSSQL       json.dumps(list)   '["MISA", "MISA-LAWS"]'
+            ExcelRepo   " | ".join(list)   'MISA | MISA-LAWS'
+            classify    " > ".join(list)   'MISA > MISA-LAWS'
+
+        So find_by_identity never matched, every document came back `new` on
+        every run, and a second run against the same workbook inserted all of
+        them again — 3 documents became 6 rows. Change detection, the whole point
+        of the monitoring path, could not work.
+        """
+        if v is None:
+            return ""
+        if isinstance(v, (list, tuple)):
+            parts = list(v)
+        else:
+            s = str(v).strip()
+            if s.startswith("["):
+                try:
+                    parts = json.loads(s)
+                except Exception:
+                    parts = [s]
+            elif " > " in s:
+                parts = s.split(" > ")
+            elif " | " in s:
+                parts = s.split(" | ")
+            else:
+                parts = [s] if s else []
+        return " > ".join(str(p).strip() for p in parts if str(p).strip())
+
     def find_by_identity(self, document_url: str, doc_path: str) -> Optional[dict]:
         """The identity lookup `classify_documents` uses: (document_url, doc_path)."""
+        want = self._norm_path(doc_path)
         return next((dict(r) for r in self.t["regulations"]
                      if r.get("document_url") == document_url
-                     and str(r.get("doc_path") or "") == doc_path), None)
+                     and self._norm_path(r.get("doc_path")) == want), None)
 
     def find_by_reference(self, reference_no: str) -> Optional[dict]:
         """The tiebreak: same reference number at a new URL is a new VERSION of an

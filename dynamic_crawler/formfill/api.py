@@ -56,6 +56,7 @@ logger = logging.getLogger("formfill.api")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HINTS_DIR = REPO_ROOT / "dynamic_crawler" / "hints"
+SOURCES_DIR = REPO_ROOT / "config" / "sources"
 OUT_DIR = REPO_ROOT / "output" / "formfill" / "_orch_runs"
 
 app = FastAPI(
@@ -85,13 +86,43 @@ def _forms() -> Dict[str, dict]:
     return out
 
 
+def _sources() -> Dict[str, dict]:
+    """The GENERIC-crawler regulators, from config/sources/*.yml.
+
+    A regulator here is a LIST of sources, each independently `generic` (zero
+    config, the link walker) or `custom` (a hand-written crawler class), and the
+    orchestrator treats them identically. That is the hybrid: SAMA keeps its
+    tuned circulars crawler while its rulebook sectors ride the generic engine,
+    in one file, with no python to change.
+    """
+    out = {}
+    for f in sorted(SOURCES_DIR.glob("*.yml")):
+        try:
+            cfg = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            out[f.stem.upper()] = {"path": str(f.relative_to(REPO_ROOT)),
+                                   "error": f"unreadable: {e}"}
+            continue
+        srcs = cfg.get("sources") or []
+        out[cfg.get("regulator", f.stem.upper())] = {
+            "path": str(f.relative_to(REPO_ROOT)),
+            "owner": cfg.get("owner"),
+            "n_sources": len(srcs),
+            "sources": [{"name": s.get("name"), "mode": s.get("mode", "generic"),
+                         "seed_url": s.get("seed_url")} for s in srcs],
+        }
+    return out
+
+
 @app.get("/", tags=["info"])
 def index():
     return {
-        "app": "formfill orchestrator, Excel-backed",
+        "app": "new orchestrator, Excel-backed",
         "docs": "/docs",
         "forms": "/forms",
-        "trigger": "POST /trigger/{form}?limit=5&analyse=false&reuse_last=true",
+        "sources": "/sources",
+        "trigger_form": "POST /trigger/{form}?limit=5&analyse=false&reuse_last=true",
+        "trigger_source": "POST /trigger/source/{regulator}?limit=5&analyse=false",
         "runs": "/runs",
         "database": "NONE — output is an .xlsx per run",
     }
@@ -100,6 +131,11 @@ def index():
 @app.get("/forms", tags=["info"])
 def list_forms():
     return _forms()
+
+
+@app.get("/sources", tags=["info"])
+def list_sources():
+    return _sources()
 
 
 @app.get("/runs", tags=["info"])
@@ -192,6 +228,80 @@ def trigger(form: str,
         "run_id": run_id,
         "form": form,
         "crawl_reused": str(reuse_from) if reuse_from else None,
+        "seconds": round((datetime.now() - started).total_seconds(), 1),
+        "excel": str(excel),
+        "excel_download": f"/runs/{run_id}/excel",
+    })
+    _runs[run_id] = report
+    return report
+
+
+@app.post("/trigger/source/{regulator}", tags=["run"])
+def trigger_source(regulator: str,
+                   limit: Optional[int] = 5,
+                   analyse: bool = False,
+                   workbook: Optional[str] = None):
+    """Run the new orchestrator for one GENERIC-CRAWLER regulator.
+
+    The sibling of `/trigger/{form}`. Same orchestrator, same Excel repo, same
+    guarantees — the only difference is which engine produces the documents:
+    `config/sources/<regulator>.yml` instead of a formfill hint. That file may
+    mix generic and custom sources; `build_regulator_crawler` composes them and
+    the orchestrator cannot tell them apart.
+
+    - **limit** — documents to process. `0` or omit for all. Start small.
+    - **analyse** — run the 4-stage LLM analysis. Costs money; off by default.
+    - **workbook** — append to an existing workbook to see change detection on a
+      second run. Omit for a fresh one.
+
+    There is no `reuse_last` here. The generic wrapper runs its engine as a
+    subprocess and owns its own output directory, so there is no crawl-on-disk
+    for this endpoint to point at — every call crawls. Use `limit` to keep it
+    short.
+    """
+    cfg_path = SOURCES_DIR / f"{regulator.lower()}.yml"
+    if not cfg_path.exists():
+        raise HTTPException(
+            400, f"no config at {cfg_path.relative_to(REPO_ROOT)}. "
+                 f"available: {sorted(_sources())}")
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    reg_name = cfg.get("regulator", regulator.upper())
+
+    from dynamic_crawler.formfill.excel_repo import ExcelRepo
+    from dynamic_crawler.formfill.orch import NewOrchestrator
+    from crawler.generic_crawler_wrapper import build_regulator_crawler
+
+    started = datetime.now()
+    run_id = f"{reg_name}-{started:%Y%m%d-%H%M%S}"
+    out_xlsx = OUT_DIR / (workbook or f"{run_id}.xlsx")
+
+    with _lock:
+        try:
+            crawler = build_regulator_crawler(cfg)
+        except Exception as e:
+            raise HTTPException(400, f"{reg_name}: {e}")
+
+        repo = ExcelRepo(out_xlsx)
+        if workbook and out_xlsx.exists():
+            _load_workbook_into(repo, out_xlsx)
+
+        orch = NewOrchestrator(
+            crawler=crawler, repo=repo, downloader=None,
+            source_name=f"source:{reg_name}", analyse=analyse,
+            limit=(limit or None),
+        )
+        try:
+            report = orch.run_for_regulator(reg_name)
+        except Exception as e:
+            logger.exception("run failed")
+            raise HTTPException(500, f"run failed: {e}")
+        excel = repo.save()
+
+    report.update({
+        "run_id": run_id,
+        "regulator": reg_name,
+        "config": str(cfg_path.relative_to(REPO_ROOT)),
+        "engines": [s.get("mode", "generic") for s in (cfg.get("sources") or [])],
         "seconds": round((datetime.now() - started).total_seconds(), 1),
         "excel": str(excel),
         "excel_download": f"/runs/{run_id}/excel",
