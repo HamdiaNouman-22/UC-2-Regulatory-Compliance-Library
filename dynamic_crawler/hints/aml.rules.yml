@@ -1,3 +1,8 @@
+# PENDING CODE REVIEW — then set `version_probe: true` below. Without it a
+# replaced PDF behind an unchanged link reads `unchanged` forever. The first
+# probed run lays down one metadata baseline per stored document, so it is a
+# write: it needs sign-off before it runs against production.
+#
 # AML — Anti-Money Laundering Permanent Committee, Rules and Regulations.
 # A SharePoint page, and a third distinct site shape:
 #
