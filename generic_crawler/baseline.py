@@ -107,6 +107,13 @@ def run_site(name, url, scope):
         if kind == "done":
             rec["pages"] = ev.get("pages")
             rec["documents"] = ev.get("documents")
+            # The engine now classifies its own run. Recorded alongside the flag
+            # this file derives, not instead of it: `flag` is cross-site context
+            # (NO-DOCS, CAP), `engine_status` is what the crawl itself saw
+            # (blocked, incomplete). They answer different questions.
+            rec["engine_status"] = ev.get("status", "")
+            rec["blocked_pages"] = ev.get("blocked_pages", 0)
+            rec["stopped"] = ev.get("stopped", "")
             if ev.get("shape"):
                 rec["shape"] = ev["shape"]
         elif kind == "shape":
