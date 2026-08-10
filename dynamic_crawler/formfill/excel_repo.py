@@ -176,6 +176,31 @@ class ExcelRepo:
                      if r.get("document_url") == document_url
                      and self._norm_path(r.get("doc_path")) == want), None)
 
+    def find_by_identity_fields(self, fields: dict) -> Optional[dict]:
+        """Identity lookup on whichever columns the source config names.
+        Mirrors the MSSQL method."""
+        fields = {k: v for k, v in (fields or {}).items() if v not in (None, "")}
+        if not fields:
+            return None
+        for r in self.t["regulations"]:
+            for k, v in fields.items():
+                stored = self._norm_path(r.get(k)) if k == "doc_path" else r.get(k)
+                want = self._norm_path(v) if k == "doc_path" else v
+                if stored != want:
+                    break
+            else:
+                return dict(r)
+        return None
+
+    def find_regulations_by_source(self, source_system: str) -> list:
+        """Everything stored for this source. Mirrors the MSSQL method so
+        both repos answer the completeness gate the same way."""
+        if not source_system:
+            return []
+        return [dict(r) for r in self.t["regulations"]
+                if r.get("source_system") == source_system
+                and (r.get("status") or "") != "withdrawn"]
+
     def find_by_reference(self, reference_no: str) -> Optional[dict]:
         """The tiebreak: same reference number at a new URL is a new VERSION of an
         existing document, not a new document."""
@@ -300,11 +325,15 @@ class ExcelRepo:
 
     # ---------------- logging + run history ------------------------------- #
 
-    def _log_processing(self, regulation_id, step, status, message, doc_url=None, **kw):
+    def _log_processing(self, regulation_id, step, status, message, doc_url=None,
+                        duration_ms=None, **kw):
+        # duration_ms is a real column here rather than JSON: a preview workbook
+        # is read by eye, and the point of the timing is to be sortable in Excel.
         self.t["processing_log"].append({
             "log_id": self._id("processing_log"), "regulation_id": regulation_id,
             "step": step, "status": status, "message": _flat(message),
             "document_url": doc_url,
+            "duration_ms": int(duration_ms) if duration_ms is not None else None,
             "logged_at": datetime.now().isoformat(timespec="seconds"),
         })
 
