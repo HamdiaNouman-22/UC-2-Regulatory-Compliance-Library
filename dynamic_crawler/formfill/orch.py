@@ -80,6 +80,9 @@ class NewOrchestrator(Orchestrator):
         # parent folder would each find it missing and each create it, giving
         # one folder two ids and splitting the tree.
         self._folder_lock = threading.RLock()
+        # (regulation_id, stored_meta, doc) for rows that are unchanged but have
+        # no version token stored yet.
+        self._token_backfill: List = []
 
     # ------------------------------------------------------------------ #
     #  IDENTITY + CLASSIFICATION                                          #
@@ -170,6 +173,7 @@ class NewOrchestrator(Orchestrator):
         """
         buckets = {"new": [], "modified": [], "unchanged": [], "disappeared": []}
         seen_ids = set()
+        self._token_backfill = []
 
         for doc in docs:
             existing = self._find_existing(doc)
@@ -194,7 +198,25 @@ class NewOrchestrator(Orchestrator):
             doc.extra_meta = dict(getattr(doc, "extra_meta", None) or {})
             doc.extra_meta["existing_regulation_id"] = existing.get("id")
 
+            # A hash built from the URL and link text cannot move when the file
+            # behind an unchanged link is replaced. The server's version token
+            # can, so either one moving means modified.
+            old_meta = existing.get("extra_meta")
+            old_token = str((old_meta or {}).get("version_token") or "") \
+                if isinstance(old_meta, dict) else ""
+            new_token = str(doc.extra_meta.get("version_token") or "")
+
             if old_hash and new_hash and old_hash == new_hash:
+                if old_token and new_token and old_token != new_token:
+                    self._set_status(doc, "modified")
+                    buckets["modified"].append(doc)
+                    continue
+                # First sight of a token for a document already stored: record it
+                # without reprocessing, so enabling the probe costs one metadata
+                # write per document instead of a full reclassification.
+                if new_token and not old_token:
+                    self._token_backfill.append((existing.get("id"),
+                                                 dict(old_meta or {}), doc))
                 self._set_status(doc, "unchanged")
                 buckets["unchanged"].append(doc)
             else:
@@ -207,6 +229,29 @@ class NewOrchestrator(Orchestrator):
                 buckets["disappeared"].append(r)
 
         return buckets
+
+    def _apply_token_backfill(self) -> int:
+        """Store first-seen version tokens on rows nothing else will write.
+
+        An unchanged document is not otherwise touched, so without this the token
+        would be re-read and discarded on every run and never become a baseline
+        to compare against.
+        """
+        written = 0
+        for regulation_id, stored_meta, doc in self._token_backfill:
+            meta = dict(stored_meta or {})
+            new_meta = getattr(doc, "extra_meta", None) or {}
+            meta["version_token"] = new_meta.get("version_token", "")
+            meta["hash_basis"] = new_meta.get("hash_basis", "")
+            try:
+                self.repo.update_regulation(
+                    regulation_id,
+                    extra_meta=json.dumps(meta, ensure_ascii=False, default=str))
+                written += 1
+            except Exception as e:
+                logger.warning("could not store version token for %s: %s",
+                               regulation_id, e)
+        return written
 
     def _stored_for_source(self) -> List[dict]:
         """What the library already holds for this source.
@@ -490,6 +535,7 @@ class NewOrchestrator(Orchestrator):
         trustworthy, problems = self.check_run_trustworthy(docs)
         inv = self._inventory_hash(docs)
         buckets = self.classify_documents(docs)
+        tokens_stored = self._apply_token_backfill()
 
         last = self.repo.last_good_run(self.source_name) if hasattr(
             self.repo, "last_good_run") else None
@@ -512,6 +558,7 @@ class NewOrchestrator(Orchestrator):
                 "run_trustworthy": trustworthy,
                 "gate_problems": problems,
                 "disappeared_actioned": False,
+                "version_tokens_stored": tokens_stored,
                 "tables": self.repo.counts() if hasattr(self.repo, "counts") else {},
             }
             return self.report
@@ -551,6 +598,7 @@ class NewOrchestrator(Orchestrator):
             "run_trustworthy": trustworthy,
             "gate_problems": problems,
             "disappeared_actioned": bool(trustworthy) and bool(buckets["disappeared"]),
+            "version_tokens_stored": tokens_stored,
             "tables": self.repo.counts() if hasattr(self.repo, "counts") else {},
         }
         if not trustworthy and buckets["disappeared"]:

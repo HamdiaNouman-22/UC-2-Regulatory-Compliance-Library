@@ -430,6 +430,25 @@ class MSSQLRepository(DocumentRepository):
                 parts = [s] if s else []
         return " > ".join(str(p).strip() for p in parts if str(p).strip())
 
+    @staticmethod
+    def _with_extra_meta(r: dict) -> dict:
+        """extra_meta is JSON text in the column and a dict everywhere else.
+
+        Both identity lookups omitted it, so the archive step read the old row's
+        content_text as "" and every archived version was stored empty.
+        """
+        raw = r.get("extra_meta")
+        if isinstance(raw, dict):
+            return r
+        r["extra_meta"] = {}
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                r["extra_meta"] = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                pass
+        return r
+
     def find_by_identity(self, document_url: str, doc_path) -> Optional[dict]:
         """The identity classify_documents uses: (document_url, doc_path).
 
@@ -446,13 +465,14 @@ class MSSQLRepository(DocumentRepository):
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT id, title, document_url, doc_path, content_hash, "
-                    "compliancecategory_id, category, status "
+                    "compliancecategory_id, category, status, "
+                    "CAST(extra_meta AS NVARCHAR(MAX)) as extra_meta "
                     "FROM regulations WHERE document_url = ?", (document_url,))
                 cols = [c[0] for c in cursor.description]
                 for row in cursor.fetchall():
                     r = dict(zip(cols, row))
                     if self._norm_doc_path(r.get("doc_path")) == want:
-                        return r
+                        return self._with_extra_meta(r)
             return None
         except Exception as e:
             logger.error(f"find_by_identity failed: {e}")
@@ -489,13 +509,14 @@ class MSSQLRepository(DocumentRepository):
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT id, title, document_url, doc_path, content_hash, "
-                    "reference_no, compliancecategory_id, category, status "
+                    "reference_no, compliancecategory_id, category, status, "
+                    "CAST(extra_meta AS NVARCHAR(MAX)) as extra_meta "
                     f"FROM regulations WHERE {where}", list(sql_fields.values()))
                 cols = [c[0] for c in cursor.description]
                 for row in cursor.fetchall():
                     r = dict(zip(cols, row))
                     if want is None or self._norm_doc_path(r.get("doc_path")) == want:
-                        return r
+                        return self._with_extra_meta(r)
             return None
         except ValueError:
             raise
