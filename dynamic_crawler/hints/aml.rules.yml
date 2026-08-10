@@ -35,16 +35,26 @@ fields:
     attr: href
 
 section_path:
-  prefix: ["Rules and Regulations"]
+  # No prefix. The folder trail is  regulator > source_system > <here> > title,
+  # and the source YAML already supplies the first two crumbs. Repeating either
+  # of them here would create a duplicate folder.
+  prefix: []
   levels:
     - preceding: "h3"
 
 fetch_details: false
 notes: "Hand-written from the inspect digest. Two h3 groups, no wrappers."
+# Who this source belongs to. These two lead the folder trail AND the
+# section_path column in the Excel, so the crawler's own output shows the
+# same path the library will use. Defined here only — the pipeline reuses
+# them rather than prepending its own copy.
+library:
+  regulator: "Anti-Money Laundering Permanent Committee"
+  source_system: "Rules and Regulations"
 meta:
   approved: true
-  approved_by: ai.team@benchmatrix.com
-  approved_at: '2026-08-02T10:43:49+00:00'
+  approved_by: your name
+  approved_at: '2026-08-03T09:09:15+00:00'
   verify:
     verdict: PASS
     counts:
@@ -55,5 +65,6 @@ meta:
     fill_rates:
       title: 100.0
       document_url: 100.0
-    verified_at: '2026-08-02T10:43:49+00:00'
+    verified_at: '2026-08-03T09:09:15+00:00'
     forced: false
+  form_hash: 029c58e7579c

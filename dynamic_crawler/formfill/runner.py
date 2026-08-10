@@ -134,7 +134,19 @@ JS_ROWS = r"""(cfg) => {
     const fields = {};
     for (const f of cfg.cssFields) {
       let el = null;
-      try { el = row.querySelector(f.selector) || (row.matches(f.selector) ? row : null); }
+      try {
+        if (f.whereText) {
+          // Pick the match whose own text matches. Bilingual rows (Tadawul:
+          // "Arabic" and "English" side by side) are otherwise indistinguishable
+          // — same tag, no class — and choosing by POSITION would silently swap
+          // the languages on any row that offered only one of them.
+          const rx = new RegExp(f.whereText, 'i');
+          const all = Array.from(row.querySelectorAll(f.selector));
+          el = all.find(x => rx.test(txt(x))) || null;
+        } else {
+          el = row.querySelector(f.selector) || (row.matches(f.selector) ? row : null);
+        }
+      }
       catch (e) { el = null; }                 // an invalid selector yields nothing, never throws
       if (!el) { fields[f.target] = ''; continue; }
       if (f.attr === 'text')      fields[f.target] = txt(el);
@@ -153,12 +165,19 @@ JS_ROWS = r"""(cfg) => {
   return { rows: out, matched: rows.length };
 }"""
 
-JS_DETAIL = r"""() => {
+JS_DETAIL = r"""(strip) => {
   const pick = document.querySelector('main, [role="main"], article, #content, .content, #main');
   const src = pick || document.body || document.documentElement;
   if (!src) return {html:'', text:'', links:[]};
   const clone = src.cloneNode(true);
   clone.querySelectorAll('script,style,noscript,nav,aside,header,footer,form').forEach(n=>n.remove());
+  // The form's content.strip: the regulator's own furniture around the document.
+  // Removed from the CLONE only, and after the link harvest below reads `src`,
+  // so stripping the "Download Original PDF" button still leaves its href for
+  // org_pdf_link.
+  for (const sel of (strip || [])) {
+    try { clone.querySelectorAll(sel).forEach(n => n.remove()); } catch (e) {}
+  }
   const links = Array.from(src.querySelectorAll('a[href]'))
     .filter(a => !a.closest('header, footer, nav, [role="banner"], [role="contentinfo"]'))
     .map(a => ({href:a.href, text:(a.innerText||'').replace(/\s+/g,' ').trim().slice(0,200)}));
@@ -284,6 +303,39 @@ def plan_pages(pagination: dict, seed_url: str, discovered_hrefs: list[str]) -> 
 # THE RUN
 # --------------------------------------------------------------------------- #
 
+JS_PAGE_SIZE = r"""(cfg) => {
+  const sel = document.querySelector(cfg.selector);
+  if (!sel || !sel.options) return {ok: false, reason: 'select not found'};
+  const want = String(cfg.value).trim().toLowerCase();
+  const opt = Array.from(sel.options).find(
+    o => (o.text || '').trim().toLowerCase() === want);
+  if (!opt) return {ok: false, reason: 'option not found',
+                    options: Array.from(sel.options).map(o => (o.text || '').trim())};
+  sel.value = opt.value;
+  // A plain .value assignment does not notify the table — DataTables listens for
+  // a change event, so without this the page still shows ten rows.
+  sel.dispatchEvent(new Event('change', {bubbles: true}));
+  return {ok: true, chosen: (opt.text || '').trim()};
+}"""
+
+
+def _set_page_size(page, cfg: dict) -> dict:
+    """Pick an option in a 'Show N entries' select, then wait for the redraw.
+
+    Worth 69 page loads on SAMA circulars: 685 entries at 10 per page becomes one
+    page at "All". A <select> cannot be handled by expand_selector — clicking it
+    only opens the dropdown.
+    """
+    try:
+        res = page.evaluate(JS_PAGE_SIZE, {"selector": cfg["selector"],
+                                           "value": cfg["value"]})
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:150]}
+    if res.get("ok"):
+        page.wait_for_timeout(int(cfg.get("wait_ms", 5000)))
+    return res
+
+
 def _expand(page, selector: str, rounds: int = 6) -> int:
     """Click every match until the page stops growing.
 
@@ -307,6 +359,103 @@ def _expand(page, selector: str, rounds: int = 6) -> int:
             break
         page.wait_for_timeout(400)
     return clicked
+
+
+JS_TAB_LABELS = r"""(sel) => {
+  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  return Array.from(document.querySelectorAll(sel))
+    .map(e => clean(e.innerText || e.textContent).slice(0, 80));
+}"""
+
+
+def _walk_tabs(page, tabs_cfg: dict, harvest, section_prefix) -> list[dict]:
+    """Click each tab in turn and harvest the rows it reveals.
+
+    The tab's LABEL is the point. MOE renders all 119 documents in one flat
+    container with no category attribute anywhere in the markup — the only place
+    "Personnel" or "Scholarship Program" exists is the tab you clicked to see
+    them. So the label becomes the section for every row harvested under it.
+
+    Tabs are re-queried by index on every iteration because clicking one usually
+    re-renders the list, which invalidates any element handles held across it.
+    """
+    sel = tabs_cfg["selector"]
+    skip = {s.strip().lower() for s in (tabs_cfg.get("skip_labels") or [])}
+    wait_ms = int(tabs_cfg.get("wait_ms", 1200))
+    max_tabs = int(tabs_cfg.get("max_tabs", 50))
+
+    try:
+        labels = page.evaluate(JS_TAB_LABELS, sel)[:max_tabs]
+    except Exception as e:
+        emit({"event": "tabs_error", "error": str(e)[:200]})
+        return []
+
+    log = []
+    for i, label in enumerate(labels):
+        if not label or label.strip().lower() in skip:
+            # "All" is skipped by default on most sites: it repeats every other
+            # tab's contents, and a row harvested under it would take "All" as
+            # its category instead of the real one.
+            emit({"event": "tab_skipped", "label": label})
+            continue
+        try:
+            page.evaluate("(a)=>{const e=document.querySelectorAll(a[0])[a[1]];"
+                          " if(e) e.click();}", [sel, i])
+        except Exception:
+            log.append({"tab": label, "matched": 0, "new": 0, "status": "click-failed"})
+            continue
+        page.wait_for_timeout(wait_ms)
+        res = harvest(list(section_prefix) + [label])
+        log.append({"tab": label, "matched": res["matched"], "new": res["new"],
+                    "status": "ok"})
+        emit({"event": "tab", "label": label, "matched": res["matched"],
+              "new": res["new"]})
+    return log
+
+
+# Is the "Next" control still usable? A pager that has run out does not remove
+# the control — it marks it disabled (MOH: class="disabled"). Clicking a disabled
+# Next silently re-harvests page 1 forever, so this is the stop condition.
+JS_NEXT_STATE = r"""(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return {found: false};
+  const cls = (el.className && el.className.toString) ? el.className.toString() : '';
+  const r = el.getBoundingClientRect();
+  const cs = getComputedStyle(el);
+  return {
+    found: true,
+    disabled: /disabled/i.test(cls)
+              || el.getAttribute('aria-disabled') === 'true'
+              || el.hasAttribute('disabled'),
+    hidden: r.width < 2 || r.height < 2 || cs.display === 'none' || cs.visibility === 'hidden',
+    label: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40),
+    page: el.getAttribute('data-page') || '',
+  };
+}"""
+
+
+def _stated_total(page, cfg: dict) -> int | None:
+    """The total the page states about itself, or None.
+
+    DataTables writes "Showing 1 to 685 of 685 entries". That number comes from
+    the site, so comparing it against what we harvested is the one coverage check
+    that does not rely on our own selectors being right.
+    """
+    if not cfg:
+        return None
+    try:
+        txt = page.evaluate(
+            "(s)=>{const e=document.querySelector(s); return e ? (e.innerText||e.textContent||'') : ''}",
+            cfg["selector"])
+    except Exception:
+        return None
+    m = re.search(cfg["pattern"], txt or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", "").replace(" ", ""))
+    except ValueError:
+        return None
 
 
 def _load(page, url: str, wait_ms: int, tries: int = 3) -> bool:
@@ -360,14 +509,27 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
         pagination["max_pages"] = max_pages
     row_sel = hints.get("row_selector") or ""      # absent on shape: tree
     link_sel = hints.get("detail_link_selector") or ""
-    css_fields = [{"target": t, "selector": r["selector"], "attr": r.get("attr", "text")}
+    css_fields = [{"target": t, "selector": r["selector"], "attr": r.get("attr", "text"),
+                   "whereText": r.get("where_text") or ""}
                   for t, r in (hints.get("fields") or {}).items() if r.get("from") == "css"]
     rx_fields = compile_field_regexes(hints)
     do_details = hints.get("fetch_details", True) if fetch_details is None else fetch_details
 
+    strip_sels = list((hints.get("content") or {}).get("strip") or [])
+    lib = hints.get("library") or {}
+
     sp = hints.get("section_path") or {}
-    section_prefix = list(sp.get("prefix") or [])
+    # library.regulator / library.source_system lead every path, so the
+    # crawler's own Excel shows the same trail the library will use.
+    # Kept separate: library_crumbs identify the SOURCE and are always wanted,
+    # while section_path.prefix is this page's own contribution and is a FALLBACK
+    # when from_breadcrumb supplies nothing.
+    library_crumbs = [c for c in (lib.get("regulator"), lib.get("source_system")) if c]
+    section_prefix = library_crumbs + list(sp.get("prefix") or [])
     expand_sel = hints.get("expand_selector") or ""
+    tabs_cfg = hints.get("tabs") or {}
+    page_size_cfg = hints.get("page_size") or {}
+    row_count_cfg = hints.get("row_count_check") or {}
     crumb_sel = sp.get("from_breadcrumb") or ""
     crumb_drop_first = int(sp.get("drop_first", 0))
     crumb_drop_last = int(sp.get("drop_last", 0))
@@ -386,13 +548,28 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
     page_log: list[dict] = []
     warnings: list[str] = []
     plan_note: dict = {"mode": pagination.get("mode", "none")}
+    stated_totals: list = []   # (site says, we matched) per listing page
+    list_total: int | None = None   # a WHOLE-LIST total, when the page states one
     blocked = 0        # pages that came back as a bot-protection wall
 
     emit({"event": "start", "name": hints.get("name"), "seed": seed,
           "row_selector": row_sel, "mode": pagination.get("mode")})
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
+        # Some sites fingerprint headless Chromium and refuse it outright.
+        # Tadawul returns 403 "Access Denied" headless and 200 headful, so a
+        # scheduled headless run would quietly harvest nothing. A form can
+        # declare that, and it OVERRIDES the caller — the site's requirement is
+        # a fact about the site, not a preference of whoever launched the run.
+        if hints.get("requires_headed") and headless:
+            headless = False
+            print(json.dumps({"event": "note",
+                              "message": "requires_headed: forcing a visible browser "
+                                         "(this site rejects headless)"}), flush=True)
+        browser = pw.chromium.launch(
+            headless=headless,
+            args=["--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled"])
         ctx = browser.new_context(user_agent=UA, locale="en-US")
         page = ctx.new_page()
 
@@ -408,6 +585,15 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                     "Everything below is the challenge page, not the site. Slow the "
                     "crawl down, or this source needs mode: custom.")
                 emit({"event": "blocked", "url": seed, "reason": blocked_reason})
+            if page_size_cfg:
+                res = _set_page_size(page, page_size_cfg)
+                emit({"event": "page_size", **res})
+                if not res.get("ok"):
+                    warnings.append(
+                        f"page_size did NOT apply ({res.get('reason')}) "
+                        "— the crawl is limited to the default page size, so the "
+                        "count below is a fraction of the site")
+
             if expand_sel:
                 n = _expand(page, expand_sel)
                 emit({"event": "expand", "selector": expand_sel, "clicked": n})
@@ -433,7 +619,25 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                 })
                 seen.add(seed)
 
-            if is_tree:
+            if tabs_cfg:
+                # One row per (document, tab): a file offered under two
+                # categories is two placements, exactly as with cross-listed
+                # documents elsewhere. `documents` still de-duplicates on URL
+                # and records the extra placements in `also_in`.
+                def _tab_harvest(trail):
+                    return _harvest(page, row_sel, link_sel, css_fields, rx_fields,
+                                    seed, rows, seen, trail, section_levels,
+                                    dedupe_scope=trail[-1] if trail else "")
+
+                tab_log = _walk_tabs(page, tabs_cfg, _tab_harvest, section_prefix)
+                page_log.extend([{"url": f"{seed}#{t['tab']}", **t} for t in tab_log])
+                plan_note = {"mode": "tabs", "tabs_walked": len(tab_log)}
+                if not rows:
+                    warnings.append(
+                        f"no rows harvested from any tab — check tabs.selector "
+                        f"{tabs_cfg['selector']!r} and row_selector {row_sel!r}")
+                listing_urls = []
+            elif is_tree:
                 # One page, one menu. Everything below the listing loop is the
                 # same for both shapes, which is the whole reason a tree is a
                 # shape here rather than a second crawler.
@@ -463,6 +667,35 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                 new = _harvest(page, row_sel, link_sel, css_fields, rx_fields,
                                lurl, rows, seen, section_prefix, section_levels)
                 matched = new["matched"]
+
+                # Does the page agree with us about how many rows it has?
+                stated = _stated_total(page, row_count_cfg)
+                # A whole-list total says nothing about THIS page, so it must not
+                # drive the per-page shortfall retry or the per-page comparison.
+                # It is checked once, against the finished inventory.
+                if stated is not None and row_count_cfg.get("total") == "list":
+                    if list_total is None:
+                        list_total = stated
+                        emit({"event": "row_count", "stated": stated,
+                              "counts": "whole list", "matched": matched})
+                    stated = None
+                if stated is not None:
+                    tol = int(row_count_cfg.get("tolerance", 0))
+                    if matched < stated - tol:
+                        # A redraw that had not settled, or rows still arriving.
+                        # Wait and harvest again before believing the shortfall —
+                        # the retry is cheap and the alternative is losing rows.
+                        emit({"event": "row_count_short", "matched": matched,
+                              "stated": stated, "action": "retrying"})
+                        page.wait_for_timeout(6000)
+                        again = _harvest(page, row_sel, link_sel, css_fields,
+                                         rx_fields, lurl, rows, seen,
+                                         section_prefix, section_levels)
+                        matched = max(matched, again["matched"])
+                        new = {"matched": matched,
+                               "new": new["new"] + again["new"]}
+                    stated_totals.append((stated, matched))
+                    emit({"event": "row_count", "stated": stated, "matched": matched})
                 page_log.append({"url": lurl, "matched": matched, "new": new["new"], "status": "ok"})
 
                 if matched == 0:
@@ -484,9 +717,109 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
 
             # PHASE 1 over. This is the inventory, and on its own it is what
             # change detection consumes.
+            for stated, matched in stated_totals:
+                if matched < stated:
+                    warnings.append(
+                        f"COVERAGE GAP: the page states {stated} rows, we harvested "
+                        f"{matched} — {stated - matched} row(s) were not captured "
+                        "even after a retry")
+                elif matched > stated:
+                    warnings.append(
+                        f"harvested {matched} rows but the page states {stated} — "
+                        "the row selector may be matching extra elements")
+
+            # ---------- click pagination ----------
+            # Some pagers have no URL to construct: every link is
+            # javascript:void(0) and the list is redrawn in place (MOH). So walk
+            # it by clicking, and stop on the pager's OWN signal rather than a
+            # guess — a disabled Next, a missing Next, or a redraw that adds no
+            # rows. All three are real endings; a click budget alone is not.
             if pagination.get("mode") == "click":
-                warnings.append("pagination mode 'click' walks only the first page in "
-                                "this version — use url_offset/url_page where possible")
+                next_sel = pagination.get("next_selector") or ""
+                max_click_pages = int(pagination.get("max_pages", 200))
+                # The strongest stop signal is the site's OWN total, when it
+                # publishes one ("Showing 1-10 of 75 items"). It beats reading the
+                # pager's disabled state, which some sites — MOH included — apply
+                # with their own JS AFTER the list initialises, so a check can win
+                # the race and see an enabled Next on a single-page list.
+                target = list_total or (stated_totals[0][0] if stated_totals else None)
+                page_no, barren = 1, 0
+                while page_no < max_click_pages:
+                    if target is not None and len(rows) >= target:
+                        emit({"event": "pager_end", "page": page_no,
+                              "reason": f"reached the stated total of {target} rows"})
+                        break
+                    try:
+                        state = page.evaluate(JS_NEXT_STATE, next_sel)
+                    except Exception:
+                        state = {"found": False}
+                    if not state.get("found"):
+                        warnings.append(
+                            f"pagination.next_selector matched nothing after page "
+                            f"{page_no} ({next_sel!r}) — the walk may be incomplete")
+                        break
+                    if state.get("disabled") or state.get("hidden"):
+                        emit({"event": "pager_end", "page": page_no,
+                              "reason": "next is disabled"})
+                        break
+
+                    before = len(rows)
+                    try:
+                        page.click(next_sel, timeout=8000)
+                    except Exception as e:
+                        warnings.append(f"clicking next failed on page {page_no}: "
+                                        f"{str(e)[:80]}")
+                        break
+                    page.wait_for_timeout(max(wait_ms, 1200))
+
+                    got = _harvest(page, row_sel, link_sel, css_fields, rx_fields,
+                                   seed, rows, seen, section_prefix, section_levels)
+                    page_no += 1
+                    gained = len(rows) - before
+                    page_log.append({"url": f"{seed}#page={page_no}",
+                                     "matched": got["matched"], "new": gained,
+                                     "status": "ok"})
+                    if target is not None and len(rows) >= target:
+                        emit({"event": "pager_end", "page": page_no,
+                              "reason": f"reached the stated total of {target} rows"})
+                        break
+                    if gained == 0:
+                        # A redraw that adds nothing is either the end or a pager
+                        # that looped back. One is tolerable, two is a stop.
+                        barren += 1
+                        if barren >= 2:
+                            emit({"event": "pager_end", "page": page_no,
+                                  "reason": "two redraws added no rows"})
+                            break
+                    else:
+                        barren = 0
+                    if page_no == 2 or page_no % 10 == 0:
+                        emit({"event": "list_page", "page": page_no,
+                              "of": max_click_pages, "matched": got["matched"],
+                              "rows": len(rows)})
+                emit({"event": "pager_done", "pages_walked": page_no,
+                      "rows": len(rows)})
+                if page_no >= max_click_pages:
+                    warnings.append(
+                        f"click pagination stopped at max_pages={max_click_pages} "
+                        "— this is a CAP, not the end of the list")
+
+            # Coverage is judged on the FINISHED inventory, which is only
+            # complete here: with click pagination the walk above adds most of
+            # the rows, so checking earlier compared 75 against page one's 10.
+            if list_total is not None:
+                if len(rows) < list_total:
+                    warnings.append(
+                        f"COVERAGE GAP: the site states {list_total} rows in this "
+                        f"list, the walk finished with {len(rows)} — "
+                        f"{list_total - len(rows)} row(s) missing")
+                elif len(rows) > list_total:
+                    warnings.append(
+                        f"harvested {len(rows)} rows but the site states "
+                        f"{list_total} — the row selector may be matching extras")
+                else:
+                    emit({"event": "coverage_ok", "stated": list_total,
+                          "harvested": len(rows)})
         finally:
             page.close()
 
@@ -534,7 +867,7 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                                 f"BLOCKED BY BOT PROTECTION at {r['href']}: {reason!r}")
                         continue
                     try:
-                        d = dp.evaluate(JS_DETAIL)
+                        d = dp.evaluate(JS_DETAIL, strip_sels)
                     except Exception:
                         records.append(_record(r, section, seed))
                         continue
@@ -563,19 +896,45 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                         crumbs = crumbs[crumb_drop_first:len(crumbs) - crumb_drop_last
                                         if crumb_drop_last else None]
                         if len(crumbs) >= 2:
-                            r["section_trail"] = crumbs
+                            # The breadcrumb REPLACES the trail, which would drop
+                            # the library crumbs with it — SAMA's breadcrumb starts
+                            # at "SAMA Rulebook" and never names the regulator. Put
+                            # them back in front; the de-dupe drops whichever the
+                            # breadcrumb already supplies.
+                            # Only the library crumbs, and only the ones the
+                            # breadcrumb does not already name ANYWHERE — not just
+                            # adjacently. SAMA's breadcrumb is "SAMA Rulebook >
+                            # Regulatory Sandbox > …", so prepending the form's
+                            # fallback prefix too produced "SAMA > SAMA Rulebook >
+                            # Regulatory Sandbox > SAMA Rulebook > Regulatory
+                            # Sandbox > …" — a consecutive-only de-dupe cannot see
+                            # a repeat that has something between the copies.
+                            have = {c.strip().lower() for c in crumbs if c}
+                            head = [c for c in library_crumbs
+                                    if c.strip().lower() not in have]
+                            r["section_trail"] = head + list(crumbs)
 
                     row_path = " > ".join(r.get("section_trail") or []) or section
-                    doc_links = []
+                    doc_links, doc_files = [], []
                     for l in d.get("links", []):
                         h = l.get("href") or ""
                         if h.startswith("http") and _is_doc(h):
                             doc_links.append(h)
-                            _add_document(documents, h, l.get("text") or r["title"],
+                            doc_files.append({"href": h, "text": (l.get("text") or "").strip()})
+                            # "Download Original PDF" is a button label, not a
+                            # title. Left as-is, every SAMA circular's PDF was
+                            # filed under that name.
+                            _add_document(documents, h,
+                                          _doc_title(l.get("text"), r["title"]),
                                           r["href"], row_path)
                     records.append(_record(r, section, seed, {
                         "n_pdfs": len(doc_links),
                         "pdf_links": " | ".join(doc_links),
+                        # href + label per attached file. `pdf_links` keeps only
+                        # the urls (and the pipeline's tier-3 fallback reads it),
+                        # but a page with several attachments needs each file's
+                        # own label to be nameable — SAMA circulars go up to 7.
+                        "pdf_docs": doc_files,
                         "text_len": len(d.get("text") or ""),
                         "text": d.get("text") or "",
                         "html": d.get("html") or "",
@@ -613,6 +972,9 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
         # discovered from the site instead of frozen in the form, because a
         # discovered number can move between runs.
         "plan": plan_note,
+        # What the site said about itself versus what we took. A gap here is a
+        # coverage gap, and it is invisible to a stability check.
+        "stated_vs_matched": stated_totals,
         "rows": len(rows),
         "records": len(records),
         "documents": len(docs),
@@ -628,21 +990,44 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
     html_written = _write_html_files(out, records) if any(r.get("html") for r in records) else 0
     summary["html_files"] = html_written
 
+    if write_excel:
+        # Written BEFORE run.json, or a failure here never reaches the file that
+        # reports it. That is exactly what happened: results.xlsx was open in
+        # Excel, the write raised PermissionError, the warning went into an
+        # in-memory summary that had already been serialised, and the run
+        # reported success next to a stale spreadsheet from a previous run.
+        target = out / "results.xlsx"
+        try:
+            _write_excel(target, rows, records, docs)
+            summary["xlsx"] = str(target)
+        except PermissionError:
+            # Almost always "open in Excel". Do not lose the data — write beside
+            # it and say so loudly.
+            alt = out / "results.locked.xlsx"
+            try:
+                _write_excel(alt, rows, records, docs)
+                summary["xlsx"] = str(alt)
+                summary["warnings"].append(
+                    f"{target.name} is LOCKED (open in Excel?) — the file you are "
+                    f"looking at is STALE. This run was written to {alt.name}.")
+            except Exception as e:
+                summary["warnings"].append(
+                    f"excel write failed and the fallback failed too: {e}. "
+                    "rows.json has the data.")
+        except Exception as e:                    # never lose a crawl to a spreadsheet
+            summary["warnings"].append(f"excel write failed: {e}. rows.json has the data.")
+
     (out / "pages.json").write_text(json.dumps(
         {"seed": seed, "shape": hints.get("shape"), "engine": "formfill",
          "pages": records, "documents": docs}, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "rows.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "run.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    if write_excel:
-        try:
-            _write_excel(out / "results.xlsx", rows, records, docs)
-            summary["xlsx"] = str(out / "results.xlsx")
-        except Exception as e:                    # never lose a crawl to a spreadsheet
-            summary["warnings"].append(f"excel write failed: {e}")
 
     emit({"event": "done", **{k: summary[k] for k in
                               ("rows", "records", "documents", "html_files", "seconds")},
-          "out_dir": str(out)})
+          "warnings": len(summary["warnings"]), "out_dir": str(out)})
+    for w in summary["warnings"]:
+        emit({"event": "warning", "message": w})
     return summary
 
 
@@ -712,7 +1097,7 @@ def _walk_tree(page, tree: dict, rx_fields: dict, page_url: str, rows: list, see
 
 
 def _harvest(page, row_sel, link_sel, css_fields, rx_fields, page_url, rows, seen,
-             section_prefix=(), section_levels=()) -> dict:
+             section_prefix=(), section_levels=(), dedupe_scope="") -> dict:
     try:
         res = page.evaluate(JS_ROWS, {"rowSel": row_sel, "linkSel": link_sel,
                                       "cssFields": css_fields,
@@ -732,7 +1117,17 @@ def _harvest(page, row_sel, link_sel, css_fields, rx_fields, page_url, rows, see
 
         href = fields.get("document_url") or raw.get("href") or ""
         title = fields.get("title") or raw.get("link_text") or ""
-        key = href or f"{page_url}::{title}"
+        # Keyed on the link AND the title, not the link alone.
+        #
+        # SAMA lists circular 410333430000 twice at the same URL, once as "Rules on
+        # Management of Problem Loans" and once as "Guidelines on Management of
+        # Problem Loans". Keying on the URL threw the second away; they are two
+        # entries the regulator chose to publish, so both come in. An exact repeat
+        # of link AND title is still a duplicate and is still dropped.
+        #
+        # dedupe_scope additionally keeps the same file appearing under two tabs
+        # as two placements (MOE's categories).
+        key = (href or page_url, (title or "").strip().lower(), dedupe_scope)
         if not key or key in seen:
             continue
         seen.add(key)
@@ -774,6 +1169,7 @@ def _record(r: dict, section: str, seed: str, extra: dict | None = None) -> dict
         "html": "",
         "breadcrumb": trail or ([section] if section else []),
         "row_text": r.get("row_text", ""),
+        "pdf_docs": [],
         # The form's extracted fields, kept alongside so the orchestrator adapter
         # can map them onto RegulatoryDocument without re-parsing anything.
         "fields": r.get("fields", {}),
@@ -795,6 +1191,19 @@ def _fill_rates(rows: list[dict], hints: dict) -> dict:
     n = len(rows) or 1
     return {t: round(100.0 * sum(1 for r in rows if (r["fields"].get(t) or "").strip()) / n, 1)
             for t in targets}
+
+
+_GENERIC_LINK_TEXT = re.compile(
+    r"^(download(\s+(the\s+)?(original\s+)?(pdf|file|document))?|pdf|view|open"
+    r"|click here|here|read more|more|link|attachment)\.?$", re.I)
+
+
+def _doc_title(link_text: str, row_title: str) -> str:
+    """Prefer the row's title when the link's own text says nothing."""
+    t = (link_text or "").strip()
+    if not t or _GENERIC_LINK_TEXT.match(t):
+        return (row_title or "").strip() or t
+    return t
 
 
 def _add_document(documents: dict, url: str, title: str, found_on: str, section: str) -> None:
@@ -857,8 +1266,22 @@ def _write_html_files(out: Path, records: list[dict]) -> int:
             continue
         slug = re.sub(r"[^a-z0-9]+", "-", (rec.get("title") or "page").lower()).strip("-")[:60]
         name = f"{i:04d}_{slug or 'page'}.html"
-        (hdir / name).write_text(
-            f"<!-- source: {rec.get('url', '')} -->\n{html}", encoding="utf-8")
+        # Wrapped in a minimal document with <base href>. The captured fragment
+        # keeps the site's own relative paths — SAMA's icons are
+        # src="/sites/default/files/en_net_file_store/2022-1.jpg" — which resolve
+        # against file:// when the saved page is opened and render as broken
+        # images. <base> points them back at the origin.
+        url = rec.get("url", "")
+        origin = ""
+        try:
+            u = urlparse(url)
+            origin = f"{u.scheme}://{u.netloc}/" if u.scheme and u.netloc else ""
+        except Exception:
+            pass
+        head = (f'<!doctype html>\n<html><head><meta charset="utf-8">\n'
+                f'<base href="{origin}">\n<title>{(rec.get("title") or "")[:150]}</title>\n'
+                f'</head><body>\n<!-- source: {url} -->\n')
+        (hdir / name).write_text(head + html + "\n</body></html>\n", encoding="utf-8")
         rec["html_file"] = f"html/{name}"
         written += 1
     return written

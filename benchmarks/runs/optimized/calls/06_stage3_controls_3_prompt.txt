@@ -1,0 +1,30 @@
+You are a senior banking internal controls architect.
+
+Design exactly ONE internal control for each obligation below. Every obligation
+listed is an ongoing control obligation and requires a control.
+
+Each control must be auditable and specific, with these fields:
+  title    = control_title
+  obj      = control_objective (one sentence)
+  desc     = control_description (2-3 sentences)
+  owner    = control_owner (realistic bank department)
+  type     = Preventive | Detective
+  exec     = Manual | Automated | Hybrid
+  freq     = frequency (e.g. Daily | Weekly | Per-Transaction | Event-Driven)
+  level    = Policy | Process | System
+  evidence = evidence_generated (the artifact proving this ran)
+  steps    = key_steps (array of 3-5 short steps)
+  risk     = Low | Medium | High
+
+Rules:
+- Use ONLY the listed values for type, exec, level and risk.
+- Do not echo the obligation text back.
+- The document is in English. ALL text you write must be in English. Do NOT translate.
+
+━━━ OUTPUT ━━━
+Return MINIFIED JSON on a single line: no line breaks, no indentation, no spaces between tokens. No markdown, no code fences, no explanation.
+Schema:
+{"c":[{"i":"<obligation_id>","ctrl":{"title":"","obj":"","desc":"","owner":"","type":"","exec":"","freq":"","level":"","evidence":"","steps":[""],"risk":""}}]}
+
+Obligations:
+[{"i":"REQ-004-OB-001","t":"No bank shall engage, whether for its own account or on a commission basis, in the wholesale or retail trade including the import or export trade."},{"i":"REQ-004-OB-002","t":"No bank shall have any direct interest, whether as a stock-holder, partner, owner, or otherwise, in any commercial, industrial, agricultural or other undertaking unless within the limits referred to in paragraph 4 of this Article, except when such interest results from the satisfaction of debts due to the bank, provided that all such interests shall be disposed of within a period of two years or within any such longer period as may be determined in consultation with SAMA."},{"i":"REQ-004-OB-004","t":"No bank shall own stocks of any other joint-stock company incorporated in the Kingdom, in excess of ten percent of the paid up capital of such a company provided that the nominal value of these shares shall not exceed twenty percent of the bank's paid-up capital and reserves."},{"i":"REQ-004-OB-005","t":"No bank shall acquire or lease real estate except in so far as may be necessary for the purpose of conducting its banking business, housing of its employees or for their recreation or in satisfaction of debts due to the Bank."},{"i":"REQ-004-OB-006","t":"In cases where a bank acquires real estate in satisfaction of debts due to it and such real estate is not necessary for the Bank's own banking business or housing of its employees or for their recreation, it shall liquidate such real estate within three years of its acquisition or within the period or periods approved by SAMA and under the conditions as it may determine where exceptional circumstances are justified."}]

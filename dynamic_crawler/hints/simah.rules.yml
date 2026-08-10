@@ -55,7 +55,18 @@ fields:
     attr: href
 
 section_path:
-  prefix: ["SIMAH", "Rules and Regulations"]
+  # No prefix. The folder trail is  regulator > source_system > <here> > title,
+  # and the source YAML already supplies the first two crumbs. Repeating either
+  # of them here would create a duplicate folder.
+  prefix: []
 
 fetch_details: true
 notes: "Page-as-document plus one attached PDF; accordions expanded before capture."
+
+# Who this source belongs to. These two lead the folder trail AND the
+# section_path column in the Excel, so the crawler's own output shows the
+# same path the library will use. Defined here only — the pipeline reuses
+# them rather than prepending its own copy.
+library:
+  regulator: "SIMAH"
+  source_system: "Rules and Regulations"

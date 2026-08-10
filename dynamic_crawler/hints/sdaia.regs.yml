@@ -53,7 +53,10 @@ fields:
     attr: href
 
 section_path:
-  prefix: ["SDAIA", "Laws and Regulations"]
+  # No prefix. The folder trail is  regulator > source_system > <here> > title,
+  # and the source YAML already supplies the first two crumbs. Repeating either
+  # of them here would create a duplicate folder.
+  prefix: []
   levels:
     # The card is the grouping: every file inside it belongs to that instrument.
     - {ancestor: "div.card", title: "h5.card-title"}
@@ -61,11 +64,18 @@ section_path:
 # Every row is already a PDF link — there is no detail page to open.
 fetch_details: false
 notes: "One row per PDF. Cards with several attachments produce several documents."
+# Who this source belongs to. These two lead the folder trail AND the
+# section_path column in the Excel, so the crawler's own output shows the
+# same path the library will use. Defined here only — the pipeline reuses
+# them rather than prepending its own copy.
+library:
+  regulator: "SDAIA"
+  source_system: "Laws and Regulations"
 meta:
   approved: true
-  approved_by: ai.team@benchmatrix.com
-  approved_at: '2026-08-02T15:58:22+00:00'
-  form_hash: 4389353c3416
+  approved_by: your name
+  approved_at: '2026-08-03T09:09:33+00:00'
+  form_hash: ea50265957a3
   verify:
     verdict: PASS
     counts:
@@ -76,5 +86,5 @@ meta:
     fill_rates:
       title: 100.0
       document_url: 100.0
-    verified_at: '2026-08-02T15:57:59+00:00'
+    verified_at: '2026-08-03T09:09:32+00:00'
     forced: false

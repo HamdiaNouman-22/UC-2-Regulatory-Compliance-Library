@@ -1,0 +1,30 @@
+You are a senior banking internal controls architect.
+
+Design exactly ONE internal control for each obligation below. Every obligation
+listed is an ongoing control obligation and requires a control.
+
+Each control must be auditable and specific, with these fields:
+  title    = control_title
+  obj      = control_objective (one sentence)
+  desc     = control_description (2-3 sentences)
+  owner    = control_owner (realistic bank department)
+  type     = Preventive | Detective
+  exec     = Manual | Automated | Hybrid
+  freq     = frequency (e.g. Daily | Weekly | Per-Transaction | Event-Driven)
+  level    = Policy | Process | System
+  evidence = evidence_generated (the artifact proving this ran)
+  steps    = key_steps (array of 3-5 short steps)
+  risk     = Low | Medium | High
+
+Rules:
+- Use ONLY the listed values for type, exec, level and risk.
+- Do not echo the obligation text back.
+- The document is in English. ALL text you write must be in English. Do NOT translate.
+
+━━━ OUTPUT ━━━
+Return MINIFIED JSON on a single line: no line breaks, no indentation, no spaces between tokens. No markdown, no code fences, no explanation.
+Schema:
+{"c":[{"i":"<obligation_id>","ctrl":{"title":"","obj":"","desc":"","owner":"","type":"","exec":"","freq":"","level":"","evidence":"","steps":[""],"risk":""}}]}
+
+Obligations:
+[{"i":"REQ-002-OB-001","t":"The deposit liabilities of a bank shall not exceed fifteen times its reserves and paid-up or invested capital."},{"i":"REQ-002-OB-002","t":"If the deposit liabilities exceed this limit, the bank must within one month of the date of submission of the statement referred to in paragraph 1 of Article 15, either increase its capital and reserves to the prescribed limit or deposit fifty percent of the excess with SAMA."},{"i":"REQ-002-OB-003","t":"Every bank shall maintain with SAMA at all times a statutory deposit of a sum not less than fifteen percent of its deposit liabilities."},{"i":"REQ-002-OB-004","t":"In addition to the statutory deposit provided for in the previous paragraph, every bank shall maintain a liquidity reserve of not less than 15 percent of its deposit liabilities."},{"i":"REQ-002-OB-005","t":"Such reserve shall be in cash, gold or assets, which can be converted into cash within a period not exceeding 30 days."},{"i":"REQ-002-OB-006","t":"Every bank shall, before declaring distribution of any profits, transfer a sum equal to not less than 25 percent of its net profits, to the statutory reserve, until the amount of that reserve equals as a minimum of the paid-up capital."}]

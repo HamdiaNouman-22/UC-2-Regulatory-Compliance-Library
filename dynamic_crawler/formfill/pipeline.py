@@ -31,6 +31,7 @@ if the pipeline honours it.
 
 from __future__ import annotations
 
+import copy
 import logging
 import subprocess
 import sys
@@ -39,7 +40,8 @@ from pathlib import Path
 from typing import List, Optional
 
 try:
-    from crawler.generic_crawler_wrapper import GenericSiteCrawler, _parse_row_date
+    from crawler.generic_crawler_wrapper import (GenericSiteCrawler, _dedupe_keep_order,
+                                             _parse_row_date, _split_section_path)
 except ImportError as _e:                      # pragma: no cover - environment issue
     # This module is the ONLY part of formfill that needs the generic wrapper —
     # deliberately, since it reuses that file's pages.json -> RegulatoryDocument
@@ -51,6 +53,7 @@ except ImportError as _e:                      # pragma: no cover - environment 
         "which is not present in this checkout. Pull the branch that adds it. "
         "The formfill CLI does not depend on it and works without.") from _e
 
+from dynamic_crawler.formfill.runner import _doc_title, _ext_type, content_key
 from dynamic_crawler.formfill.schema import approval_state, load_hints
 
 logger = logging.getLogger(__name__)
@@ -135,12 +138,105 @@ class FormfillCrawler(GenericSiteCrawler):
     # document entry" and the gate verified it fills. So: a row with a URL is a
     # document.
 
+    # ---- document_url is the FILE; source_page_url is the page ---------------
+    #
+    # The parent maps a page row to a single document whose `document_url` is the
+    # PAGE, and hangs the attached PDF off `extra_meta["org_pdf_link"]`. That
+    # conflicts with what the columns mean everywhere else in the schema —
+    # `source_page_url` is "the page we found it on", `document_url` is the file —
+    # and it produced the same regulation twice: once as an HTML page record and
+    # again as a file record for its own PDF.
+    #
+    # So a page with k attached files becomes k documents, each with its own
+    # `document_url` (the file) and its own `content_hash`, all sharing
+    # `source_page_url` (the page) and the page's text and HTML. A page with no
+    # attachment stays one HTML document, as before.
+    #
+    # k varies: SAMA circulars run 0–7 attachments per circular.
+
+    def _explode_page(self, r: dict, shape: str) -> List:
+        base = self._doc_from_page_row(r, shape)
+        if base is None:
+            return []
+        files = [f for f in (r.get("pdf_docs") or []) if (f.get("href") or "").startswith("http")]
+        if not files:
+            return [base]                      # the page IS the document
+
+        if not self.hints.get("attachment_is_document", False):
+            # SBP-style: the page is the regulation and these are annexures.
+            # Recorded, not promoted — one 2022 circular has 40 of them.
+            base.extra_meta["annexures"] = " | ".join(f["href"] for f in files[:40])
+            base.extra_meta["n_annexures"] = len(files)
+            return [base]
+
+        page_url = (r.get("url") or "").strip()
+        page_title = (base.title or "").strip()
+        out, used_titles = [], set()
+        for f in files:
+            d = copy.copy(base)
+            d.extra_meta = dict(base.extra_meta or {})
+            d.document_url = f["href"]
+            d.source_page_url = page_url
+            d.file_type = _ext_type(f["href"])
+            # The file's own label when it says something; otherwise the page
+            # title, suffixed only when one page contributes several files, so two
+            # rows never collide on (title, folder).
+            label = _doc_title(f.get("text"), page_title)
+            if label in used_titles:
+                label = f"{page_title} — {f['href'].rsplit('/', 1)[-1]}"
+            used_titles.add(label)
+            d.title = label
+            d.doc_path = self._folder_trail(r.get("section_path") or "", label)
+            d.content_hash = content_key(f"{f['href']}|{label}")
+            d.extra_meta["record_kind"] = "page_attachment"
+            d.extra_meta["page_title"] = page_title
+            out.append(d)
+        return out
+
     def _want_pages(self, pages: List[dict]) -> bool:
         return True
 
     @staticmethod
     def _page_is_document(r: dict) -> bool:
         return bool((r.get("url") or "").strip())
+
+    # ---- the folder trail ----------------------------------------------------
+
+    def _folder_trail(self, section_path: str, title: str) -> List[str]:
+        """regulator -> source -> the site's own sections -> this document.
+
+        Identical to the parent's `_doc_path` except for the last element.
+
+        **The document's title is the leaf.**
+        `_get_or_create_compliance_category` refuses to reuse a leaf folder that
+        already has a regulation attached, and creates a same-named sibling
+        instead — correct when the leaf IS the document's node, which is what
+        CBB and tree sites produce. On a listing the leaf is a CATEGORY shared
+        by many documents, so the rule fires on every document after the first:
+        MOE's 136 documents produced 140 folders, including 28 siblings all
+        called "Special Education". With the title as the leaf, each category is
+        one shared folder and each document gets its own node underneath.
+
+        `source_system` stays in the trail. An earlier version dropped it,
+        which was fixing the wrong thing: the level is legitimate — it is what
+        separates two sources of one regulator — the problem was only that some
+        values are codes that read badly as a folder (`MISA-LAWS`) while others
+        read fine (`SAMA RULEBOOK`). Name the source for a human in the source
+        YAML and the level costs nothing.
+
+        Consequence worth knowing: whatever `source_system` says becomes a
+        folder, so it must not repeat what `section_path.prefix` already says.
+        """
+        # When the form declares `library`, the runner has ALREADY put the
+        # regulator and source_system at the head of every section_path — so
+        # prepending them again here would only work by luck: _dedupe_keep_order
+        # collapses consecutive duplicates, which saves you when the two configs
+        # agree on the exact string and silently doubles the folders when they
+        # do not. Trust the form when it speaks.
+        head = [] if (self.hints.get("library") or {}) else [self.regulator,
+                                                            self.source_system]
+        parts = head + _split_section_path(section_path) + [title]
+        return _dedupe_keep_order([p for p in parts if p])
 
     # ---- the fields a form knows and a link walk does not -------------------
 
@@ -156,6 +252,17 @@ class FormfillCrawler(GenericSiteCrawler):
         if doc is None:
             return None
         fields = r.get("fields") or {}
+
+        # The site's own status ("In-Force", "Superseded") is the REGULATOR's
+        # claim about its document, not our record's state. `status` on the
+        # regulation belongs to the monitoring lifecycle (new / modified /
+        # unchanged), so the site's value is kept separately rather than fighting
+        # over one column.
+        site_status = (fields.get("status") or "").strip()
+        if site_status:
+            doc.extra_meta = dict(doc.extra_meta or {})
+            doc.extra_meta["regulator_status"] = site_status
+
         for target in ("reference_no", "department", "year", "category", "urdu_url"):
             value = (fields.get(target) or "").strip()
             if value:
@@ -169,6 +276,7 @@ class FormfillCrawler(GenericSiteCrawler):
         raw_date = (fields.get("published_date") or "").strip()
         if raw_date:
             doc.published_date = _parse_row_date(raw_date) or doc.published_date or raw_date
+        doc.doc_path = self._folder_trail(r.get("section_path") or "", doc.title)
         doc.extra_meta["crawler"] = "formfill"
         doc.extra_meta["hints"] = self.hints_path
         doc.extra_meta["form_approved_by"] = (self.hints.get("meta") or {}).get("approved_by")
@@ -178,6 +286,7 @@ class FormfillCrawler(GenericSiteCrawler):
         doc = super()._doc_from_document_row(d, shape)
         if doc is None:
             return None
+        doc.doc_path = self._folder_trail(d.get("section_path") or "", doc.title)
         doc.extra_meta["crawler"] = "formfill"
         doc.extra_meta["hints"] = self.hints_path
         # A file linked from many pages is still ONE document; keep the evidence
@@ -210,5 +319,53 @@ def build_formfill_source(cfg: dict):
         fetch_details=cfg.get("fetch_details"),
     )
 
+
+def _fetch_documents_formfill(self, limit=None):
+    """Same contract as the parent, different assembly.
+
+    1. every page becomes one document per attached file (or one HTML document
+       when it has none), and
+    2. a file record is dropped when a page already claimed that URL — otherwise
+       the same regulation is inserted and analysed twice, once from the page and
+       once from its own PDF. On SAMA circulars that was 701 duplicate records.
+    """
+    result = self._run_crawl()
+    self.last_result = result
+    shape = result.get("shape", "generic")
+    pages = result.get("pages", []) or []
+    files = result.get("documents", []) or []
+
+    out, seen = [], set()
+
+    def _add(doc):
+        if not doc:
+            return
+        key = (doc.document_url, " > ".join(doc.doc_path or []))
+        if key not in seen:
+            seen.add(key)
+            out.append(doc)
+
+    claimed = set()
+    for r in pages:
+        for doc in self._explode_page(r, shape):
+            claimed.add(doc.document_url)
+            _add(doc)
+
+    dropped = 0
+    for d in files:
+        if (d.get("doc_url") or "") in claimed:
+            dropped += 1                      # a page already carries this file
+            continue
+        _add(self._doc_from_document_row(d, shape))
+
+    logger.info(
+        "FormfillCrawler[%s/%s] shape=%s -> %d documents "
+        "(%d pages exploded, %d standalone files, %d duplicates dropped)",
+        self.regulator, self.source_system, shape, len(out),
+        len(pages), len(files) - dropped, dropped)
+    return out[:limit] if limit else out
+
+
+FormfillCrawler.fetch_documents = _fetch_documents_formfill
 
 __all__ = ["FormfillCrawler", "build_formfill_source"]

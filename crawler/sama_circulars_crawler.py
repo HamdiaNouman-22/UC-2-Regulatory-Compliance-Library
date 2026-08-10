@@ -80,10 +80,11 @@ class SAMARulebookCrawler:
 
     BASE_URL = "https://rulebook.sama.gov.sa/en/sama-circulars"
 
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, request_delay: float = 1.0):
         self.headless = headless
+        self.request_delay = request_delay
         self.driver = None
-        logger.info(f"Initializing SAMARulebookCrawler (headless={headless})")
+        logger.info(f"Initializing SAMARulebookCrawler (headless={headless}, request_delay={request_delay}s)")
 
     def _init_driver(self):
         """Initialize Chrome WebDriver"""
@@ -415,8 +416,8 @@ class SAMARulebookCrawler:
                     documents.append(doc)
                     logger.info(f"Document {i} processed successfully")
 
-                    # Small delay between requests
-                    time.sleep(1)
+                    # Delay between requests (politeness / avoid rate limiting)
+                    time.sleep(self.request_delay)
 
                 except Exception as e:
                     logger.error(f"Error processing row {i}: {e}")

@@ -1,0 +1,196 @@
+```json
+{
+    "regulator": "SAMA",
+    "reference": "M/5",
+    "publication_date": "11/6/1966",
+    "requirements": [
+        {
+            "requirement_id": "REQ-001",
+            "requirement_title": "Licensing and Authorization",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-001-OB-001",
+                    "obligation_text": "No person, natural or juristic, unlicensed in accordance with the provisions of this Law, shall carry on basically any of the banking business.",
+                    "source_reference": "Article 2"
+                },
+                {
+                    "obligation_id": "REQ-001-OB-002",
+                    "obligation_text": "All applications, for the grant of licenses to carry on banking business in the Kingdom, shall be addressed to SAMA.",
+                    "source_reference": "Article 3"
+                },
+                {
+                    "obligation_id": "REQ-001-OB-003",
+                    "obligation_text": "Any person not authorized basically to carry on banking business in the Kingdom is not allowed to use the word \"Bank\", or its synonyms, or any similar term in any language on his papers or printed matter, or in his commercial address, or his name or in his advertisements.",
+                    "source_reference": "Article 5"
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-002",
+            "requirement_title": "Capital, Reserves, and Deposit Limits",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-002-OB-001",
+                    "obligation_text": "The deposit liabilities of a bank shall not exceed fifteen times its reserves and paid-up or invested capital.",
+                    "source_reference": "Article 6"
+                },
+                {
+                    "obligation_id": "REQ-002-OB-002",
+                    "obligation_text": "If the deposit liabilities exceed this limit, the bank must within one month of the date of submission of the statement referred to in paragraph 1 of Article 15, either increase its capital and reserves to the prescribed limit or deposit fifty percent of the excess with SAMA.",
+                    "source_reference": "Article 6"
+                },
+                {
+                    "obligation_id": "REQ-002-OB-003",
+                    "obligation_text": "Every bank shall maintain with SAMA at all times a statutory deposit of a sum not less than fifteen percent of its deposit liabilities.",
+                    "source_reference": "Article 7"
+                },
+                {
+                    "obligation_id": "REQ-002-OB-004",
+                    "obligation_text": "In addition to the statutory deposit provided for in the previous paragraph, every bank shall maintain a liquidity reserve of not less than 15 percent of its deposit liabilities.",
+                    "source_reference": "Article 7"
+                },
+                {
+                    "obligation_id": "REQ-002-OB-005",
+                    "obligation_text": "Every bank shall, before declaring distribution of any profits, transfer a sum equal to not less than 25 percent of its net profits, to the statutory reserve, until the amount of that reserve equals as a minimum of the paid-up capital.",
+                    "source_reference": "Article 13"
+                },
+                {
+                    "obligation_id": "REQ-002-OB-006",
+                    "obligation_text": "No bank shall pay dividends or remit any part of its profits abroad, until its capital expenditures including aggregate foundation expenditures and losses incurred have been completely written off.",
+                    "source_reference": "Article 13"
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-003",
+            "requirement_title": "Credit and Exposure Limits",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-003-OB-001",
+                    "obligation_text": "No bank shall grant a loan or extend a credit facility, or give a financial guarantee with respect to any natural or juristic person for amounts aggregating more than 25 percent of the Bank's reserves and paid-up or invested capital.",
+                    "source_reference": "Article 8"
+                },
+                {
+                    "obligation_id": "REQ-003-OB-002",
+                    "obligation_text": "No bank shall undertake the following transactions: Granting a loan or extending credit facilities, or issuing a guarantee or incurring any other financial liability on the security of its own shares.",
+                    "source_reference": "Article 9"
+                },
+                {
+                    "obligation_id": "REQ-003-OB-003",
+                    "obligation_text": "No bank shall undertake the following transactions: Granting, without security, a loan or credit facilities, or issuing a guarantee or incurring any other financial liability in respect of: a. Member of its Board of Directors or its Auditors. b. Establishments not taking the form of joint-stock companies in which any member of its Board or Auditor is a partner or a manager or has a direct financial interest. c. Persons or establishments not taking the form of joint stock companies in cases where any of the Bank's directors or Auditors is a Guarantor.",
+                    "source_reference": "Article 9"
+                },
+                {
+                    "obligation_id": "REQ-003-OB-004",
+                    "obligation_text": "No bank shall undertake the following transactions: Granting, without security, a loan or a credit facility or giving a guarantee or incurring any other financial liability in favor of any of its officials or employees for amounts exceeding a four month salary of any such concerned person.",
+                    "source_reference": "Article 9"
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-004",
+            "requirement_title": "Prohibited Activities and Investments",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-004-OB-001",
+                    "obligation_text": "No bank shall undertake any of the following activities: To engage, whether for its own account or on a commission basis, in the wholesale or retail trade including the import or export trade.",
+                    "source_reference": "Article 10"
+                },
+                {
+                    "obligation_id": "REQ-004-OB-002",
+                    "obligation_text": "No bank shall undertake any of the following activities: To have any direct interest, whether as a stock-holder, partner, owner, or otherwise, in any commercial, industrial, agricultural or other undertaking unless within the limits referred to in paragraph 4 of this Article, except when such interest results from the satisfaction of debts due to the bank, provided that all such interests shall be disposed of within a period of two years or within any such longer period as may be determined in consultation with SAMA.",
+                    "source_reference": "Article 10"
+                },
+                {
+                    "obligation_id": "REQ-004-OB-003",
+                    "obligation_text": "No bank shall undertake any of the following activities: To purchase, without the approval of SAMA, stocks and shares of any bank conducting its business in the Kingdom.",
+                    "source_reference": "Article 10"
+                },
+                {
+                    "obligation_id": "REQ-004-OB-004",
+                    "obligation_text": "No bank shall undertake any of the following activities: To own stocks of any other joint-stock company incorporated in the Kingdom, in excess of ten percent of the paid up capital of such a company provided that the nominal value of these shares shall not exceed twenty percent of the bank's paid-up capital and reserves.",
+                    "source_reference": "Article 10"
+                },
+                {
+                    "obligation_id": "REQ-004-OB-005",
+                    "obligation_text": "No bank shall undertake any of the following activities: To acquire or lease real estate except in so far as may be necessary for the purpose of conducting its banking business, housing of its employees or for their recreation or in satisfaction of debts due to the Bank.",
+                    "source_reference": "Article 10"
+                },
+                {
+                    "obligation_id": "REQ-004-OB-006",
+                    "obligation_text": "In cases where a bank acquires real estate in satisfaction of debts due to it and such real estate is not necessary for the Bank's own banking business or housing of its employees or for their recreation, it shall liquidate such real estate within three years of its acquisition or within the period or periods approved by SAMA and under the conditions as it may determine where exceptional circumstances are justified.",
+                    "source_reference": "Article 10"
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-005",
+            "requirement_title": "Approval-Based Operations and Changes",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-005-OB-001",
+                    "obligation_text": "Banks are precluded from undertaking any of the following operations except after obtaining a written approval from SAMA and according to the conditions it prescribes: a. Altering the composition of their paid-up or invested capital. b. Entering into any scheme of amalgamation or participation in the business of another bank or another establishment carrying on banking business. c. Acquiring shares in a company established outside the Kingdom. d. Ceasing to carry on banking business. e. Opening branches or other offices in the Kingdom and also opening of branches or other offices by national banks outside the Kingdom.",
+                    "source_reference": "Article 11"
+                },
+                {
+                    "obligation_id": "REQ-005-OB-002",
+                    "obligation_text": "No person in the following cases shall be elected as a director or shall become a manager of any bank without prior written approval of SAMA: a. If he occupied a similar position in a banking concern that was wound up, even if the liquidation had been made before the promulgation of this Law. b. If he was removed from a similar post in any banking establishment, even if such removal was before the promulgation of this Law.",
+                    "source_reference": "Article 12"
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-006",
+            "requirement_title": "Audit and Reporting",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-006-OB-001",
+                    "obligation_text": "Every bank shall annually appoint two auditors from amongst the approved list of auditors registered with the Ministry of Commerce and Industry.",
+                    "source_reference": "Article 14"
+                },
+                {
+                    "obligation_id": "REQ-006-OB-002",
+                    "obligation_text": "The bank management should send copies of these two reports to SAMA.",
+                    "source_reference": "Article 14"
+                },
+                {
+                    "obligation_id": "REQ-006-OB-003",
+                    "obligation_text": "They should send a copy of the Auditor's report to SAMA.",
+                    "source_reference": "Article 14"
+                },
+                {
+                    "obligation_id": "REQ-006-OB-004",
+                    "obligation_text": "Every bank shall furnish SAMA by the end of the following month with a consolidated monthly statement of its financial position relating to the previous month, which shall be true and correct, and be in the form prescribed by SAMA.",
+                    "source_reference": "Article 15"
+                },
+                {
+                    "obligation_id": "REQ-006-OB-005",
+                    "obligation_text": "Every bank shall also furnish SAMA within six months of the close of its financial year with a copy of its annual balance sheet and profit and loss accounts certified by its auditors in the form prescribed by SAMA.",
+                    "source_reference": "Article 15"
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-007",
+            "requirement_title": "Information Provision and Inspection",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-007-OB-001",
+                    "obligation_text": "SAMA may, at any time, request any bank to supply it, within a time limit it will specify and in the manner it will prescribe, with any information that it deems necessary for ensuring the realization of the purposes of this Law.",
+                    "source_reference": "Article 17"
+                },
+                {
+                    "obligation_id": "REQ-007-OB-002",
+                    "obligation_text": "In such a case the bank staff must produce all the required books and records of accounts and other documents in their custody or within their authority and must furnish any information they have relating to the bank.",
+                    "source_reference": "Article 18"
+                },
+                {
+                    "obligation_id": "REQ-007-OB-003",
+                    "obligation_text": "Any person who comes into possession of information during the performance of his duties in the implementation of this Law, shall not disclose such information or to make use of it in any manner.",
+                    "source_reference": "Article 19"
+                }
+            ]
+        }
+    ]
+}
+```

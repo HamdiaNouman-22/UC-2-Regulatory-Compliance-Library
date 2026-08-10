@@ -1,0 +1,221 @@
+# Monitoring — how we detect updates, per regulator
+
+**Written:** 2026-08-02
+**Status:** design + the two decisions that must be made before anyone codes.
+**Audience:** the three of us. Read `dynamic_crawler/HANDOFF.md` first.
+
+---
+
+## 1. The good news: most of this already exists
+
+`orchestrator.py::_extract_and_analyze_versioned` already implements versioning:
+fetch the old content, compare hashes, create version B, store a change summary,
+re-run analysis against the new version. `storage/mssql_repo.py` already has
+`get_cbb_content_hash` / `update_cbb_content_hash`.
+
+It only ever runs for CBB — **not because it is CBB-specific logic, but because
+only the CBB monitoring crawler sets the three keys that trigger it**:
+
+```python
+doc.extra_meta["monitoring_status"]        # "new" | "modified"
+doc.extra_meta["existing_regulation_id"]   # which row to version
+doc.content_hash                           # what changed
+```
+
+So the work is **not** "build monitoring". It is:
+
+1. decide the identity key (§2),
+2. set those three keys for every regulator instead of one (§3),
+3. add the safety gate that stops a bad crawl deleting the library (§4).
+
+The two repo methods are named `*_cbb_*` but their SQL is regulator-agnostic
+(`SELECT content_hash FROM regulations WHERE id = ?`). Rename, do not rewrite.
+
+---
+
+## 2. DECISION 1 — the identity key
+
+**This blocks everything else and it is the lead's call.** "Is this document the
+same one we saw last week?" has to have exactly one answer per regulator, or
+change detection produces nonsense.
+
+What the code does *today*, inconsistently (`filter_new_documents`):
+
+| regulator | identity used |
+|---|---|
+| CBB | `source_page_url` |
+| anything with a `published_date` | `(title, published_date, doc_path)` |
+| "regulatory returns" | `(title, doc_path)` |
+
+### Recommendation: `(document_url, doc_path)`, with `reference_no` as a tiebreak
+
+Why not title+date:
+
+- **Titles get rewritten by us.** `disambiguate_titles()` renames documents that
+  share a title (SDAIA's several "2025" entries). An identity key we mutate is
+  not an identity key.
+- **Dates are missing on many sites.** MISA, AML, SDAIA and the SAMA sandbox
+  publish no issue date at all on their listings. That is four of our six.
+
+Why URL, with the caveats stated honestly:
+
+- It was 100% present and 100% distinct on every site measured — 4,160 / 4,160
+  on SBP, 36 / 36 on SDAIA, 89 / 89 on MISA.
+- Paired with `doc_path` because regulators cross-list one file under several
+  sections and each placement is its own row in the library. `document_exists_by_url`
+  is already category-scoped, so the DB agrees.
+- **Caveat A — a regulator that republishes at the same URL** shows up as
+  *modified*, which is correct: the content hash catches it.
+- **Caveat B — a regulator that puts each revision at a NEW url** shows up as
+  one *new* + one *disappeared*, which is wrong. `reference_no` is the fix:
+  same reference, different URL = a new version, not a new document. SBP fills
+  `reference_no` on 95% of rows, so it works there. Where it is absent, accept
+  new+disappeared and let a human reconcile.
+
+**Write the decision into `config/sources/<regulator>.yml`** rather than into
+code, so it is visible per source:
+
+```yaml
+  - name: "Circulars"
+    mode: formfill
+    hints: dynamic_crawler/hints/sbp.circulars.yml
+    identity: [document_url, doc_path]      # default
+    version_key: reference_no               # optional: same ref + new url = new version
+```
+
+---
+
+## 3. How change detection runs, per shape
+
+### List sites (SBP, SDAIA, AML, MISA) — the listing IS the feed
+
+Phase 1 alone gives a complete inventory with dates and reference numbers and
+costs a fraction of a full crawl. So:
+
+```
+1. run phase 1 only            (SBP: 139 pages, ~32 min. MISA/AML/SDAIA: seconds)
+2. compare the inventory to the DB on the identity key
+3. new      -> run phase 2 for THOSE ROWS ONLY, then insert
+   modified -> phase 2, then the existing versioning path
+   unchanged-> do nothing (the overwhelming majority)
+   gone     -> see §4 before you believe it
+```
+
+The saving is the whole point: SBP's phase 2 is 4,160 page loads. Running it only
+for new rows turns a multi-hour nightly job into a 32-minute one.
+
+`formfill run --no-details` is exactly step 1.
+
+### Tree sites (SAMA sandbox, rulebooks) — no cheap listing exists
+
+A tree has no listing page to diff; you have to walk it. It is cheap anyway
+(40 pages, ~2 minutes), so walk the whole thing and compare `content_hash` per
+page. `content_hash` is the md5 of the page's normalised **text**, not its HTML —
+HTML churns on every deploy and would report everything as modified.
+
+### Sites that publish a feed — ask before you crawl
+
+**This is the question to put to A and B this week:** does your regulator publish
+a `sitemap.xml` with `<lastmod>`, an RSS feed, or a "recently updated" page? CBB's
+Thomson Reuters feed is a ~10× saving over crawling, and any of those three gives
+the same benefit. Ten minutes of checking can remove a nightly crawl entirely.
+
+---
+
+## 4. DECISION 2 — the completeness gate, and "disappeared"
+
+**"Disappeared" is the dangerous outcome.** New and modified are additive; if we
+get them wrong we add noise. If we get *disappeared* wrong we remove real
+regulations from the compliance library.
+
+And we know it goes wrong. **SDAIA returned 415 → 363 → 439 documents across
+three runs of identical code.** A run that lost 52 documents was not a run where
+52 documents were withdrawn.
+
+### The rule
+
+> **A run may not mark anything disappeared unless the run itself is trustworthy.**
+
+Trustworthy means all of:
+
+| check | where it comes from |
+|---|---|
+| 0 blocked pages | `run.json.blocked_pages` — the WAF guard, already built |
+| no early-stop, no failed listing pages | `run.json.warnings` — already emitted |
+| the walk was not cut short by a cap | `run.json.plan.capped_by_max_pages` — already emitted |
+| count within tolerance of the last good run | **needs building** — store it |
+
+Otherwise: **quarantine the run.** Ingest nothing, alert, keep yesterday's data.
+A missed day is recoverable. A wrongly emptied library is not.
+
+For the count tolerance, start at **±5%** and tighten per regulator once you have
+a few weeks of history. SDAIA's own spread was ±9%, so ±5% would have quarantined
+those runs — correctly.
+
+Even when a run is trustworthy, I would not delete. Mark
+`status = 'withdrawn'` with the date, and let a person confirm. Regulators do
+withdraw documents, but rarely, and it is worth a human glance.
+
+### Store three numbers per run per source
+
+That is all the history you need:
+
+```
+run_at | source | row_count | inventory_hash   (md5 of the sorted identity keys)
+```
+
+`inventory_hash` unchanged = nothing at all changed, skip everything else. It is
+the cheapest possible early exit and it will be the common case.
+
+---
+
+## 5. Per-regulator plan
+
+| regulator | shape | monitoring run | cost | cadence |
+|---|---|---|---|---|
+| **SBP** | list | phase 1 only, 139 pages | ~32 min | daily |
+| **MISA** | list | full (1 page) | ~5 s | daily |
+| **AML** | list | full (1 page) | ~8 s | daily |
+| **SDAIA** | list | full (1 page) | ~15 s | daily |
+| **SAMA sandbox** | tree | full walk, 40 pages | ~2 min | weekly — rulebooks move slowly |
+| **SAMA circulars** | list | phase 1 | — | daily |
+| **SIMAH** | blocked | — | — | **manual until the WAF is solved** |
+| **CBB** | feed | Thomson Reuters | already built | as now |
+
+Everything except SBP is seconds. Do not over-engineer the scheduling: the whole
+KSA set outside SBP is under a minute of crawling.
+
+---
+
+## 6. What to build, in order
+
+1. **Decide the identity key** (§2). One line in each source YAML. *Lead.*
+2. **Generalise `filter_new_documents`** into `classify_documents()` returning
+   new / modified / unchanged / disappeared, using the configured identity
+   instead of the three hardcoded regulator branches.
+3. **Set the three `extra_meta` keys** in `GenericSiteCrawler` and
+   `FormfillCrawler` so the versioning path that already exists fires for every
+   regulator, not only CBB.
+4. **Store `run_at | source | row_count | inventory_hash`** and add the
+   completeness gate (§4). This is the one that protects the library.
+5. **Rename `*_cbb_content_hash` → `*_content_hash`** in `mssql_repo.py`. No
+   logic change.
+6. **Ask A and B about feeds** (§3). May remove work rather than add it.
+7. **Wire the cadence into `scheduler.py`.**
+
+Items 1–4 are the real work. 5 and 7 are an hour each.
+
+---
+
+## 7. The trap to keep repeating
+
+A crawl that returns fewer documents looks exactly like a regulator that
+withdrew documents. Nothing in the data distinguishes them — not the count, not
+the hashes, not the consistency across runs.
+
+Only the *provenance* of the run tells you which it was: was it blocked, was it
+capped, did pages fail, was the count within tolerance. That is why §4 is a gate
+on the run and not a check on the documents.
+
+If you take one thing from this document: **never let an untrusted run mark
+anything disappeared.**

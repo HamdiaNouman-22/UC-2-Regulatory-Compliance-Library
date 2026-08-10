@@ -27,7 +27,7 @@ class SBPLawsSpider(scrapy.Spider):
     def __init__(self, shared_items=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.shared_items = shared_items if shared_items is not None else []
-        self.logger.info("🚀 SBPLawsSpider initialized")
+        self.logger.info("SBPLawsSpider initialized")
 
     def parse_pakistan_code_page(self, response):
         section = response.meta.get("section", "Law")
@@ -81,12 +81,12 @@ class SBPLawsSpider(scrapy.Spider):
                 pdf_href = download_link
 
         if not pdf_href:
-            self.logger.warning(f"⚠️ No PDF found for: {response.url}")
+            self.logger.warning(f"No PDF found for: {response.url}")
             self.logger.warning(f"Page title: {title}")
             return
 
         pdf_url = response.urljoin(pdf_href)
-        self.logger.info(f"✅ PDF extracted: {pdf_url}")
+        self.logger.info(f"PDF extracted: {pdf_url}")
 
         doc_path = ["SBP", "Laws & Regulations", section, title]
 
@@ -126,7 +126,7 @@ class SBPLawsSpider(scrapy.Spider):
             if section_header:
                 current_section = clean(section_header)
                 if current_section:  # Only log non-empty sections
-                    self.logger.info(f"📁 Section detected: {current_section}")
+                    self.logger.info(f"Section detected: {current_section}")
                 continue
 
             # Skip navigation/footer rows
@@ -418,8 +418,8 @@ class SBPLawsSpider(scrapy.Spider):
                 yield reg_doc
 
         if not documents_found:
-            self.logger.warning(f"⚠️ No documents found on subpage: {parent_title}")
-            self.logger.warning(f"⚠️ Page URL: {response.url}")
+            self.logger.warning(f"No documents found on subpage: {parent_title}")
+            self.logger.warning(f"Page URL: {response.url}")
 
     def parse_fe_manual(self, response, section, parent_title, parent_url):
         """
@@ -433,7 +433,7 @@ class SBPLawsSpider(scrapy.Spider):
         main_content = response.xpath("//td[@valign='top'][@bgcolor='#F8F8F8']")
 
         if not main_content:
-            self.logger.warning("⚠️ Could not find main content area")
+            self.logger.warning("Could not find main content area")
             return
 
         # Iterate through all direct children (blockquotes and uls)
@@ -620,7 +620,7 @@ class SBPLawsSpider(scrapy.Spider):
                     url = urljoin(response.url, href)
                     title = link_text
 
-                    # Direct path: FE Manual → Appendices → Document Title (NO volume)
+                    # Direct path: FE Manual -> Appendices -> Document Title (NO volume)
                     doc_path = [
                         "SBP", "Laws & Regulations", section, parent_title,
                         "Appendices", title
