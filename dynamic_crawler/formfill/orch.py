@@ -40,8 +40,11 @@ WHAT IS DIFFERENT FROM THE PARENT
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import threading
+import time
+from contextlib import contextmanager
 from datetime import date
 from typing import Dict, List, Optional
 
@@ -67,8 +70,8 @@ class NewOrchestrator(Orchestrator):
         # touched when analyse=True, so an analysis-free run costs nothing.
         super().__init__(crawler=crawler, repo=repo, downloader=downloader, **kw)
         self.source_name = source_name
-        self.identity = identity
-        self.version_key = version_key
+        self.identity = self._clean_identity(identity)
+        self.version_key = version_key or None
         self.analyse = analyse
         self.limit = limit
         self.report: Dict = {}
@@ -82,10 +85,53 @@ class NewOrchestrator(Orchestrator):
     #  IDENTITY + CLASSIFICATION                                          #
     # ------------------------------------------------------------------ #
 
+    DEFAULT_IDENTITY = ("document_url", "doc_path")
+
+    @staticmethod
+    def _clean_identity(identity) -> tuple:
+        """One string, a list or a tuple, all to a tuple of field names.
+
+        A source YAML writes `identity: [reference_no]` or `identity: page`, so
+        the value arrives in whatever shape yaml produced.
+        """
+        if isinstance(identity, str):
+            identity = [identity]
+        fields = tuple(str(f).strip() for f in (identity or ()) if str(f).strip())
+        return fields or NewOrchestrator.DEFAULT_IDENTITY
+
+    def _identity_fields_of(self, doc) -> dict:
+        """The configured identity of one document, as {field: value}."""
+        out = {}
+        for field in self.identity:
+            value = getattr(doc, field, None)
+            if isinstance(value, (list, tuple)):
+                value = " > ".join(str(v) for v in value)
+            out[field] = (str(value).strip() if value is not None else "")
+        return out
+
     def _identity_of(self, doc) -> tuple:
-        url = (getattr(doc, "document_url", "") or "").strip()
-        path = " > ".join(getattr(doc, "doc_path", None) or [])
-        return (url, path)
+        """The identity as an ordered tuple — what logs and dedupe keys want."""
+        return tuple(self._identity_fields_of(doc).values())
+
+    def _find_existing(self, doc) -> Optional[dict]:
+        """The stored row matching this document's configured identity.
+
+        The default identity keeps using `find_by_identity`, which is the tested
+        path every existing source runs on. Anything else needs the generic
+        lookup, and a repo that does not offer one cannot honour the config —
+        say so rather than silently classifying everything as new.
+        """
+        fields = self._identity_fields_of(doc)
+        if tuple(self.identity) == self.DEFAULT_IDENTITY:
+            return self.repo.find_by_identity(fields["document_url"],
+                                              fields["doc_path"])
+        finder = getattr(self.repo, "find_by_identity_fields", None)
+        if not callable(finder):
+            raise NotImplementedError(
+                f"{type(self.repo).__name__} cannot look up on "
+                f"identity={list(self.identity)}; it only supports "
+                f"{list(self.DEFAULT_IDENTITY)}")
+        return finder(fields)
 
     @staticmethod
     def _set_status(doc, monitoring_status: str) -> None:
@@ -126,8 +172,7 @@ class NewOrchestrator(Orchestrator):
         seen_ids = set()
 
         for doc in docs:
-            url, path = self._identity_of(doc)
-            existing = self.repo.find_by_identity(url, path)
+            existing = self._find_existing(doc)
 
             # Tiebreak: a regulator that republishes at a NEW url would otherwise
             # look like one new document plus one disappearance. Same reference
@@ -157,12 +202,30 @@ class NewOrchestrator(Orchestrator):
                 buckets["modified"].append(doc)
 
         # Anything in the store for this source that this run did not see.
-        for r in self.repo.t["regulations"] if hasattr(self.repo, "t") else []:
-            if r.get("source_system") == getattr(self.crawler, "source_system", None) \
-                    and r.get("id") not in seen_ids:
+        for r in self._stored_for_source():
+            if r.get("id") not in seen_ids:
                 buckets["disappeared"].append(r)
 
         return buckets
+
+    def _stored_for_source(self) -> List[dict]:
+        """What the library already holds for this source.
+
+        This used to read `self.repo.t`, an ExcelRepo-only table behind a
+        hasattr. On MSSQL the guard was False, so `disappeared` was always empty
+        and the completeness gate had nothing to gate.
+        """
+        source = getattr(self.crawler, "source_system", None)
+        finder = getattr(self.repo, "find_regulations_by_source", None)
+        if callable(finder):
+            return list(finder(source))
+        if hasattr(self.repo, "t"):
+            return [r for r in self.repo.t["regulations"]
+                    if r.get("source_system") == source]
+        logger.warning("%s cannot list stored regulations — `disappeared` will "
+                       "be empty and the completeness gate is inert",
+                       type(self.repo).__name__)
+        return []
 
     # ------------------------------------------------------------------ #
     #  THE FOLDER TREE — folders are "F", the document's own node is "R"   #
@@ -310,7 +373,10 @@ class NewOrchestrator(Orchestrator):
             # the parent's CBB path, minus the hand-written SQL.
             self.repo.mark_all_versions_inactive(existing_id)
             old = self.repo.get_regulation_by_id(existing_id) or {}
-            self.repo.insert_regulation_version(
+            # Keep this id. The analysis being archived describes the OLD
+            # content, so it must be stamped with the old version, not the one
+            # replacing it. Parent does this at orchestrator/orchestrator.py:803.
+            old_version_id = self.repo.insert_regulation_version(
                 regulation_id=existing_id,
                 content_text=(old.get("extra_meta") or {}).get("content_text", "")
                              if isinstance(old.get("extra_meta"), dict) else "",
@@ -324,8 +390,8 @@ class NewOrchestrator(Orchestrator):
                 content_html=getattr(doc, "document_html", "") or "",
                 content_hash=new_hash, updated_date=date.today(), status="active",
                 change_summary="content changed")
-            self.repo.archive_current_analysis(existing_id, version_id)
-            self.repo.update_regulation(existing_id, content_hash=new_hash)
+            self.repo.archive_current_analysis(existing_id, old_version_id)
+            self.repo.update_regulation(existing_id, **self._modified_row_fields(doc, new_hash))
             regulation_id = existing_id
             self._log_step(regulation_id, "version", "SUCCESS",
                            f"new version {version_id} (was {old.get('content_hash','')[:8]})")
@@ -340,10 +406,14 @@ class NewOrchestrator(Orchestrator):
                 change_summary="first version")
             self._log_step(regulation_id, "insert", "SUCCESS", "inserted")
 
-        text, content_type = self.extract_text_content_unified(doc, regulation_id)
-        dec = getattr(self, "_last_decision", None)
-        self._log_step(regulation_id, "text_decision",
-                       "SKIPPED" if not text else "SUCCESS", str(dec))
+        # Timed: this is the step that downloads and OCRs, so it is one of the two
+        # places a slow run actually spends its time.
+        with self._timed(regulation_id, "text_decision") as t:
+            text, content_type = self.extract_text_content_unified(doc, regulation_id)
+            dec = getattr(self, "_last_decision", None)
+            t["status"] = "SKIPPED" if not text else "SUCCESS"
+            t["message"] = str(dec)
+
         if not text:
             return
         if not self.analyse:
@@ -351,15 +421,63 @@ class NewOrchestrator(Orchestrator):
                            f"analyse=False; would have sent {len(text):,} chars "
                            f"as {content_type}")
             return
-        self._run_llm_analysis(regulation_id=regulation_id, doc=doc,
-                               text_content=text, content_type=content_type,
-                               version_id=version_id)
 
-    def _log_step(self, regulation_id, step, status, message):
+        # The other one: roughly four minutes a document.
+        with self._timed(regulation_id, "llm_analysis_total") as t:
+            self._run_llm_analysis(regulation_id=regulation_id, doc=doc,
+                                   text_content=text, content_type=content_type,
+                                   version_id=version_id)
+            t["message"] = f"{len(text):,} chars as {content_type}"
+
+    @staticmethod
+    def _modified_row_fields(doc, new_hash: str) -> dict:
+        """What a modify refreshes on the `regulations` row.
+
+        Updating content_hash alone left the new hash next to the old html, so
+        the hash no longer described its own row. Empty values are dropped — a
+        crawl that returns no title must not blank the stored one.
+        """
+        fields = {"content_hash": new_hash}
+        for column in ("title", "document_html", "published_date",
+                       "reference_no", "category"):
+            value = getattr(doc, column, None)
+            if value not in (None, "", []):
+                fields[column] = value
+        meta = getattr(doc, "extra_meta", None)
+        if isinstance(meta, dict) and meta:
+            fields["extra_meta"] = json.dumps(meta, ensure_ascii=False, default=str)
+        return fields
+
+    def _log_step(self, regulation_id, step, status, message, duration_ms=None):
         try:
-            self.repo._log_processing(regulation_id, step, status, message)
+            self.repo._log_processing(regulation_id, step, status, message,
+                                      duration_ms=duration_ms)
         except Exception:
             pass
+
+    @contextmanager
+    def _timed(self, regulation_id, step):
+        """Time a step and log it whether it succeeds or raises.
+
+        Nothing in the pipeline recorded step durations, so where a run spends
+        its time was unanswerable with data. The expensive steps are the text
+        decision (download + OCR) and the analysis (~4 minutes a document), and
+        those are the two this wraps.
+
+        The caller's own message is set via the yielded dict, so a step can still
+        say WHAT it did as well as how long it took.
+        """
+        box = {"status": "SUCCESS", "message": ""}
+        t0 = time.perf_counter()
+        try:
+            yield box
+        except Exception as e:
+            self._log_step(regulation_id, step, "FAILED", str(e)[:400],
+                           duration_ms=(time.perf_counter() - t0) * 1000)
+            raise
+        else:
+            self._log_step(regulation_id, step, box["status"], box["message"],
+                           duration_ms=(time.perf_counter() - t0) * 1000)
 
     # ------------------------------------------------------------------ #
     #  THE RUN                                                            #
@@ -375,8 +493,28 @@ class NewOrchestrator(Orchestrator):
 
         last = self.repo.last_good_run(self.source_name) if hasattr(
             self.repo, "last_good_run") else None
-        if last and last.get("inventory_hash") == inv:
+        if (last and last.get("inventory_hash") == inv
+                and not any(buckets[k] for k in ("new", "modified", "disappeared"))):
+            # This logged "nothing to do" and then did everything anyway.
+            # Exits only when the buckets agree with the hash — an unchanged
+            # inventory with pending work means a previous run died mid-way.
             logger.warning("inventory hash unchanged (%s) — nothing to do", inv)
+            self.report = {
+                "regulator": regulator_name,
+                "source": self.source_name,
+                "crawled": len(docs),
+                "classified": {k: len(v) for k, v in buckets.items()},
+                "processed": 0,
+                "limit": self.limit,
+                "analyse": self.analyse,
+                "skipped": "inventory hash unchanged since last good run",
+                "inventory_hash": inv,
+                "run_trustworthy": trustworthy,
+                "gate_problems": problems,
+                "disappeared_actioned": False,
+                "tables": self.repo.counts() if hasattr(self.repo, "counts") else {},
+            }
+            return self.report
 
         todo = buckets["new"] + buckets["modified"]
         if self.limit:

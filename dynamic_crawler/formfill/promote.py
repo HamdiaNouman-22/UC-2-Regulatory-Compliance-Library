@@ -26,6 +26,11 @@ makes this safe to retry after a partial failure.
 
     venv/Scripts/python.exe -m dynamic_crawler.formfill.promote path/to/run.xlsx
     venv/Scripts/python.exe -m dynamic_crawler.formfill.promote path/to/run.xlsx --dry-run
+    venv/Scripts/python.exe -m dynamic_crawler.formfill.promote path/to/run.xlsx --dry-run --with-db
+
+A plain --dry-run opens no connection, which also means it cannot answer "is this
+already in the library?" — `skipped_already_present` is then structurally 0. Add
+--with-db to let a dry run read (and only read) so that number means something.
 """
 
 from __future__ import annotations
@@ -144,9 +149,12 @@ def promote(xlsx: Path, repo, dry_run: bool = False) -> dict:
         url = row.get("document_url")
         path = row.get("doc_path")
         try:
-            # A dry run opens no connection at all, so there is nothing to ask
-            # whether the document already exists — it reports what the
-            # workbook holds, not what the database would do with it.
+            # Without a repo (a plain --dry-run) there is nothing to ask whether
+            # the document already exists, so `skipped_already_present` stays 0
+            # and `db_consulted` reports false — it describes what the workbook
+            # holds, not what the database would do with it. Pass --with-db to
+            # make the number real: every write below is gated on dry_run, so a
+            # dry run holding a repo only ever reads.
             existing = repo.find_by_identity(url, path) if (repo and url) else None
             if existing:
                 # Already in the library. Promoting the same workbook twice must
@@ -205,6 +213,7 @@ def promote(xlsx: Path, repo, dry_run: bool = False) -> dict:
     return {
         "workbook": str(xlsx),
         "dry_run": dry_run,
+        "db_consulted": repo is not None,
         "folders": len(folder_map),
         "inserted": len(inserted),
         "skipped_already_present": len(skipped),
@@ -258,6 +267,10 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="report what WOULD be inserted; opens no connection "
                          "and writes nothing")
+    ap.add_argument("--with-db", action="store_true",
+                    help="during a --dry-run, still open a READ-ONLY connection "
+                         "so `skipped_already_present` is a real number rather "
+                         "than always 0. Writes are still gated on --dry-run.")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -266,7 +279,12 @@ def main() -> int:
     if not path.exists():
         raise SystemExit(f"no such workbook: {path}")
 
-    repo = None if a.dry_run else _build_repo()
+    repo = _build_repo() if (a.with_db or not a.dry_run) else None
+    if a.with_db:
+        # find_by_identity swallows its own exceptions and returns None, so a bad
+        # login is indistinguishable from "nothing matched" — the same silent 0
+        # this flag exists to remove. A SELECT that is allowed to raise, first.
+        repo.get_folder_id("__connectivity_probe__", None)
     report = promote(path, repo, dry_run=a.dry_run)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     return 1 if report.get("failed") else 0
