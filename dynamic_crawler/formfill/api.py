@@ -348,9 +348,10 @@ def trigger_source(regulator: str,
             crawler=crawler, repo=repo, downloader=None,
             source_name=f"source:{reg_name}", analyse=analyse,
             limit=(limit or None),
-            # What counts as "the same document" is a property of the source, so
-            # it comes from the source's own config file. Omitted means the
-            # default (document_url, doc_path).
+            # What counts as "the same document" is a property of the SOURCE, and
+            # each source in this file may set its own. These two are the
+            # regulator-wide fallback for the sources that do not; omitting
+            # identity means (document_url, doc_path).
             identity=cfg.get("identity"),
             version_key=cfg.get("version_key", "reference_no"),
         )

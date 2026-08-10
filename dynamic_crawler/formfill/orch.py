@@ -102,15 +102,52 @@ class NewOrchestrator(Orchestrator):
         fields = tuple(str(f).strip() for f in (identity or ()) if str(f).strip())
         return fields or NewOrchestrator.DEFAULT_IDENTITY
 
+    def _identity_for(self, doc) -> tuple:
+        """The identity fields for THIS document.
+
+        One run can mix sources, so the fields come from the source that produced
+        the document when it declared any, and from the run default otherwise.
+        """
+        declared = (getattr(doc, "extra_meta", None) or {}).get("identity_fields")
+        return self._clean_identity(declared) if declared else self.identity
+
     def _identity_fields_of(self, doc) -> dict:
         """The configured identity of one document, as {field: value}."""
         out = {}
-        for field in self.identity:
+        for field in self._identity_for(doc):
             value = getattr(doc, field, None)
             if isinstance(value, (list, tuple)):
                 value = " > ".join(str(v) for v in value)
             out[field] = (str(value).strip() if value is not None else "")
         return out
+
+    def _check_identities(self, docs: List) -> None:
+        """Refuse a run in which a configured identity is empty on any document.
+
+        Every field blank means every such document carries the SAME identity, so
+        they match each other and the second overwrites the first. Fatal rather
+        than skip-and-continue: a skipped document is also a document this run did
+        not see, which would put it in `disappeared` and withdraw it because its
+        key went missing.
+        """
+        bad = [d for d in docs if not any(self._identity_fields_of(d).values())]
+        if bad:
+            raise ValueError(
+                f"{len(bad)} of {len(docs)} documents have an empty identity "
+                f"{list(self._identity_for(bad[0]))} — e.g. "
+                f"{[str(getattr(d, 'title', '?'))[:60] for d in bad[:3]]}")
+
+    def _version_key_for(self, doc) -> Optional[str]:
+        """The field the new-url tiebreak compares, per source.
+
+        Read with `in` because a source may set it to null to switch the tiebreak
+        off — `find_by_reference` searches the whole store, across sources, so a
+        reference number that is only unique within one source must not drive it.
+        """
+        meta = getattr(doc, "extra_meta", None) or {}
+        if "version_key" in meta:
+            return meta["version_key"] or None
+        return self.version_key
 
     def _identity_of(self, doc) -> tuple:
         """The identity as an ordered tuple — what logs and dedupe keys want."""
@@ -125,14 +162,14 @@ class NewOrchestrator(Orchestrator):
         say so rather than silently classifying everything as new.
         """
         fields = self._identity_fields_of(doc)
-        if tuple(self.identity) == self.DEFAULT_IDENTITY:
+        if tuple(fields) == self.DEFAULT_IDENTITY:
             return self.repo.find_by_identity(fields["document_url"],
                                               fields["doc_path"])
         finder = getattr(self.repo, "find_by_identity_fields", None)
         if not callable(finder):
             raise NotImplementedError(
                 f"{type(self.repo).__name__} cannot look up on "
-                f"identity={list(self.identity)}; it only supports "
+                f"identity={list(fields)}; it only supports "
                 f"{list(self.DEFAULT_IDENTITY)}")
         return finder(fields)
 
@@ -174,6 +211,7 @@ class NewOrchestrator(Orchestrator):
         buckets = {"new": [], "modified": [], "unchanged": [], "disappeared": []}
         seen_ids = set()
         self._token_backfill = []
+        self._check_identities(docs)
 
         for doc in docs:
             existing = self._find_existing(doc)
@@ -181,8 +219,9 @@ class NewOrchestrator(Orchestrator):
             # Tiebreak: a regulator that republishes at a NEW url would otherwise
             # look like one new document plus one disappearance. Same reference
             # number means it is the same document at a new address.
-            if existing is None and self.version_key:
-                ref = getattr(doc, self.version_key, None)
+            version_key = self._version_key_for(doc)
+            if existing is None and version_key:
+                ref = getattr(doc, version_key, None)
                 if ref:
                     existing = self.repo.find_by_reference(ref)
 
@@ -254,23 +293,43 @@ class NewOrchestrator(Orchestrator):
         return written
 
     def _stored_for_source(self) -> List[dict]:
-        """What the library already holds for this source.
+        """What the library already holds for the sources this run covers.
 
         This used to read `self.repo.t`, an ExcelRepo-only table behind a
         hasattr. On MSSQL the guard was False, so `disappeared` was always empty
         and the completeness gate had nothing to gate.
+
+        It then read `crawler.source_system`, which a composite of several sources
+        does not have — so the lookup went out as None, both repos answered [] for
+        a falsy source, and `disappeared` was silently empty again for every
+        regulator built from a source config. Ask for every source it covers.
         """
-        source = getattr(self.crawler, "source_system", None)
+        sources = [s for s in (getattr(self.crawler, "source_systems", None)
+                               or [getattr(self.crawler, "source_system", None)])
+                   if s]
+        if not sources:
+            logger.warning("%s exposes no source_system — `disappeared` will be "
+                           "empty and the completeness gate is inert",
+                           type(self.crawler).__name__)
+            return []
+
         finder = getattr(self.repo, "find_regulations_by_source", None)
-        if callable(finder):
-            return list(finder(source))
-        if hasattr(self.repo, "t"):
-            return [r for r in self.repo.t["regulations"]
-                    if r.get("source_system") == source]
-        logger.warning("%s cannot list stored regulations — `disappeared` will "
-                       "be empty and the completeness gate is inert",
-                       type(self.repo).__name__)
-        return []
+        if not callable(finder):
+            if hasattr(self.repo, "t"):
+                return [r for r in self.repo.t["regulations"]
+                        if r.get("source_system") in sources]
+            logger.warning("%s cannot list stored regulations — `disappeared` "
+                           "will be empty and the completeness gate is inert",
+                           type(self.repo).__name__)
+            return []
+
+        rows, seen = [], set()
+        for source in sources:
+            for r in finder(source):
+                if r.get("id") not in seen:
+                    seen.add(r.get("id"))
+                    rows.append(r)
+        return rows
 
     # ------------------------------------------------------------------ #
     #  THE FOLDER TREE — folders are "F", the document's own node is "R"   #
@@ -322,8 +381,44 @@ class NewOrchestrator(Orchestrator):
     # ------------------------------------------------------------------ #
 
     def _inventory_hash(self, docs: List) -> str:
-        keys = sorted("|".join(self._identity_of(d)) for d in docs)
+        # `field=value`, not the values alone: one run can carry two sources whose
+        # identities are different fields entirely.
+        keys = sorted("|".join(f"{k}={v}" for k, v in
+                               self._identity_fields_of(d).items()) for d in docs)
         return hashlib.md5("\n".join(keys).encode("utf-8")).hexdigest()[:12]
+
+    def _docs_by_source(self, docs: List) -> Dict[str, List]:
+        """Documents grouped by the source that produced them.
+
+        Every source the crawler was built with gets a key even when it produced
+        nothing — a source that returned zero documents is the case this exists to
+        make visible, and it is invisible in a group-by over the documents.
+        """
+        groups: Dict[str, List] = {
+            name: [] for name in (getattr(self.crawler, "source_names", None) or [])}
+        for d in docs:
+            label = ((getattr(d, "extra_meta", None) or {}).get("crawl_source")
+                     or self.source_name)
+            groups.setdefault(label, []).append(d)
+        return groups
+
+    def _history_key(self, label: str) -> str:
+        """run_history is per source. `run_history.source` is NVARCHAR(200) and
+        record_run logs its own failures, so an overflow would cost the gate its
+        baseline quietly — truncate here instead."""
+        key = label if label == self.source_name else f"{self.source_name}/{label}"
+        return key[:200]
+
+    def _last_good(self, key: str) -> Optional[dict]:
+        return (self.repo.last_good_run(key)
+                if hasattr(self.repo, "last_good_run") else None)
+
+    def _count_problem(self, label: str, prev: int, now: int) -> Optional[str]:
+        spread = abs(now - prev) / max(prev, 1) * 100
+        if spread <= COUNT_TOLERANCE_PCT:
+            return None
+        return (f"{label}: count moved {prev} -> {now} ({spread:.1f}%), over the "
+                f"{COUNT_TOLERANCE_PCT}% tolerance")
 
     def check_run_trustworthy(self, docs: List) -> tuple:
         """(trustworthy, [reasons]). Only a trustworthy run may act on
@@ -339,15 +434,24 @@ class NewOrchestrator(Orchestrator):
             if "capped" in w.lower() or "stopped at page" in w.lower():
                 problems.append(w[:120])
 
-        last = self.repo.last_good_run(self.source_name) if hasattr(
-            self.repo, "last_good_run") else None
+        last = self._last_good(self.source_name)
         if last and last.get("row_count"):
-            prev, now = last["row_count"], len(docs)
-            spread = abs(now - prev) / max(prev, 1) * 100
-            if spread > COUNT_TOLERANCE_PCT:
-                problems.append(
-                    f"count moved {prev} -> {now} ({spread:.1f}%), over the "
-                    f"{COUNT_TOLERANCE_PCT}% tolerance")
+            problem = self._count_problem("total", last["row_count"], len(docs))
+            if problem:
+                problems.append(problem)
+
+        # Per source as well as in total. A composite logs a failed source and
+        # carries on, so a small source dying entirely hides inside a 5% tolerance
+        # measured against the regulator's whole inventory.
+        groups = self._docs_by_source(docs)
+        if len(groups) > 1:
+            for label, group in groups.items():
+                prev = (self._last_good(self._history_key(label))
+                        or {}).get("row_count")
+                if prev:
+                    problem = self._count_problem(label, prev, len(group))
+                    if problem:
+                        problems.append(problem)
         return (not problems), problems
 
     # ------------------------------------------------------------------ #
@@ -537,8 +641,7 @@ class NewOrchestrator(Orchestrator):
         buckets = self.classify_documents(docs)
         tokens_stored = self._apply_token_backfill()
 
-        last = self.repo.last_good_run(self.source_name) if hasattr(
-            self.repo, "last_good_run") else None
+        last = self._last_good(self.source_name)
         if (last and last.get("inventory_hash") == inv
                 and not any(buckets[k] for k in ("new", "modified", "disappeared"))):
             # This logged "nothing to do" and then did everything anyway.
@@ -582,9 +685,18 @@ class NewOrchestrator(Orchestrator):
             self._process_docs(todo, regulator_name)
 
         verdict = "PASS" if trustworthy else "QUARANTINED"
+        groups = self._docs_by_source(docs)
         if hasattr(self.repo, "record_run"):
             self.repo.record_run(self.source_name, len(docs), inv, verdict,
                                  "; ".join(problems)[:400])
+            # One row per source too, so the next run has a per-source baseline to
+            # compare against. Each carries only its own problems.
+            if len(groups) > 1:
+                for label, group in groups.items():
+                    own = [p for p in problems if p.startswith(f"{label}:")]
+                    self.repo.record_run(self._history_key(label), len(group),
+                                         self._inventory_hash(group), verdict,
+                                         "; ".join(own)[:400])
 
         self.report = {
             "regulator": regulator_name,
@@ -601,6 +713,8 @@ class NewOrchestrator(Orchestrator):
             "version_tokens_stored": tokens_stored,
             "tables": self.repo.counts() if hasattr(self.repo, "counts") else {},
         }
+        if len(groups) > 1:
+            self.report["by_source"] = {k: len(v) for k, v in groups.items()}
         if not trustworthy and buckets["disappeared"]:
             self.report["note"] = (
                 f"{len(buckets['disappeared'])} document(s) were not seen this run, "
