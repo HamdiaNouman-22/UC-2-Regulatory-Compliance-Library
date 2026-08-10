@@ -524,27 +524,37 @@ class MSSQLRepository(DocumentRepository):
             logger.error(f"find_by_identity_fields failed: {e}")
             return None
 
-    def find_regulations_by_source(self, source_system: str) -> List[dict]:
-        """Every live regulation this source stored.
+    def find_regulations_by_source(self, source_system: str,
+                                   regulator: Optional[str] = None) -> List[dict]:
+        """Every live regulation this source stored, for the completeness gate.
 
-        The completeness gate needs to know what is already in the library to
-        spot what a run did not see. Withdrawn rows are excluded so a document
-        already marked gone is not re-reported as gone every run.
+        Two regulators publish under "Rules and Regulations" and two more under
+        "Laws and Regulations", so `source_system` alone can return another
+        regulator's documents — which then read as disappeared. Scope it whenever
+        the regulator is known. extra_meta carries the source's identity fields
+        and the last version token; a change sweep cannot read either without it.
         """
         if not source_system:
             return []
+        where = "WHERE source_system = ? "
+        params = [source_system]
+        if regulator:
+            where += "AND regulator = ? "
+            params.append(regulator)
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT id, title, document_url, doc_path, content_hash, "
-                    "reference_no, source_system, category, status "
+                    "reference_no, regulator, source_system, category, status, "
+                    "CAST(extra_meta AS NVARCHAR(MAX)) as extra_meta "
                     "FROM regulations "
-                    "WHERE source_system = ? "
+                    + where +
                     "  AND (status IS NULL OR status <> 'withdrawn')",
-                    (source_system,))
+                    params)
                 cols = [c[0] for c in cursor.description]
-                return [dict(zip(cols, row)) for row in cursor.fetchall()]
+                return [self._with_extra_meta(dict(zip(cols, row)))
+                        for row in cursor.fetchall()]
         except Exception as e:
             # Raises rather than returning []: an empty list here reads as
             # "nothing disappeared" and would silently disarm the gate.

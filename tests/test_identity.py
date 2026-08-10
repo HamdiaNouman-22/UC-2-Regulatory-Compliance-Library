@@ -110,6 +110,7 @@ class FakeRepo:
         self.runs = runs or {}
         self.recorded = []
         self.reference_lookups = []
+        self.source_lookups = []
 
     @staticmethod
     def _path(value):
@@ -132,10 +133,13 @@ class FakeRepo:
         self.reference_lookups.append(ref)
         return next((dict(r) for r in self.rows if r.get("reference_no") == ref), None)
 
-    def find_regulations_by_source(self, source):
+    def find_regulations_by_source(self, source, regulator=None):
+        self.source_lookups.append((source, regulator))
         if not source:
             return []
-        return [dict(r) for r in self.rows if r.get("source_system") == source]
+        return [dict(r) for r in self.rows
+                if r.get("source_system") == source
+                and (not regulator or r.get("regulator") == regulator)]
 
     def update_regulation(self, regulation_id, **fields):
         pass
@@ -336,6 +340,54 @@ def test_a_crawler_with_no_source_system_reports_the_gate_is_inert(caplog):
     with caplog.at_level("WARNING"):
         assert orch(repo)._stored_for_source() == []
     assert "gate is inert" in caplog.text
+
+
+def test_the_stored_inventory_is_scoped_to_the_regulator_the_documents_carry():
+    """`source_system` is not unique: AML and SIMAH both publish under "Rules
+    and Regulations". Unscoped, an AML run offers SIMAH's library up as
+    disappeared — and a trustworthy run would withdraw it."""
+    repo = FakeRepo([
+        stored(id=1, source_system="Rules and Regulations", regulator="AML"),
+        stored(id=2, source_system="Rules and Regulations", regulator="SIMAH"),
+    ])
+    crawler = CompositeCrawler([FakeCrawler([], "Rules and Regulations")])
+    docs = [Doc(document_url="https://x/1", regulator="AML")]
+    rows = orch(repo, crawler=crawler)._stored_for_source(docs)
+    assert [r["id"] for r in rows] == [1]
+    assert repo.source_lookups == [("Rules and Regulations", "AML")]
+
+
+def test_documents_that_name_no_regulator_fall_back_to_the_source_alone():
+    """Every existing run: the crawlers do not all set it, and an empty scope
+    must not turn the gate off."""
+    repo = FakeRepo([stored(id=1, source_system="A", regulator="AML"),
+                     stored(id=2, source_system="A", regulator="SIMAH")])
+    crawler = CompositeCrawler([FakeCrawler([], "A")])
+    rows = orch(repo, crawler=crawler)._stored_for_source([Doc(document_url="u")])
+    assert sorted(r["id"] for r in rows) == [1, 2]
+    assert repo.source_lookups == [("A", None)]
+
+
+def test_a_run_carrying_two_regulators_is_not_scoped_to_either():
+    repo = FakeRepo([stored(id=1, source_system="A", regulator="AML")])
+    crawler = CompositeCrawler([FakeCrawler([], "A")])
+    docs = [Doc(document_url="1", regulator="AML"),
+            Doc(document_url="2", regulator="SIMAH")]
+    assert orch(repo, crawler=crawler)._stored_for_source(docs)
+    assert repo.source_lookups == [("A", None)]
+
+
+def test_a_regulator_name_that_matches_nothing_says_why_the_bucket_is_empty(caplog):
+    """The safe answer — nothing can be withdrawn from an empty bucket — but it
+    must not be a silent one. A display name a word off from the stored value
+    would otherwise look exactly like a source that holds nothing."""
+    repo = FakeRepo([stored(id=1, source_system="A",
+                            regulator="Anti-Money Laundering Permanent Committee")])
+    crawler = CompositeCrawler([FakeCrawler([], "A")])
+    docs = [Doc(document_url="u", regulator="AML")]
+    with caplog.at_level("WARNING"):
+        assert orch(repo, crawler=crawler)._stored_for_source(docs) == []
+    assert "does not match the stored one" in caplog.text
 
 
 def test_inventory_hash_distinguishes_identities_on_different_fields():

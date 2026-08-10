@@ -211,13 +211,15 @@ class ExcelRepo:
                 return self._with_extra_meta(dict(r))
         return None
 
-    def find_regulations_by_source(self, source_system: str) -> list:
-        """Everything stored for this source. Mirrors the MSSQL method so
-        both repos answer the completeness gate the same way."""
+    def find_regulations_by_source(self, source_system: str,
+                                   regulator: Optional[str] = None) -> list:
+        """Everything stored for this source. Mirrors the MSSQL method — same
+        regulator scoping, and extra_meta comes back parsed there too."""
         if not source_system:
             return []
-        return [dict(r) for r in self.t["regulations"]
+        return [self._with_extra_meta(dict(r)) for r in self.t["regulations"]
                 if r.get("source_system") == source_system
+                and (not regulator or r.get("regulator") == regulator)
                 and (r.get("status") or "") != "withdrawn"]
 
     def find_by_reference(self, reference_no: str) -> Optional[dict]:
