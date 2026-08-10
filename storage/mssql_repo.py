@@ -391,6 +391,167 @@ class MSSQLRepository(DocumentRepository):
             logger.error(f"document_url existence check failed: {e}")
             return False
 
+    # ================================================================== #
+    #  THE NEW ORCHESTRATOR'S CONTRACT                                     #
+    #                                                                      #
+    #  NewOrchestrator (dynamic_crawler/formfill/orch.py) needs five        #
+    #  methods that ExcelRepo already implements. Two of them —            #
+    #  find_by_identity and find_by_reference — are called WITHOUT a        #
+    #  hasattr guard, so until now a run against this repo crashed on the   #
+    #  first document. That is why the pipeline had only ever run against   #
+    #  Excel.                                                              #
+    # ================================================================== #
+
+    @staticmethod
+    def _norm_doc_path(v) -> str:
+        """doc_path in one canonical form, whatever it was stored as.
+
+        This column holds `json.dumps(list)` here, ExcelRepo writes
+        `" | ".join(list)`, and classify_documents compares `" > ".join(list)`.
+        A plain string compare matches none of the three, which is exactly the
+        bug that made every document look `new` on every run.
+        """
+        if v is None:
+            return ""
+        if isinstance(v, (list, tuple)):
+            parts = list(v)
+        else:
+            s = str(v).strip()
+            if s.startswith("["):
+                try:
+                    parts = json.loads(s)
+                except Exception:
+                    parts = [s]
+            elif " > " in s:
+                parts = s.split(" > ")
+            elif " | " in s:
+                parts = s.split(" | ")
+            else:
+                parts = [s] if s else []
+        return " > ".join(str(p).strip() for p in parts if str(p).strip())
+
+    def find_by_identity(self, document_url: str, doc_path) -> Optional[dict]:
+        """The identity classify_documents uses: (document_url, doc_path).
+
+        Filtered on document_url in SQL, then matched on doc_path in python —
+        the column is JSON text and the caller passes an arrow-joined string, so
+        the comparison cannot be done in the WHERE clause without depending on
+        both sides having been written by the same code.
+        """
+        if not document_url:
+            return None
+        want = self._norm_doc_path(doc_path)
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, title, document_url, doc_path, content_hash, "
+                    "compliancecategory_id, category, status "
+                    "FROM regulations WHERE document_url = ?", (document_url,))
+                cols = [c[0] for c in cursor.description]
+                for row in cursor.fetchall():
+                    r = dict(zip(cols, row))
+                    if self._norm_doc_path(r.get("doc_path")) == want:
+                        return r
+            return None
+        except Exception as e:
+            logger.error(f"find_by_identity failed: {e}")
+            return None
+
+    def find_by_reference(self, reference_no: str) -> Optional[dict]:
+        """The tiebreak: the same reference number at a NEW url is the same
+        document republished, not a new document plus a disappearance."""
+        if not reference_no:
+            return None
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT TOP 1 id, title, document_url, doc_path, content_hash, "
+                    "compliancecategory_id, category, status "
+                    "FROM regulations WHERE reference_no = ? ORDER BY id ASC",
+                    (reference_no,))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return dict(zip([c[0] for c in cursor.description], row))
+        except Exception as e:
+            logger.error(f"find_by_reference failed: {e}")
+            return None
+
+    def _ensure_run_history(self, cursor) -> None:
+        """Create run_history on first use.
+
+        Additive and idempotent — it holds one row per crawl run and nothing
+        else reads it. The completeness gate compares this run's document count
+        against the last good one, so without the table the gate has no
+        baseline and can only catch the failures visible within a single run.
+        """
+        cursor.execute("""
+            IF NOT EXISTS (SELECT 1 FROM sysobjects
+                           WHERE name = 'run_history' AND xtype = 'U')
+            CREATE TABLE run_history (
+                run_id         INT IDENTITY(1,1) PRIMARY KEY,
+                source         NVARCHAR(200) NOT NULL,
+                row_count      INT           NOT NULL,
+                inventory_hash NVARCHAR(64)  NULL,
+                verdict        NVARCHAR(32)  NULL,
+                problems       NVARCHAR(500) NULL,
+                run_at         DATETIME      NOT NULL DEFAULT GETUTCDATE()
+            )""")
+
+    def record_run(self, source: str, row_count: int, inventory_hash: str,
+                   verdict: str = "PASS", problems: str = "") -> None:
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                self._ensure_run_history(cursor)
+                cursor.execute(
+                    "INSERT INTO run_history (source, row_count, inventory_hash, "
+                    "verdict, problems) VALUES (?, ?, ?, ?, ?)",
+                    (source, int(row_count), inventory_hash or "",
+                     verdict, (problems or "")[:500]))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"record_run failed: {e}")
+
+    def last_good_run(self, source: str) -> Optional[dict]:
+        """The most recent run this source is allowed to be compared against.
+
+        PASS only. Comparing against a quarantined run would let one short crawl
+        set the baseline for the next, and the gate would drift down with it.
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                self._ensure_run_history(cursor)
+                cursor.execute(
+                    "SELECT TOP 1 run_id, source, row_count, inventory_hash, "
+                    "verdict, run_at FROM run_history "
+                    "WHERE source = ? AND verdict = 'PASS' ORDER BY run_id DESC",
+                    (source,))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return dict(zip([c[0] for c in cursor.description], row))
+        except Exception as e:
+            logger.error(f"last_good_run failed: {e}")
+            return None
+
+    def counts(self) -> dict:
+        """Row counts per table, for the run report."""
+        out = {}
+        for t in ("regulations", "compliancecategory", "regulation_versions",
+                  "compliance_analysis", "requirement_mappings"):
+            try:
+                with self._get_conn() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(f"SELECT COUNT(*) FROM {t}")
+                    out[t] = int(cursor.fetchone()[0])
+            except Exception:
+                out[t] = None
+        return out
+
     def get_regulation_id_by_source_url(self, source_page_url: str) -> Optional[int]:
         query = """
             SELECT id
