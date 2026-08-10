@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 from datetime import date
 from typing import Dict, List, Optional
 
@@ -71,6 +72,11 @@ class NewOrchestrator(Orchestrator):
         self.analyse = analyse
         self.limit = limit
         self.report: Dict = {}
+        # The folder walk is a get-then-insert across several repo calls, so a
+        # lock inside the repo cannot make it safe. Two documents sharing a
+        # parent folder would each find it missing and each create it, giving
+        # one folder two ids and splitting the tree.
+        self._folder_lock = threading.RLock()
 
     # ------------------------------------------------------------------ #
     #  IDENTITY + CLASSIFICATION                                          #
@@ -177,6 +183,10 @@ class NewOrchestrator(Orchestrator):
 
         Intermediate nodes are folders; the last segment is the regulation.
         """
+        with self._folder_lock:
+            return self._walk_folders(hierarchy)
+
+    def _walk_folders(self, hierarchy: list) -> int:
         parent_id = None
         last_index = len(hierarchy) - 1
 
@@ -372,13 +382,19 @@ class NewOrchestrator(Orchestrator):
         if self.limit:
             todo = todo[:self.limit]
 
-        for i, doc in enumerate(todo, 1):
-            logger.info("[%d/%d] %s", i, len(todo), (doc.title or "")[:70])
-            try:
-                self._process_single_doc(i, doc, regulator_name)
-            except Exception as e:
-                logger.error("  failed: %s", e, exc_info=True)
-                self._log_step(None, "process", "ERROR", str(e)[:400])
+        # The parent's thread pool, not a loop of our own.
+        #
+        # `_process_docs` already does what this needs: DOC_MAX_WORKERS documents
+        # in flight (default 4), LLM calls separately capped by
+        # LLM_MAX_CONCURRENCY inside StagedLLMAnalyzer so more workers cannot
+        # stampede OpenRouter, and one failed document never aborting the batch.
+        # Looping serially here quietly gave all of that up — with analyse=true
+        # at roughly four minutes a document, a 40-document run took 2.7 hours
+        # instead of 40 minutes.
+        #
+        # Set DOC_MAX_WORKERS=1 to get the serial behaviour back.
+        if todo:
+            self._process_docs(todo, regulator_name)
 
         verdict = "PASS" if trustworthy else "QUARANTINED"
         if hasattr(self.repo, "record_run"):
