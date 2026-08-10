@@ -1,0 +1,64 @@
+# What each source's version signal is worth, and what it costs to read.
+# Every setting here is a measurement, and the measurement is the comment.
+#
+#   identity  the fields that decide "the same document", when the stored rows do
+#             not already carry the source's own choice in extra_meta
+#   confirm   fetch the document and hash its bytes before calling it modified.
+#             Only for a regulator whose version counters move in bulk.
+#   workers   parallel probes. Not a throughput knob -- see
+#             dynamic_crawler/fingerprint.py for why the number is 4.
+#   timeout   seconds per probe. A probe measured 21s against one regulator.
+
+defaults:
+  identity: [document_url, doc_path]
+  confirm: false
+  workers: 4
+  timeout: 20
+
+# Hosts no sweep may touch, whatever url a stored row happens to hold. A sweep
+# walks the library rather than a site, so without this it will probe a host we
+# are not allowed on because some stored row still points there.
+#
+# `until` is when the block may be REVIEWED, not when it expires. Nothing here
+# unblocks itself on a date -- a person deletes the entry.
+skip_hosts:
+  - host: simah.com
+    until: "2026-09-04"
+    why: >-
+      Cloudflare 1020-class block, not a challenge -- there is nothing to solve.
+      It was triggered by repeated iteration, not volume. Work from
+      output/snapshots/simah.rules.html, and take the one permitted probe inside
+      the next scheduled capture.
+
+# source_system is NOT unique across regulators: AML and SIMAH both publish under
+# "Rules and Regulations", SDAIA and MISA both under "Laws and Regulations". Both
+# halves of the pair are required to name a source.
+sources:
+  - regulator: "SDAIA"
+    source_system: "Laws and Regulations"
+    # 36/36 documents returned an ETag, counters 1-4 across 18 distinct
+    # timestamps: a real per-document edit history, so the counter is proof.
+    confirm: false
+
+  - regulator: "Anti-Money Laundering Permanent Committee"
+    source_system: "Rules and Regulations"
+    # 8/8 documents at version 5, every timestamp inside a three-second window:
+    # one bulk re-upload of the whole library, not eight edits. The next one
+    # moves every counter at once, so the counter alone is not evidence here.
+    confirm: true
+
+  - regulator: "Ministry of Education"
+    source_system: "Systems, Regulations and Policies"
+    # JavaScript-rendered: no listing an HTTP client can read, so the stored urls
+    # are the only inventory there is. Detection works, discovery still needs the
+    # browser crawl.
+    confirm: false
+
+# Not listed, deliberately:
+#   CMA     its counters (2-5 across four distinct months) earn confirm: false,
+#           but it runs through site_runners/cma_laws.py and its stored
+#           source_system is unverified from here. It takes `defaults` until
+#           someone reads the real value off the library.
+#   MOH x2  same shape as MOE; both forms are still approved=false.
+#   GOSI    its documents live on a SharePoint host the forms never emit, so its
+#           urls are not in the library yet.

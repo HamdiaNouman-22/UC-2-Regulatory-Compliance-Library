@@ -50,6 +50,7 @@ from typing import Dict, List, Optional
 
 from orchestrator.orchestrator import MIN_TEXT_LEN, Orchestrator
 
+from dynamic_crawler.changesignal import clean_fields, fields_of, identity_key
 from dynamic_crawler.formfill.textinput import decide_for_document
 
 logger = logging.getLogger(__name__)
@@ -95,12 +96,11 @@ class NewOrchestrator(Orchestrator):
         """One string, a list or a tuple, all to a tuple of field names.
 
         A source YAML writes `identity: [reference_no]` or `identity: page`, so
-        the value arrives in whatever shape yaml produced.
+        the value arrives in whatever shape yaml produced. The change sweep has
+        to key a document exactly as this does or the two cannot be compared, so
+        the shaping lives in the shared module and not here.
         """
-        if isinstance(identity, str):
-            identity = [identity]
-        fields = tuple(str(f).strip() for f in (identity or ()) if str(f).strip())
-        return fields or NewOrchestrator.DEFAULT_IDENTITY
+        return clean_fields(identity) or NewOrchestrator.DEFAULT_IDENTITY
 
     def _identity_for(self, doc) -> tuple:
         """The identity fields for THIS document.
@@ -113,13 +113,7 @@ class NewOrchestrator(Orchestrator):
 
     def _identity_fields_of(self, doc) -> dict:
         """The configured identity of one document, as {field: value}."""
-        out = {}
-        for field in self._identity_for(doc):
-            value = getattr(doc, field, None)
-            if isinstance(value, (list, tuple)):
-                value = " > ".join(str(v) for v in value)
-            out[field] = (str(value).strip() if value is not None else "")
-        return out
+        return fields_of(doc, self._identity_for(doc))
 
     def _check_identities(self, docs: List) -> None:
         """Refuse a run in which a configured identity is empty on any document.
@@ -263,7 +257,7 @@ class NewOrchestrator(Orchestrator):
                 buckets["modified"].append(doc)
 
         # Anything in the store for this source that this run did not see.
-        for r in self._stored_for_source():
+        for r in self._stored_for_source(docs):
             if r.get("id") not in seen_ids:
                 buckets["disappeared"].append(r)
 
@@ -292,7 +286,19 @@ class NewOrchestrator(Orchestrator):
                                regulation_id, e)
         return written
 
-    def _stored_for_source(self) -> List[dict]:
+    @staticmethod
+    def _regulator_of(docs: Optional[List]) -> Optional[str]:
+        """The one regulator this run's documents belong to, if it is one.
+
+        Taken from the documents rather than from the run's name because these
+        are the strings that get written to the row — a display name that differs
+        by a word would scope the lookup to nothing.
+        """
+        names = {str(getattr(d, "regulator", "") or "").strip()
+                 for d in (docs or [])} - {""}
+        return names.pop() if len(names) == 1 else None
+
+    def _stored_for_source(self, docs: Optional[List] = None) -> List[dict]:
         """What the library already holds for the sources this run covers.
 
         This used to read `self.repo.t`, an ExcelRepo-only table behind a
@@ -303,6 +309,12 @@ class NewOrchestrator(Orchestrator):
         does not have — so the lookup went out as None, both repos answered [] for
         a falsy source, and `disappeared` was silently empty again for every
         regulator built from a source config. Ask for every source it covers.
+
+        Scoped by regulator when the documents agree on one, because
+        `source_system` is not unique across regulators: two publish under "Rules
+        and Regulations" and two under "Laws and Regulations". Unscoped, this
+        bucket can hold a sibling regulator's library and offer it up as
+        disappeared.
         """
         sources = [s for s in (getattr(self.crawler, "source_systems", None)
                                or [getattr(self.crawler, "source_system", None)])
@@ -313,22 +325,39 @@ class NewOrchestrator(Orchestrator):
                            type(self.crawler).__name__)
             return []
 
+        regulator = self._regulator_of(docs)
         finder = getattr(self.repo, "find_regulations_by_source", None)
         if not callable(finder):
             if hasattr(self.repo, "t"):
                 return [r for r in self.repo.t["regulations"]
-                        if r.get("source_system") in sources]
+                        if r.get("source_system") in sources
+                        and (not regulator or r.get("regulator") == regulator)]
             logger.warning("%s cannot list stored regulations — `disappeared` "
                            "will be empty and the completeness gate is inert",
                            type(self.repo).__name__)
             return []
 
-        rows, seen = [], set()
-        for source in sources:
-            for r in finder(source):
-                if r.get("id") not in seen:
-                    seen.add(r.get("id"))
-                    rows.append(r)
+        def rows_for(scope: Optional[str]) -> List[dict]:
+            found, seen = [], set()
+            for source in sources:
+                for r in (finder(source, regulator=scope) if scope else finder(source)):
+                    if r.get("id") not in seen:
+                        seen.add(r.get("id"))
+                        found.append(r)
+            return found
+
+        rows = rows_for(regulator)
+        if regulator and not rows:
+            # An empty bucket is the safe answer — nothing can be withdrawn from
+            # it — but it must not be a silent one. Say whether the source really
+            # holds nothing or the regulator string does not match the column.
+            unscoped = rows_for(None)
+            if unscoped:
+                logger.warning(
+                    "%d stored row(s) under %s, none of them under regulator %r — "
+                    "`disappeared` is empty because the run's regulator name does "
+                    "not match the stored one",
+                    len(unscoped), sources, regulator)
         return rows
 
     # ------------------------------------------------------------------ #
@@ -383,8 +412,7 @@ class NewOrchestrator(Orchestrator):
     def _inventory_hash(self, docs: List) -> str:
         # `field=value`, not the values alone: one run can carry two sources whose
         # identities are different fields entirely.
-        keys = sorted("|".join(f"{k}={v}" for k, v in
-                               self._identity_fields_of(d).items()) for d in docs)
+        keys = sorted(identity_key(self._identity_fields_of(d)) for d in docs)
         return hashlib.md5("\n".join(keys).encode("utf-8")).hexdigest()[:12]
 
     def _docs_by_source(self, docs: List) -> Dict[str, List]:
