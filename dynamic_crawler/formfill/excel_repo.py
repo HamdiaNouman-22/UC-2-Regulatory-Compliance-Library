@@ -169,12 +169,31 @@ class ExcelRepo:
                 parts = [s] if s else []
         return " > ".join(str(p).strip() for p in parts if str(p).strip())
 
+    @staticmethod
+    def _with_extra_meta(r: Optional[dict]) -> Optional[dict]:
+        """extra_meta as a dict, however the workbook happened to store it.
+        Mirrors the MSSQL method so both repos hand back the same shape."""
+        if r is None:
+            return None
+        raw = r.get("extra_meta")
+        if isinstance(raw, dict):
+            return r
+        r["extra_meta"] = {}
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                r["extra_meta"] = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                pass
+        return r
+
     def find_by_identity(self, document_url: str, doc_path: str) -> Optional[dict]:
         """The identity lookup `classify_documents` uses: (document_url, doc_path)."""
         want = self._norm_path(doc_path)
-        return next((dict(r) for r in self.t["regulations"]
-                     if r.get("document_url") == document_url
-                     and self._norm_path(r.get("doc_path")) == want), None)
+        return self._with_extra_meta(
+            next((dict(r) for r in self.t["regulations"]
+                  if r.get("document_url") == document_url
+                  and self._norm_path(r.get("doc_path")) == want), None))
 
     def find_by_identity_fields(self, fields: dict) -> Optional[dict]:
         """Identity lookup on whichever columns the source config names.
@@ -189,7 +208,7 @@ class ExcelRepo:
                 if stored != want:
                     break
             else:
-                return dict(r)
+                return self._with_extra_meta(dict(r))
         return None
 
     def find_regulations_by_source(self, source_system: str) -> list:
