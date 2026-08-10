@@ -1,3 +1,8 @@
+# PENDING CODE REVIEW — then set `version_probe: true` below. Without it a
+# replaced PDF behind an unchanged link reads `unchanged` forever. The first
+# probed run lays down one metadata baseline per stored document, so it is a
+# write: it needs sign-off before it runs against production.
+#
 # SDAIA — Laws and Regulations. ONE ROW PER FILE, not per card.
 #
 # The first version of this form used `div.card` as the row and took the first
