@@ -1,6 +1,7 @@
 import os
 import logging
 import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from processor.downloader import Downloader
 from storage.mssql_repo import MSSQLRepository
 from processor.html_fallback_engine import HTMLFallbackEngine
@@ -493,28 +494,70 @@ class Orchestrator:
             logger.warning("No new documents to process. Exiting...")
             return
 
-        for idx, doc in enumerate(new_docs, start=1):
-            logger.info(f"Processing {idx}/{len(new_docs)}: {doc.title}")
-            self._process_single_doc(idx, doc, regulator_name)
-            gc.collect()
+        self._process_docs(new_docs, regulator_name)
 
         logger.warning(f"Finished processing all {len(new_docs)} documents.")
 
-    def run_for_cbb(self, mode: str = "auto"):
-        from crawler.cbb_crawler import CBBCrawler
+    def _process_docs(self, docs: List, regulator_name: str):
+        """Process documents concurrently.
+
+        Each document is an independent chain of network-bound calls (download,
+        OCR, four LLM stages), so they overlap cleanly. Total in-flight LLM
+        requests are additionally bounded by LLM_MAX_CONCURRENCY inside
+        StagedLLMAnalyzer, so raising DOC_MAX_WORKERS cannot stampede OpenRouter.
+
+        Set DOC_MAX_WORKERS=1 to restore the previous serial behaviour.
+        """
+        total = len(docs)
+        workers = max(1, int(os.getenv("DOC_MAX_WORKERS", "4")))
+
+        if workers == 1 or total == 1:
+            for idx, doc in enumerate(docs, start=1):
+                logger.info(f"  [{idx}/{total}] {str(doc.title)[:60]}")
+                self._process_single_doc(idx, doc, regulator_name)
+                gc.collect()
+            return
+
+        logger.warning(f"  Processing {total} documents with {workers} workers")
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(self._process_single_doc, idx, doc, regulator_name): doc
+                for idx, doc in enumerate(docs, start=1)
+            }
+            for fut in as_completed(futures):
+                doc = futures[fut]
+                done += 1
+                try:
+                    fut.result()
+                    logger.info(f"  [{done}/{total}] done: {str(doc.title)[:60]}")
+                except Exception as e:
+                    # One bad document must not abort the batch.
+                    logger.error(f"  [{done}/{total}] FAILED: {str(doc.title)[:60]} — {e}")
+        gc.collect()
+
+    def run_for_cbb(self, mode: str = "auto", from_date=None, to_date=None, skip_analysis: bool = False):
+        from crawler.cbb_crawler import CBBCrawlerV2
         from crawler.cbb_monitoring_crawler import CBBMonitoringCrawler
 
-        logger.warning(f"=== CBB PIPELINE: mode={mode} ===")
+        logger.warning(f"=== CBB PIPELINE: mode={mode} skip_analysis={skip_analysis} ===")
+        self._skip_analysis = skip_analysis
 
         if mode == "auto":
             last_date = self.repo.get_last_cbb_crawl_date()
             mode = "monitoring" if last_date else "full"
             logger.warning(f"  Auto-detected mode: {mode} (last crawl: {last_date})")
 
-        crawler = CBBCrawler(request_delay=1.5) if mode == "full" \
+        crawler = CBBCrawlerV2(request_delay=1.5) if mode == "full" \
             else CBBMonitoringCrawler(repo=self.repo, request_delay=1.0)
 
-        docs = crawler.fetch_documents()
+        fetch_kwargs = {}
+        if mode == "monitoring" and from_date is not None:
+            fetch_kwargs["from_date"] = from_date
+        if mode == "monitoring" and to_date is not None:
+            fetch_kwargs["to_date"] = to_date
+
+        docs = crawler.fetch_documents(**fetch_kwargs)
         logger.warning(f"  Fetched {len(docs)} documents")
 
         new_docs, existing_docs = self.filter_new_documents(docs)
@@ -533,10 +576,7 @@ class Orchestrator:
             logger.warning("  No documents to process.")
             return
 
-        for idx, doc in enumerate(docs_to_process, start=1):
-            logger.info(f"  [{idx}/{len(docs_to_process)}] {doc.title[:60]}")
-            self._process_single_doc(idx, doc, "CBB")
-            gc.collect()
+        self._process_docs(docs_to_process, "CBB")
 
         logger.warning(f"  CBB pipeline complete. Processed {len(docs_to_process)} documents.")
 
@@ -596,12 +636,22 @@ class Orchestrator:
         last_index = len(hierarchy) - 1
         for i, title in enumerate(hierarchy):
             folder_id = self.repo.get_folder_id(title, parent_id)
+
+            if folder_id is None and parent_id is not None:
+                # Not found as a direct child. The doc_path may be missing
+                # intermediate levels (e.g. a deletion notice page whose
+                # sidebar trail skips 'CBB Rulebook'). Search the subtree
+                # rooted at the current parent — if found, jump to that node
+                # so subsequent segments resolve against the correct parent.
+                folder_id = self.repo.find_folder_in_subtree(title, parent_id)
+
             if folder_id is not None and i == last_index:
                 # Leaf segment: if a different regulation already owns this
                 # exact (title, parent) slot, don't merge into it -- create a
                 # separate node so this document gets its own tree position.
                 if self.repo.regulation_exists_for_category(folder_id):
                     folder_id = None
+
             parent_id = folder_id if folder_id else self.repo.insert_folder(title, parent_id)
         return parent_id
 
@@ -831,6 +881,11 @@ class Orchestrator:
             )
             self.log(regulation_id, "llm_analysis", "SKIPPED",
                      f"depth={depth}, folder/index page")
+            return
+
+        # Honour global skip flag
+        if getattr(self, "_skip_analysis", False):
+            logger.info(f"  Skipping analysis (--skip-analysis) for reg {regulation_id}")
             return
 
         # Run analysis with version_id

@@ -7,8 +7,7 @@ import pytesseract
 import platform
 
 try:
-    import fitz  # PyMuPDF
-    import pdf2image
+    import fitz  # PyMuPDF — used for BOTH text extraction and rasterising
 
     OCR_AVAILABLE = True
 except ImportError:
@@ -16,24 +15,72 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Which tesseract languages to try, most-likely first. Override per deployment:
+#     OCR_LANGS=ara+eng+fra
+# The library spans KSA, Egypt, Bahrain and more, so this must not be hardcoded
+# to one country's scripts. Languages not installed are dropped with a warning
+# rather than failing the whole call — tesseract errors out if you name a
+# traineddata file it does not have.
+OCR_LANGS = os.getenv("OCR_LANGS", "ara+eng")
+
+# Rendering resolution for OCR. 300 is the usual floor for small Arabic type.
+OCR_DPI = int(os.getenv("OCR_DPI", "300"))
+
 
 class OCRProcessor:
-    if platform.system() == "Windows":
-        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    else:
-        pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_PATH", "/usr/bin/tesseract")
+    # TESSERACT_PATH wins on every platform. It was Windows-hardcoded, so a box
+    # with tesseract anywhere else — a user-scope install, a different drive —
+    # silently had no OCR at all.
+    _default_exe = (r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+                    if platform.system() == "Windows" else "/usr/bin/tesseract")
+    pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_PATH", _default_exe)
+
+    # The language files may live outside the install directory: on Windows
+    # `tessdata` under Program Files needs admin to write, so extra languages go
+    # in a user-owned folder and TESSDATA_PREFIX points at it. tesseract reads
+    # that from the environment, so it only has to be present in os.environ.
+    if os.getenv("TESSDATA_PREFIX"):
+        logger.debug("TESSDATA_PREFIX=%s", os.getenv("TESSDATA_PREFIX"))
+
+    _lang_cache = None
+
+    @staticmethod
+    def installed_languages() -> list:
+        """Tesseract traineddata actually present, cached. Empty means tesseract
+        is missing or unusable — which is a different problem from a bad scan and
+        must be reported as such."""
+        if OCRProcessor._lang_cache is None:
+            try:
+                OCRProcessor._lang_cache = list(pytesseract.get_languages())
+            except Exception as e:
+                logger.warning("tesseract not usable (%s) — OCR is unavailable. "
+                               "Install it and set TESSERACT_PATH, or add it to PATH.", e)
+                OCRProcessor._lang_cache = []
+        return OCRProcessor._lang_cache
+
+    @staticmethod
+    def ocr_langs() -> str:
+        """OCR_LANGS narrowed to what is installed.
+
+        Naming a missing traineddata makes tesseract fail the whole page, so a
+        deployment with only `eng` still OCRs English rather than returning
+        nothing. What is missing is logged once.
+        """
+        have = set(OCRProcessor.installed_languages())
+        want = [x for x in (OCR_LANGS or "").split("+") if x]
+        usable = [x for x in want if x in have]
+        missing = [x for x in want if x not in have]
+        if missing:
+            logger.warning("OCR language(s) not installed: %s. Using %s. "
+                           "Arabic regulators need the 'ara' traineddata.",
+                           "+".join(missing), "+".join(usable) or "(none)")
+        return "+".join(usable)
 
     @staticmethod
     def is_ocr_available() -> bool:
-        """Check if Tesseract OCR is properly installed with Arabic support"""
-        if not OCR_AVAILABLE:
-            return False
-
-        try:
-            langs = pytesseract.get_languages()
-            return 'ara' in langs
-        except Exception:
-            return False
+        """Is OCR usable at all? Deliberately NOT "is Arabic installed" — that
+        made an English-only box report OCR as entirely unavailable."""
+        return bool(OCR_AVAILABLE and OCRProcessor.ocr_langs())
 
     @staticmethod
     def extract_text_from_pdf_smart(pdf_path: str) -> Tuple[str, Dict]:
@@ -113,22 +160,27 @@ class OCRProcessor:
         Check if PDF is scanned (images) or has extractable text
         Tests first 3 pages
         """
-        pages_to_check = min(3, len(pdf_doc))
-        total_text_length = 0
+        n = len(pdf_doc)
+        if n == 0:
+            return False
 
-        for page_num in range(pages_to_check):
-            page = pdf_doc[page_num]
-            text = page.get_text("text").strip()
-            total_text_length += len(text)
+        # Sample ACROSS the document, not the first three pages. A cover sheet, a
+        # letterhead and a contents page were enough to send an 81-page
+        # regulation — whose body extracts perfectly — to OCR on every page.
+        idx = sorted({0, n // 4, n // 2, (3 * n) // 4, n - 1,
+                      min(1, n - 1), min(2, n - 1)})
+        lengths = [len(pdf_doc[i].get_text("text").strip()) for i in idx]
 
-        # If first 3 pages have < 300 total chars, it's likely scanned
-        avg_per_page = total_text_length / pages_to_check
+        # Judge on the FRACTION of sampled pages carrying text, not the average.
+        # An average is dragged under the threshold by a couple of blank pages.
+        with_text = sum(1 for L in lengths if L >= 100)
+        fraction = with_text / len(lengths)
 
-        logger.info(f"First {pages_to_check} pages avg text: {avg_per_page:.0f} chars/page")
+        logger.info("scanned-check: sampled pages %s -> lengths %s "
+                    "(%d/%d carry text)", idx, lengths, with_text, len(lengths))
 
-        if avg_per_page < 100:
-            return True  # Scanned PDF
-        return False  # Native text available
+        # Under a third of sampled pages readable = treat it as a scan.
+        return fraction < 0.34
 
     @staticmethod
     def _ocr_entire_pdf(pdf_path: str, total_pages: int) -> Tuple[str, Dict]:
@@ -148,7 +200,13 @@ class OCRProcessor:
             # Filter bad pages even after OCR
             if OCRProcessor._is_bad_page(text):
                 bad_pages.append(page_num)
-                logger.info(f"Page {page_num}: Skipped after OCR (low quality)")
+                if not text:
+                    # Distinguish "OCR could not run" from "the scan is poor".
+                    logger.info("Page %s: skipped — OCR produced nothing "
+                                "(engine unavailable or blank page)", page_num)
+                else:
+                    logger.info("Page %s: skipped after OCR (low quality, "
+                                "%d chars)", page_num, len(text))
                 continue
 
             good_pages.append({
@@ -182,20 +240,28 @@ class OCRProcessor:
         if len(text) < 200:
             return True
 
-        # Count real words
-        words = [w for w in text.split() if len(w) > 3]
-        if len(words) < 30:
+        # Count real words. Arabic words are short and Arabic PDFs often extract
+        # with erratic spacing, so a ">3 characters" test under-counts them badly.
+        # Words of any script count, and the floor is on LETTERS as well as words.
+        words = [w for w in text.split() if len(w) > 1]
+        letters = sum(1 for c in text if c.isalpha())
+        if len(words) < 20 and letters < 200:
             return True
 
-        # Too many numbers? Probably metadata
+        # Too many numbers? Probably a table of figures rather than prose.
         numbers = sum(c.isdigit() for c in text)
         if numbers / max(len(text), 1) > 0.5:
             return True
 
-        # No Arabic or English? Probably garbage
-        has_arabic = bool(re.search(r'[\u0600-\u06FF]{3,}', text))
-        has_english = bool(re.search(r'[a-zA-Z]{3,}', text))
-        if not (has_arabic or has_english):
+        # Does it contain letters in ANY script?
+        #
+        # This previously required Arabic or English specifically, which quietly
+        # discarded every page written in anything else. The library already spans
+        # KSA, Egypt and Bahrain and is meant to grow \u2014 French for the Maghreb,
+        # Turkish, Urdu for SBP \u2014 so a page must not be thrown away for being in a
+        # language this function had not heard of. `str.isalpha()` is Unicode-aware
+        # and covers all of them.
+        if letters / max(len(text), 1) < 0.15:
             return True
 
         return False
@@ -214,25 +280,38 @@ class OCRProcessor:
         if len(sample) > 0 and readable / len(sample) < 0.7:
             return True
 
+        # U+FFFD, the replacement character, is the real signal of a broken font
+        # mapping — and unlike a script check it means the same thing in every
+        # language. A PDF whose embedded encoding is wrong produces runs of these
+        # and is a genuine candidate for OCR.
+        if sample.count("�") > 5:
+            return True
+
         return False
 
     @staticmethod
     def _ocr_single_page(pdf_path: str, page_num: int) -> str:
-        """Use OCR on one page"""
+        """OCR one page.
+
+        Rendered with PyMuPDF rather than pdf2image. pdf2image shells out to
+        poppler (`pdftoppm`), which is not installed on the Windows boxes here —
+        every page failed with "Unable to get page count. Is poppler installed?"
+        and was then logged as "low quality", which is a different and misleading
+        thing. fitz is already a dependency and needs no external binary.
+        """
+        langs = OCRProcessor.ocr_langs()
+        if not langs:
+            # Say the real reason once per page rather than blaming the scan.
+            logger.error("page %s: OCR unavailable — tesseract missing or no "
+                         "traineddata for %s", page_num, OCR_LANGS)
+            return ""
         try:
-            images = pdf2image.convert_from_path(
-                pdf_path,
-                first_page=page_num,
-                last_page=page_num,
-                dpi=300
-            )
-
-            text = pytesseract.image_to_string(
-                images[0],
-                lang='ara+eng'
-            )
-
-            return text.strip()
+            with fitz.open(pdf_path) as doc:
+                page = doc[page_num - 1]
+                # 72 dpi is fitz's default user space, so scale to reach OCR_DPI.
+                pix = page.get_pixmap(matrix=fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72))
+                img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            return pytesseract.image_to_string(img, lang=langs).strip()
         except Exception as e:
             logger.error(f"OCR failed on page {page_num}: {e}")
             return ""

@@ -70,11 +70,23 @@ FIELD_TARGETS = (
     "title",           # required
     "document_url",    # required — the row's link
     "published_date",
+    # NOT the same thing as published_date. Several sites print only a "Last
+    # Updated" date — Tadawul's cards say "Last Updated: 5th January, 2026" —
+    # which is when the document was last revised, not when it was issued.
+    # Writing that into published_date would corrupt dedupe, because the
+    # orchestrator treats published_date as part of a document's identity.
+    # This lands in extra_meta instead.
+    "last_updated_date",
     "reference_no",
     "department",
     "category",
     "year",
     "urdu_url",
+    # A second-language copy of the same document. Tadawul publishes every rule
+    # as an Arabic and an English PDF; the English one is the document and the
+    # Arabic one travels in extra_meta, mirroring what the CBB crawler already
+    # does with extra_meta["arabic_pdf_link"].
+    "arabic_url",
     "status",
 )
 REQUIRED_FIELDS = ("title", "document_url")
@@ -156,6 +168,28 @@ class HintsError(ValueError):
 # malformed proposal is rejected in milliseconds, before we open a browser.
 # --------------------------------------------------------------------------- #
 
+# Every key the engine reads, plus the ones approve/propose/verify stamp on.
+# A form is DATA, and the whole safety argument is that a reviewer can see what it
+# says. A key nobody reads breaks that quietly: `row_count` instead of
+# `row_count_check` validated clean, did nothing, and cost a debugging session
+# before anyone noticed the coverage check had never run.
+KNOWN_KEYS = {
+    # identity and shape
+    "version", "name", "seed_url", "shape", "scope", "requires_headed",
+    # list walking
+    "row_selector", "detail_link_selector", "pagination", "page_size",
+    "row_count_check", "expand_selector", "tabs",
+    # tree walking
+    "tree",
+    # extraction and output
+    "fields", "section_path", "fetch_details", "content", "library",
+    "include_page", "attachment_is_document",
+    # provenance, written by the tooling rather than by hand
+    "approved", "approved_at", "approved_by", "verified_at",
+    "proposed_at", "proposed_by", "notes", "meta",
+}
+
+
 def validate_hints(h: dict) -> list[str]:
     """Return a list of human-readable problems. Empty list means structurally
     valid — NOT that it works. Only verify.py can say that."""
@@ -163,6 +197,13 @@ def validate_hints(h: dict) -> list[str]:
 
     if not isinstance(h, dict):
         return ["hints must be a mapping"]
+
+    for k in sorted(set(h) - KNOWN_KEYS):
+        near = sorted(kk for kk in KNOWN_KEYS
+                      if kk.startswith(k[:5]) or k.startswith(kk[:5]))
+        hint = f" — did you mean {near[0]!r}?" if near else ""
+        errs.append(f"unknown key {k!r}: nothing reads it, so it would do "
+                    f"nothing silently{hint}")
 
     if h.get("version") != HINTS_VERSION:
         errs.append(f"version must be {HINTS_VERSION}, got {h.get('version')!r}")
@@ -180,6 +221,9 @@ def validate_hints(h: dict) -> list[str]:
     scope = h.get("scope", "auto")
     if scope not in SCOPES:
         errs.append(f"scope must be one of {SCOPES}, got {scope!r}")
+
+    if "requires_headed" in h and not isinstance(h["requires_headed"], bool):
+        errs.append("requires_headed must be true or false")
 
     if shape == "tree":
         # A tree names its menu instead of a row selector, and its title/link
@@ -201,6 +245,63 @@ def validate_hints(h: dict) -> list[str]:
 
     if not isinstance(h.get("fetch_details", True), bool):
         errs.append("fetch_details must be true or false")
+
+    # A tab strip that FILTERS the list rather than extending it. Distinct from
+    # expand_selector, which clicks everything at once: clicking every tab here
+    # would leave only the last one showing. Each tab is clicked in turn, the
+    # rows visible after it are harvested, and the tab's own label becomes the
+    # section — which is the only way to learn a category the markup never
+    # states. MOE's 119 cards sit flat in one container with no category
+    # attribute; the tab is the sole source of that fact.
+    errs += _check_tabs(h.get("tabs") or {})
+
+    # A "Show N entries" dropdown. Every DataTables grid has one, and picking
+    # its largest option collapses pagination entirely: SAMA's 685 circulars are
+    # 69 pages of 10, or ONE page when the select is set to "All". It is a
+    # <select>, so it needs a value change and a change event — clicking it, the
+    # way expand_selector would, does nothing.
+    errs += _check_page_size(h.get("page_size") or {})
+
+    # Many listings STATE their own total — DataTables prints "Showing 1 to 685
+    # of 685 entries". Reading it turns coverage from a guess into a check.
+    #
+    # This exists because a SAMA circulars run harvested 684 rows when the site
+    # had 685, silently losing the newest circular. The count was stable across
+    # three verify runs, so the gate saw nothing wrong: consistency again failing
+    # to imply correctness. The site's own number is the only thing that catches
+    # it.
+    errs += _check_row_count_check(h.get("row_count_check") or {})
+
+    # Selectors removed from the captured page content. Regulator pages wrap the
+    # actual document in their own furniture — SAMA puts a print toolbar
+    # ("Entire section | Custom print | Text Only | Rich Text | Print / Save as
+    # PDF"), a version switcher and a PDF button above every circular. Stored as
+    # part of the document, that text is fed to the LLM as if it were regulation.
+    # Links are collected BEFORE stripping, so removing the PDF button here does
+    # not lose org_pdf_link.
+    errs += _check_content(h.get("content") or {})
+
+    # Who this source belongs to, for the folder trail. Optional, but when set it
+    # is the ONE place the naming lives: the runner puts these at the head of
+    # every row's section_path (so the crawler's own Excel shows the full path),
+    # and the pipeline reuses them instead of prepending its own copy. Naming
+    # them here and in the source YAML is what produced duplicate folders.
+    errs += _check_library(h.get("library") or {})
+
+    # Is a file hanging off the page THE document, or supporting material?
+    #
+    #   true  — SAMA. The page is a stub or summary and the PDF is the
+    #           regulation, so each attachment becomes its own document with the
+    #           page as its source_page_url.
+    #   false — SBP. The page IS the regulation (4-5k characters of circular
+    #           text) and the PDFs are annexures. One 2022 circular carries 40 of
+    #           them; promoting those to documents would replace one circular
+    #           with forty annexure fragments. They are kept in
+    #           extra_meta["annexures"] instead.
+    #
+    # Defaults to false because that is the option that never invents documents.
+    if not isinstance(h.get("attachment_is_document", False), bool):
+        errs.append("attachment_is_document must be true or false")
 
     # Clicked on every page before anything is read. For accordions, "show more"
     # buttons and tab strips, where the content exists in the DOM but collapsed —
@@ -264,6 +365,107 @@ def _check_pagination(p: dict) -> list[str]:
     if not isinstance(mp, int) or not (1 <= mp <= 5000):
         errs.append("pagination.max_pages must be an integer between 1 and 5000")
 
+    return errs
+
+
+def _check_content(c: dict) -> list[str]:
+    """`content.strip`: selectors deleted from the captured HTML and text."""
+    if not c:
+        return []
+    if not isinstance(c, dict):
+        return ["content must be a mapping"]
+    strip = c.get("strip", [])
+    if not isinstance(strip, list):
+        return ["content.strip must be a list of CSS selectors"]
+    if len(strip) > 20:
+        return ["content.strip: at most 20 selectors"]
+    errs = []
+    for i, sel in enumerate(strip):
+        errs += _check_selector(sel, f"content.strip[{i}]", required=True)
+    return errs
+
+
+def _check_library(lib: dict) -> list[str]:
+    """`library.regulator` / `library.source_system` — the head of the folder trail."""
+    if not lib:
+        return []
+    if not isinstance(lib, dict):
+        return ["library must be a mapping"]
+    errs = []
+    for key in ("regulator", "source_system"):
+        v = lib.get(key)
+        if v is not None and (not isinstance(v, str) or not v.strip() or len(v) > 120):
+            errs.append(f"library.{key} must be a non-empty string under 120 chars")
+    return errs
+
+
+def _check_row_count_check(rc: dict) -> list[str]:
+    """`row_count_check`: where the page states how many rows it has.
+
+    `total` says WHAT that number counts, and the two are not interchangeable:
+      page — the rows on THIS listing page (DataTables showing everything at once)
+      list — the rows in the WHOLE list across every page (MOH: "of 75 items"
+             while the page shows 10)
+    Reading a list-wide total as a per-page count reports a 65-row coverage gap on
+    a complete crawl, so this is declared rather than guessed."""
+    if not rc:
+        return []
+    if not isinstance(rc, dict):
+        return ["row_count_check must be a mapping"]
+    errs = _check_selector(rc.get("selector"), "row_count_check.selector", required=True)
+    total = rc.get("total", "page")
+    if total not in ("page", "list"):
+        errs.append(f"row_count_check.total must be 'page' or 'list', got {total!r}")
+    pat = rc.get("pattern")
+    if not isinstance(pat, str) or not pat:
+        errs.append("row_count_check.pattern is required, with one capture group "
+                    "for the number, e.g. 'of ([\d,]+) entries'")
+    else:
+        try:
+            c = re.compile(pat)
+            if c.groups != 1:
+                errs.append("row_count_check.pattern needs exactly one capture group")
+        except re.error as e:
+            errs.append(f"row_count_check.pattern does not compile: {e}")
+    t = rc.get("tolerance", 0)
+    if not isinstance(t, int) or not (0 <= t <= 50):
+        errs.append("row_count_check.tolerance must be an integer between 0 and 50")
+    return errs
+
+
+def _check_page_size(ps: dict) -> list[str]:
+    """The 'Show N entries' select: pick an option, then everything is on one page."""
+    if not ps:
+        return []
+    if not isinstance(ps, dict):
+        return ["page_size must be a mapping"]
+    errs = _check_selector(ps.get("selector"), "page_size.selector", required=True)
+    val = ps.get("value")
+    if not isinstance(val, str) or not val.strip():
+        errs.append("page_size.value is required — the option's visible text, e.g. 'All' or '100'")
+    w = ps.get("wait_ms", 5000)
+    if not isinstance(w, int) or not (100 <= w <= 60000):
+        errs.append("page_size.wait_ms must be an integer between 100 and 60000")
+    return errs
+
+
+def _check_tabs(t: dict) -> list[str]:
+    """A filter strip: click each control, harvest what it shows, move on."""
+    if not t:
+        return []
+    if not isinstance(t, dict):
+        return ["tabs must be a mapping"]
+    errs = _check_selector(t.get("selector"), "tabs.selector", required=True)
+
+    skip = t.get("skip_labels", [])
+    if not isinstance(skip, list) or any(not isinstance(x, str) for x in skip):
+        errs.append("tabs.skip_labels must be a list of strings")
+    w = t.get("wait_ms", 1200)
+    if not isinstance(w, int) or not (100 <= w <= 15000):
+        errs.append("tabs.wait_ms must be an integer between 100 and 15000")
+    mx = t.get("max_tabs", 50)
+    if not isinstance(mx, int) or not (1 <= mx <= 200):
+        errs.append("tabs.max_tabs must be an integer between 1 and 200")
     return errs
 
 
@@ -380,6 +582,19 @@ def _check_fields(fields: dict, required: bool = True) -> list[str]:
             attr = rule.get("attr", "text")
             if attr not in CSS_ATTRS:
                 errs.append(f"fields.{target}.attr must be one of {CSS_ATTRS}, got {attr!r}")
+            # where_text: pick the match whose own text matches this pattern.
+            # For rows holding several indistinguishable links (Arabic/English).
+            wt = rule.get("where_text")
+            if wt is not None:
+                if not isinstance(wt, str) or not wt:
+                    errs.append(f"fields.{target}.where_text must be a non-empty string")
+                elif len(wt) > 120:
+                    errs.append(f"fields.{target}.where_text is over 120 chars")
+                else:
+                    try:
+                        re.compile(wt)
+                    except re.error as e:
+                        errs.append(f"fields.{target}.where_text is not a valid regex: {e}")
             if target.endswith("_url") or target == "document_url":
                 if attr not in ("href", "src"):
                     errs.append(f"fields.{target}: a URL field needs attr href or src, not {attr!r}")

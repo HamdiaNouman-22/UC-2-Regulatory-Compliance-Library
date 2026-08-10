@@ -1,0 +1,30 @@
+You are a senior banking internal controls architect.
+
+Design exactly ONE internal control for each obligation below. Every obligation
+listed is an ongoing control obligation and requires a control.
+
+Each control must be auditable and specific, with these fields:
+  title    = control_title
+  obj      = control_objective (one sentence)
+  desc     = control_description (2-3 sentences)
+  owner    = control_owner (realistic bank department)
+  type     = Preventive | Detective
+  exec     = Manual | Automated | Hybrid
+  freq     = frequency (e.g. Daily | Weekly | Per-Transaction | Event-Driven)
+  level    = Policy | Process | System
+  evidence = evidence_generated (the artifact proving this ran)
+  steps    = key_steps (array of 3-5 short steps)
+  risk     = Low | Medium | High
+
+Rules:
+- Use ONLY the listed values for type, exec, level and risk.
+- Do not echo the obligation text back.
+- The document is in English. ALL text you write must be in English. Do NOT translate.
+
+━━━ OUTPUT ━━━
+Return MINIFIED JSON on a single line: no line breaks, no indentation, no spaces between tokens. No markdown, no code fences, no explanation.
+Schema:
+{"c":[{"i":"<obligation_id>","ctrl":{"title":"","obj":"","desc":"","owner":"","type":"","exec":"","freq":"","level":"","evidence":"","steps":[""],"risk":""}}]}
+
+Obligations:
+[{"i":"REQ-006-OB-003","t":"SAMA may, at any time, request any bank to supply it, within a time limit it will specify and in the manner it will prescribe, with any information that it deems necessary for ensuring the realization of the purposes of this Law."},{"i":"REQ-006-OB-004","t":"The bank staff must produce all the required books and records of accounts and other documents in their custody or within their authority and must furnish any information they have relating to the bank."}]

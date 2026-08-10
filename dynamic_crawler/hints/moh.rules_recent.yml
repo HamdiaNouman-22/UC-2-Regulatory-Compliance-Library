@@ -1,0 +1,86 @@
+# Ministry of Health — Rules and Regulations (Recent)
+#
+#   https://www.moh.gov.sa/en/ministry/rules/pages/default.aspx
+#
+# TWO LISTS SHARE THIS ONE URL, each with its own pager:
+#
+#   Recent Rules and Regulations   #documents-container            #pagination-controls           75 items / 8 pages
+#   Archived                       #documents-container-archived    #pagination-controls-archived   7 items / 1 page
+#
+# That is why the page shows two paginations — not a duplicate, and not a
+# top/bottom pair. They are separate document sets, stacked vertically, both
+# visible at once (there are no tabs). So they are TWO FORMS: one scope, one
+# pager and one section path each. Trying to express both in one form would mean
+# one pager driving rows it does not own.
+#
+# This form is the RECENT list. See moh.rules_archived.yml for the other.
+#
+# MEASURED 2026-08-02:
+#   #documents-container a.event_block   x10 per page   "Showing 1-10 of 75 items (Page 1 of 8)"
+#
+# FILE DATE IS NOT A PUBLICATION DATE
+#   Each card reads "(File Date: 2026-02-20 10:13:42) …". Three things say that is
+#   an upload timestamp, not an issue date:
+#     1. it carries seconds;
+#     2. "Total Hip Arthroplasty (THA) Rehabilitation Protocol 2025" has File Date
+#        2026-02-23 — a 2025 protocol, filed in 2026;
+#     3. five documents were filed within 22 minutes (10:06:32, 10:13:42,
+#        10:19:17, 10:24:42, 10:28:33) — one person doing a bulk upload. No
+#        ministry publishes five clinical guidelines five minutes apart.
+#   So it goes to last_updated_date -> extra_meta, never published_date, which
+#   the orchestrator treats as part of a document's identity.
+
+version: 1
+name: moh.rules_recent
+seed_url: "https://www.moh.gov.sa/en/ministry/rules/pages/default.aspx"
+shape: list
+scope: prefix
+
+# Scoped to the Recent container. Unscoped, `a.event_block` matches all 17 cards
+# on the page and the two lists merge into one folder.
+row_selector: "#documents-container a.event_block"
+
+# The card IS the link — `a.event_block` is the anchor itself, not a wrapper —
+# and it points straight at the PDF. Naming the row's own selector works because
+# the runner falls back to `row.matches(sel)` when nothing nested matches.
+detail_link_selector: "a.event_block"
+
+# Every pager link is href="javascript:void(0)" with a data-page attribute, so
+# there is no URL to build — the list is redrawn in place. Next is the last <a>
+# in the pager and carries class="disabled" once exhausted, which is the stop
+# condition the walk uses.
+pagination:
+  mode: click
+  next_selector: "#pagination-controls a:last-of-type"
+  max_pages: 20            # 8 needed; the cap is a runaway guard, not a target
+
+# The page states its own total — "Showing 1-10 of 75 items (Page 1 of 8)".
+# This is ground truth for completeness: a run that ends on 75 is provably
+# complete, one that ends on 40 is provably not. Almost no regulator gives us
+# this, so it is worth checking against rather than trusting a row count.
+row_count_check:
+  from: css
+  selector: "#pagination-info"
+  pattern: 'of\s+(\d+)\s+items'
+  total: list          # "of 75 items" is the WHOLE list, not this page's 10
+
+fields:
+  title:
+    from: regex
+    # Strip the leading "(File Date: …)" the card prepends to its own title.
+    pattern: '^\(File Date:[^)]*\)\s*(.+?)\s*$'
+
+  document_url:
+    from: css
+    selector: "a.event_block"      # the row itself; see detail_link_selector
+    attr: href
+
+  last_updated_date:
+    from: regex
+    pattern: 'File Date:\s*(\d{4}-\d{2}-\d{2})'
+
+section_path:
+  prefix: ["Ministry of Health", "Rules and Regulations", "Recent"]
+
+# The card links directly to a PDF — there is no detail page to open.
+fetch_details: false

@@ -1,6 +1,7 @@
 from typing import Dict, List, Optional
 import pyodbc
 import json
+import time
 from storage.repository import DocumentRepository
 from models.models import RegulatoryDocument
 import logging
@@ -36,7 +37,7 @@ class MSSQLRepository(DocumentRepository):
     #  CONNECTION                                                          #
     # ================================================================== #
 
-    def _get_conn(self):
+    def _get_conn(self, retries: int = 4, delay: float = 8.0):
         conn_str = (
     f"DRIVER={self.conn_params['driver']};"
     f"SERVER={self.conn_params['server']};"
@@ -44,8 +45,18 @@ class MSSQLRepository(DocumentRepository):
     f"UID={self.conn_params['username']};"
     f"PWD={self.conn_params['password']};"
     f"TrustServerCertificate=yes;"
+    f"ConnectRetryCount=3;ConnectRetryInterval=5;"
 )
-        return pyodbc.connect(conn_str)
+        last_exc = None
+        for attempt in range(retries):
+            try:
+                return pyodbc.connect(conn_str, timeout=30)
+            except Exception as e:
+                last_exc = e
+                if attempt < retries - 1:
+                    logger.warning(f"DB connect attempt {attempt+1}/{retries} failed, retrying in {delay}s: {e}")
+                    time.sleep(delay)
+        raise last_exc
 
     # ================================================================== #
     #  FOLDER MANAGEMENT                                                   #
@@ -84,6 +95,38 @@ class MSSQLRepository(DocumentRepository):
         conn.commit()
         return int(row[0])
 
+    def find_folder_in_subtree(self, title: str, ancestor_id: int) -> Optional[int]:
+        """
+        Search for a category with the given title anywhere in the subtree
+        rooted at ancestor_id (inclusive). Returns the category_id if found,
+        None otherwise.
+
+        Used by _get_or_create_compliance_category when a doc_path segment is
+        not found as a direct child of the current parent — e.g. a deletion
+        notice page whose sidebar trail omits an intermediate folder level
+        (like 'CBB Rulebook') that already exists in the tree.
+        """
+        query = """
+            WITH tree AS (
+                SELECT compliancecategory_id, title, parentid
+                FROM compliancecategory
+                WHERE compliancecategory_id = ?
+                UNION ALL
+                SELECT c.compliancecategory_id, c.title, c.parentid
+                FROM compliancecategory c
+                JOIN tree t ON c.parentid = t.compliancecategory_id
+            )
+            SELECT TOP 1 compliancecategory_id
+            FROM tree
+            WHERE title = ?
+              AND compliancecategory_id != ?
+        """
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, [ancestor_id, title, ancestor_id])
+            row = cursor.fetchone()
+            return int(row[0]) if row else None
+
     def regulation_exists_for_category(self, compliancecategory_id: int) -> bool:
         """True if a regulation already points to this exact category node.
         Used when resolving the leaf (final) segment of a doc_path: if a
@@ -100,6 +143,82 @@ class MSSQLRepository(DocumentRepository):
         except Exception as e:
             logger.error(f"regulation_exists_for_category check failed: {e}")
             return False
+    def get_child_source_urls(self, parent_source_url: str) -> List[str]:
+        """
+        Return source_page_url of all CBB regulations whose compliancecategory
+        node's parent is the same category as the regulation at parent_source_url.
+        Used by the monitoring crawler to detect deleted children.
+        """
+        query = """
+            SELECT r2.source_page_url
+            FROM regulations r1
+            JOIN compliancecategory c1
+                ON r1.compliancecategory_id = c1.compliancecategory_id
+            JOIN compliancecategory c2
+                ON c2.parentid = c1.compliancecategory_id
+            JOIN regulations r2
+                ON r2.compliancecategory_id = c2.compliancecategory_id
+            WHERE r1.source_page_url = ?
+              AND r1.regulator = 'Central Bank of Bahrain'
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, [parent_source_url])
+                return [row[0] for row in cursor.fetchall() if row[0]]
+        except Exception as e:
+            logger.error(f"get_child_source_urls failed: {e}")
+            return []
+
+    def mark_regulation_deleted(self, regulation_id: int) -> None:
+        """
+        Handle a CBB page that has been removed from the TOC:
+          1. Mark all currently active versions as inactive (preserve history)
+          2. Insert a new version with status='deleted' to record the deletion event
+        """
+        from datetime import date as _date
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+
+                # Step 1: mark existing active versions as inactive
+                cursor.execute(
+                    """
+                    UPDATE regulation_versions
+                    SET status = 'inactive'
+                    WHERE regulation_id = ? AND status = 'active'
+                    """,
+                    [regulation_id]
+                )
+
+                # Step 2: insert a 'deleted' marker version
+                cursor.execute(
+                    """
+                    INSERT INTO regulation_versions
+                        (regulation_id, regulator, content_html, content_text,
+                         content_hash, updated_date, change_summary, status)
+                    OUTPUT INSERTED.version_id
+                    VALUES (?, 'Central Bank of Bahrain', NULL, NULL,
+                            NULL, ?, 'Page removed from CBB TOC', 'deleted')
+                    """,
+                    [regulation_id, _date.today().isoformat()]
+                )
+                row = cursor.fetchone()
+                version_id = int(row[0]) if row else None
+
+                # Step 3: update regulations.status so API list queries can filter it
+                cursor.execute(
+                    "UPDATE regulations SET status = 'deleted' WHERE id = ?",
+                    [regulation_id]
+                )
+                conn.commit()
+                logger.info(
+                    f"Marked regulation {regulation_id} as deleted "
+                    f"(new version_id={version_id})"
+                )
+        except Exception as e:
+            logger.error(f"mark_regulation_deleted failed for reg {regulation_id}: {e}")
+
     # ================================================================== #
     #  REGULATION INSERT / UPDATE                                          #
     # ================================================================== #
@@ -289,6 +408,68 @@ class MSSQLRepository(DocumentRepository):
             logger.error(f"Failed to check source_page_url existence: {e}")
             return None
 
+    def find_regulation_id_by_section_code(self, section_code: str) -> Optional[int]:
+        """
+        Find the oldest CBB regulation whose title starts with the exact section code
+        (not a sub-section). Used as a URL-change fallback for leaf pages.
+
+        Matches: 'LR-1A.1', 'LR-1A.1 General Matters', 'LR-1A.1 [Deleted...]'
+        Excludes: 'LR-1A.1.1 Sub-section' (child)
+        """
+        import re as _re
+        sc_pattern = _re.compile(
+            r'^(' + _re.escape(section_code) + r')(\s|\[|$)',
+            _re.IGNORECASE,
+        )
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, title FROM regulations
+                    WHERE regulator = 'Central Bank of Bahrain'
+                      AND title LIKE ?
+                    ORDER BY id ASC
+                """, [section_code + '%'])
+                for row in cursor.fetchall():
+                    reg_id, title = row[0], (row[1] or "")
+                    if sc_pattern.match(title.strip()):
+                        return int(reg_id)
+            return None
+        except Exception as e:
+            logger.error(f"find_regulation_id_by_section_code failed: {e}")
+            return None
+
+    def find_regulation_ids_by_section_code_prefix(self, section_code: str) -> List[int]:
+        """
+        Find all CBB regulations whose title begins with section_code (the section
+        itself AND all sub-sections). Used to mark an entire section tree as deleted.
+
+        Matches: 'LR-1A.1', 'LR-1A.1 Title', 'LR-1A.1.1 Sub', 'LR-1A.1.35 Sub'
+        Excludes: 'LR-1A.10' (different section sharing the same prefix characters)
+        """
+        import re as _re
+        sc_pattern = _re.compile(
+            r'^' + _re.escape(section_code) + r'(\s|\[|\.|$)',
+            _re.IGNORECASE,
+        )
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, title FROM regulations
+                    WHERE regulator = 'Central Bank of Bahrain'
+                      AND title LIKE ?
+                      AND status != 'deleted'
+                    ORDER BY id ASC
+                """, [section_code + '%'])
+                return [
+                    int(row[0])
+                    for row in cursor.fetchall()
+                    if sc_pattern.match((row[1] or "").strip())
+                ]
+        except Exception as e:
+            logger.error(f"find_regulation_ids_by_section_code_prefix failed: {e}")
+            return []
 
     # ================================================================== #
     #  REGULATION RETRIEVAL                                                #
@@ -356,7 +537,7 @@ class MSSQLRepository(DocumentRepository):
 
     def get_last_cbb_crawl_date(self):
         query = """
-            SELECT MAX(created_at)
+            SELECT CONVERT(varchar(30), MAX(created_at), 120)
             FROM regulations
             WHERE regulator = 'Central Bank of Bahrain'
         """
@@ -365,7 +546,10 @@ class MSSQLRepository(DocumentRepository):
                 cursor = conn.cursor()
                 cursor.execute(query)
                 row = cursor.fetchone()
-                return row[0] if row and row[0] else None
+                if row and row[0]:
+                    from datetime import datetime
+                    return datetime.fromisoformat(row[0]).date()
+                return None
         except Exception as e:
             logger.error(f"Failed to get last CBB crawl date: {e}")
             return None
@@ -581,11 +765,19 @@ class MSSQLRepository(DocumentRepository):
         """
         query = """
             INSERT INTO compliance_analysis_versions
-                (regulation_id, version_id, requirement_text, obligation_type,
-                 control_category, risk_level, compliance_status, created_at)
+                (regulation_id, version_id,
+                 requirement_id, requirement_title,
+                 execution_category, criticality, obligation_type,
+                 stage1_json, stage2_json, stage3_json, stage4_md,
+                 analysis_json, schema_version, status, is_current,
+                 created_at)
             SELECT
-                regulation_id, ?, requirement_text, obligation_type,
-                control_category, risk_level, compliance_status, GETDATE()
+                regulation_id, ?,
+                requirement_id, requirement_title,
+                execution_category, criticality, obligation_type,
+                stage1_json, stage2_json, stage3_json, stage4_md,
+                analysis_json, schema_version, 'inactive', is_current,
+                GETDATE()
             FROM compliance_analysis
             WHERE regulation_id = ?
               AND is_current = 1

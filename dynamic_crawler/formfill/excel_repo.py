@@ -1,0 +1,309 @@
+"""ExcelRepo — the same schema as MSSQL, written to a workbook instead.
+
+A drop-in stand-in for `storage/mssql_repo.py::MSSQLRepository`. The orchestrator
+never learns it is not talking to SQL Server: same method names, same return
+shapes, same auto-increment ids. Rows accumulate in memory and are written to one
+.xlsx at the end, one sheet per table.
+
+WHY
+    Running the new orchestrator against production MSSQL means ~700 inserts, a
+    folder tree and analysis rows you then have to unpick. This gives the whole
+    flow — folder tree, versioning, change detection, analysis — with output you
+    can open in Excel and throw away.
+
+SHEETS (mirroring the real tables)
+    regulations             one row per document
+    compliancecategory      the folder tree (id, title, parentid)
+    regulation_versions     content snapshots — now for every regulator
+    compliance_analysis     the LLM output
+    requirement_mappings    matched obligations
+    processing_log          one row per step, per document
+    run_history             row_count + inventory_hash per run (the monitoring gate)
+
+WHAT IT DOES NOT DO
+    The requirement-matching corpus reads (`get_all_compliance_requirements`,
+    `get_all_demo_controls`, `get_all_demo_kpis`) return EMPTY. There is no
+    internal register in a spreadsheet, so matching will correctly find nothing
+    to match against. Anything that depends on the real corpus has to be checked
+    against the real database — this repo cannot tell you about it.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def _as_dict(obj) -> dict:
+    """Every attribute, not just the declared dataclass fields.
+
+    `asdict()` returns ONLY declared fields, and `RegulatoryDocument` does not
+    declare `status` — the real `_insert_regulation` picks it up with
+    `getattr(document, "status", "active")`. So a plain asdict() silently dropped
+    the monitoring state that the pipeline had just set, and the column came out
+    empty while looking like nothing was wrong.
+    """
+    if isinstance(obj, dict):
+        return dict(obj)
+    out = {}
+    if is_dataclass(obj):
+        out.update(asdict(obj))
+    out.update({k: v for k, v in vars(obj).items()
+                if not k.startswith("_") and k not in out})
+    return out
+
+
+def _flat(v: Any) -> Any:
+    """Excel cannot hold a list or a dict, and it truncates at 32,767 chars."""
+    if isinstance(v, (list, tuple)):
+        return " | ".join(str(x) for x in v)
+    if isinstance(v, dict):
+        return json.dumps(v, ensure_ascii=False)[:32000]
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    if isinstance(v, str) and len(v) > 32000:
+        return v[:32000] + f"  …[truncated, {len(v):,} chars]"
+    return v
+
+
+class ExcelRepo:
+    def __init__(self, out_path: str | Path):
+        self.out_path = Path(out_path)
+        self.t: Dict[str, List[dict]] = {
+            "regulations": [], "compliancecategory": [], "regulation_versions": [],
+            "compliance_analysis": [], "requirement_mappings": [],
+            "processing_log": [], "run_history": [],
+        }
+        self._next = {k: 0 for k in self.t}
+
+    def _id(self, table: str) -> int:
+        self._next[table] += 1
+        return self._next[table]
+
+    # ---------------- regulations ----------------------------------------- #
+
+    def _insert_regulation(self, doc) -> int:
+        d = _as_dict(doc)
+        rid = self._id("regulations")
+        d["id"] = rid
+        d["inserted_at"] = datetime.now().isoformat(timespec="seconds")
+        self.t["regulations"].append({k: _flat(v) for k, v in d.items()})
+        return rid
+
+    def update_regulation(self, regulation_id: int, **fields) -> None:
+        for r in self.t["regulations"]:
+            if r.get("id") == regulation_id:
+                r.update({k: _flat(v) for k, v in fields.items()})
+                r["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                return
+
+    def get_regulation_by_id(self, regulation_id: int) -> Optional[dict]:
+        return next((dict(r) for r in self.t["regulations"]
+                     if r.get("id") == regulation_id), None)
+
+    # Identity lookups. An empty workbook means every document is new on the
+    # first run — which is what makes a second run against the same workbook the
+    # interesting test of change detection.
+
+    def document_exists(self, title, published_date, doc_path) -> bool:
+        path = " > ".join(doc_path or []) if isinstance(doc_path, list) else (doc_path or "")
+        return any(r.get("title") == title
+                   and str(r.get("published_date") or "") == str(published_date or "")
+                   and str(r.get("doc_path") or "") == path
+                   for r in self.t["regulations"])
+
+    def document_exists_by_url(self, document_url: str, category: str = None) -> bool:
+        return any(r.get("document_url") == document_url
+                   and (category is None or r.get("category") == category)
+                   for r in self.t["regulations"])
+
+    def document_exists_by_source_url(self, source_page_url: str) -> bool:
+        return any(r.get("source_page_url") == source_page_url
+                   for r in self.t["regulations"])
+
+    def find_by_identity(self, document_url: str, doc_path: str) -> Optional[dict]:
+        """The identity lookup `classify_documents` uses: (document_url, doc_path)."""
+        return next((dict(r) for r in self.t["regulations"]
+                     if r.get("document_url") == document_url
+                     and str(r.get("doc_path") or "") == doc_path), None)
+
+    def find_by_reference(self, reference_no: str) -> Optional[dict]:
+        """The tiebreak: same reference number at a new URL is a new VERSION of an
+        existing document, not a new document."""
+        if not reference_no:
+            return None
+        return next((dict(r) for r in self.t["regulations"]
+                     if r.get("reference_no") == reference_no), None)
+
+    # ---------------- the folder tree -------------------------------------- #
+
+    def get_folder_id(self, title: str, parent_id: Optional[int]) -> Optional[int]:
+        return next((f["compliancecategory_id"] for f in self.t["compliancecategory"]
+                     if f["title"] == title and f["parentid"] == parent_id), None)
+
+    def insert_folder(self, title: str, parent_id, cat_type: str = "F") -> int:
+        fid = self._id("compliancecategory")
+        self.t["compliancecategory"].append(
+            {"compliancecategory_id": fid, "title": title,
+             "parentid": parent_id, "type": cat_type})
+        return fid
+
+    def find_folder_in_subtree(self, title: str, ancestor_id: int) -> Optional[int]:
+        kids = {ancestor_id}
+        changed = True
+        while changed:
+            changed = False
+            for f in self.t["compliancecategory"]:
+                if f["parentid"] in kids and f["compliancecategory_id"] not in kids:
+                    kids.add(f["compliancecategory_id"]); changed = True
+        return next((f["compliancecategory_id"] for f in self.t["compliancecategory"]
+                     if f["title"] == title and f["compliancecategory_id"] in kids
+                     and f["compliancecategory_id"] != ancestor_id), None)
+
+    def regulation_exists_for_category(self, compliancecategory_id: int) -> bool:
+        return any(r.get("compliancecategory_id") == compliancecategory_id
+                   for r in self.t["regulations"])
+
+    # ---------------- versions -------------------------------------------- #
+
+    def insert_regulation_version(self, regulation_id: int, content_text: str = "",
+                                  content_html: str = "", content_hash: str = "",
+                                  updated_date=None, change_summary: str = "",
+                                  status: str = "active", **kw) -> int:
+        vid = self._id("regulation_versions")
+        self.t["regulation_versions"].append({
+            "version_id": vid, "regulation_id": regulation_id,
+            "content_hash": content_hash, "status": status,
+            "updated_date": _flat(updated_date or date.today()),
+            "change_summary": change_summary,
+            "content_text": _flat(content_text), "content_html": _flat(content_html),
+        })
+        return vid
+
+    # kept for callers that still use the CBB-era name
+    insert_cbb_version = insert_regulation_version
+
+    def get_regulation_versions(self, regulation_id: int) -> list:
+        return [dict(v) for v in self.t["regulation_versions"]
+                if v["regulation_id"] == regulation_id]
+
+    def get_active_regulation_version(self, regulation_id: int) -> Optional[dict]:
+        return next((dict(v) for v in self.t["regulation_versions"]
+                     if v["regulation_id"] == regulation_id and v["status"] == "active"), None)
+
+    def mark_all_versions_inactive(self, regulation_id: int) -> int:
+        n = 0
+        for v in self.t["regulation_versions"]:
+            if v["regulation_id"] == regulation_id and v["status"] == "active":
+                v["status"] = "inactive"; n += 1
+        return n
+
+    def get_content_hash(self, regulation_id: int) -> Optional[str]:
+        r = self.get_regulation_by_id(regulation_id)
+        return (r or {}).get("content_hash")
+
+    # the CBB-named pair the orchestrator still calls
+    get_cbb_content_hash = get_content_hash
+
+    def update_cbb_content_hash(self, regulation_id: int, content_hash: str):
+        self.update_regulation(regulation_id, content_hash=content_hash)
+
+    def get_last_cbb_crawl_date(self):
+        return None
+
+    # ---------------- analysis -------------------------------------------- #
+
+    def store_analysis(self, rows: list, version_id: Optional[int] = None):
+        for row in rows or []:
+            d = _as_dict(row)
+            d["analysis_id"] = self._id("compliance_analysis")
+            d["version_id"] = version_id
+            self.t["compliance_analysis"].append({k: _flat(v) for k, v in d.items()})
+
+    def archive_current_analysis(self, regulation_id: int, version_id: int) -> int:
+        n = 0
+        for a in self.t["compliance_analysis"]:
+            if a.get("regulation_id") == regulation_id and a.get("status") != "inactive":
+                a["status"] = "inactive"; a["archived_version_id"] = version_id; n += 1
+        return n
+
+    def store_requirement_mappings(self, mappings: list, version_id: Optional[int] = None):
+        for m in mappings or []:
+            d = _as_dict(m)
+            d["mapping_id"] = self._id("requirement_mappings")
+            d["version_id"] = version_id
+            self.t["requirement_mappings"].append({k: _flat(v) for k, v in d.items()})
+
+    def store_control_links(self, *a, **k):  return None
+    def store_kpi_links(self, *a, **k):      return None
+    def insert_new_suggested_control(self, *a, **k):     return None
+    def insert_new_suggested_kpi(self, *a, **k):         return None
+    def insert_new_suggested_requirement(self, *a, **k): return None
+    def flag_partially_matched_requirements(self, *a, **k): return None
+    def get_linked_controls_by_requirement(self, *a, **k): return []
+    def get_linked_kpis_by_requirement(self, *a, **k):    return []
+
+    # The internal register does not exist in a spreadsheet. Empty, not fabricated
+    # — matching will correctly report nothing to match against.
+    def get_all_compliance_requirements(self, *a, **k): return []
+    def get_all_demo_controls(self, *a, **k):           return []
+    def get_all_demo_kpis(self, *a, **k):               return []
+
+    # ---------------- logging + run history ------------------------------- #
+
+    def _log_processing(self, regulation_id, step, status, message, doc_url=None, **kw):
+        self.t["processing_log"].append({
+            "log_id": self._id("processing_log"), "regulation_id": regulation_id,
+            "step": step, "status": status, "message": _flat(message),
+            "document_url": doc_url,
+            "logged_at": datetime.now().isoformat(timespec="seconds"),
+        })
+
+    def record_run(self, source: str, row_count: int, inventory_hash: str,
+                   verdict: str, note: str = ""):
+        """The monitoring gate's memory: what a run found, so the next run can
+        tell a real withdrawal from a broken crawl."""
+        self.t["run_history"].append({
+            "run_id": self._id("run_history"), "source": source,
+            "row_count": row_count, "inventory_hash": inventory_hash,
+            "verdict": verdict, "note": note,
+            "run_at": datetime.now().isoformat(timespec="seconds"),
+        })
+
+    def last_good_run(self, source: str) -> Optional[dict]:
+        runs = [r for r in self.t["run_history"]
+                if r["source"] == source and r["verdict"] in ("PASS", "WARN")]
+        return runs[-1] if runs else None
+
+    # ---------------- raw connection: deliberately refused ----------------- #
+
+    def _get_conn(self):
+        raise NotImplementedError(
+            "ExcelRepo has no SQL connection. The CBB path in orchestrator.py "
+            "issues raw UPDATE statements through _get_conn(); NewOrchestrator "
+            "replaces that with mark_all_versions_inactive() so versioning works "
+            "for every regulator without hand-written SQL.")
+
+    # ---------------- write it out ---------------------------------------- #
+
+    def save(self) -> Path:
+        import pandas as pd
+        self.out_path.parent.mkdir(parents=True, exist_ok=True)
+        with pd.ExcelWriter(self.out_path, engine="openpyxl") as xl:
+            for name, rows in self.t.items():
+                df = pd.DataFrame(rows or [{"(empty)": ""}])
+                df.to_excel(xl, sheet_name=name[:31], index=False)
+        logger.info("ExcelRepo wrote %s", self.out_path)
+        return self.out_path
+
+    def counts(self) -> dict:
+        return {k: len(v) for k, v in self.t.items()}
+
+
+__all__ = ["ExcelRepo"]

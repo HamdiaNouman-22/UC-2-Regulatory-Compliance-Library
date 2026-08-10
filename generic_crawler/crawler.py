@@ -602,7 +602,24 @@ const rankedHeads = Array.from(document.querySelectorAll(
   .map(h => ({ el: h, rank: rankOf(h),
                text: (h.innerText || h.textContent || '').replace(/\s+/g, ' ').trim() }))
   .filter(h => h.rank && h.text && h.text.length < 300 && !inWidget(h.el));
-return Array.from(document.querySelectorAll('a[href]')).map(a => {
+// Links are not always <a href>. Government SharePoint routinely ships a
+// <button onclick="window.location.href='...'"> that navigates exactly like a
+// link — CMA builds its entire article index that way, so every article was
+// invisible to a walk that only reads anchors. Note the destination must come
+// from the onclick: CMA's matching data-bs-target id is lowercase and 404s.
+// Collected as pseudo-anchors so the rest of this function is unchanged.
+const _cands = [];
+for (const a of document.querySelectorAll('a[href]')) _cands.push({el: a, href: a.href});
+for (const b of document.querySelectorAll('[onclick]')) {
+  if (b.tagName === 'A' && b.hasAttribute('href')) continue;    // already have it
+  const oc = b.getAttribute('onclick') || '';
+  const m = oc.match(/location\.href\s*=\s*['"]([^'"]+)['"]/i);
+  if (!m) continue;
+  let abs = '';
+  try { abs = new URL(m[1], location.href).href; } catch (e) { continue; }
+  _cands.push({el: b, href: abs});
+}
+return _cands.map(({el: a, href: _href}) => {
   const t = (a.textContent || '').trim();
   let nav = false, el = a;
   for (let i = 0; i < 4 && el; i++) {
@@ -655,7 +672,7 @@ return Array.from(document.querySelectorAll('a[href]')).map(a => {
   // <nav>/<aside> are deliberately NOT treated as chrome: unlike header/footer
   // they are often a genuine in-page category sidebar.
   const chrome = !!a.closest('header, footer, [role="banner"], [role="contentinfo"]');
-  return { href: a.href, text: t.slice(0, 300), nav: nav, ctx: ctx, group: group,
+  return { href: _href, text: t.slice(0, 300), nav: nav, ctx: ctx, group: group,
            heading_path: chrome ? [] : heading_path,
            chrome: chrome,
            // title="..." often holds the full document name when the visible

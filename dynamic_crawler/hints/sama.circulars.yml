@@ -1,0 +1,141 @@
+# SAMA Circulars — a DataTables grid, 685 entries.
+#
+# From `formfill inspect` plus a live probe:
+#   table.circulars  (id DataTables_Table_0)
+#   headers: Circular No. | Circular Title | Issue Date (G) | Issue Date (H)
+#            | Status | Scope of application
+#   "Showing 1 to 10 of 685 entries"   ->  69 pages at the default page size
+#   length select options: 10, 20, 50, 100, All
+#
+# WHY page_size INSTEAD OF PAGINATION
+# Setting the "Show N entries" select to "All" collapses 69 page loads into one.
+# It has to be a value change plus a change event — DataTables listens for
+# `change`, so assigning .value alone leaves the table showing ten rows, and
+# clicking the select (what expand_selector does) only opens the dropdown.
+#
+# THREE TABLES ON THIS PAGE. The first two are the print toolbar and a layout
+# wrapper; only `table.circulars` holds the data. A bare `tbody tr` would have
+# harvested the toolbar.
+#
+# PHASE 2 IS ON. The row's link goes to the circular's own page
+# (/en/node/11105), which carries the circular's body text AND a "Download
+# Original PDF" link. Both matter: the text is what the LLM analysis reads, and
+# the PDF link becomes extra_meta["org_pdf_link"], which the orchestrator falls
+# back to when page text is too thin (extract_text_content_unified, tier 3).
+#
+# Cost: 684 detail pages, roughly 45 minutes. `verify` is unaffected — it runs
+# phase 1 only for list/table shapes, so the gate stays at ~15 seconds a run.
+
+version: 1
+name: sama.circulars
+seed_url: "https://rulebook.sama.gov.sa/en/sama-circulars"
+shape: table
+scope: prefix
+
+page_size:
+  selector: "select.dt-input"
+  value: "All"
+  wait_ms: 9000
+
+# The table states its own size: "Showing 1 to 685 of 685 entries". Comparing our
+# harvest against it is the only coverage check that does not depend on our own
+# selectors being right.
+#
+# It exists because a run took 684 rows when the site had 685 and silently lost the
+# NEWEST circular. Three verify runs had all agreed on the count, so the stability
+# gate saw nothing wrong. The site's own number is what catches this.
+row_count_check:
+  selector: "[class*=dt-info]"
+  pattern: 'of ([\d,]+) entries'
+  tolerance: 0
+
+row_selector: "table.circulars tbody tr"
+detail_link_selector: "a[href]"
+
+pagination:
+  mode: none          # page_size removes the need for it
+  max_pages: 1
+
+fields:
+  title:
+    from: css
+    selector: "td:nth-child(2)"
+    attr: text
+  document_url:
+    from: css
+    selector: "a[href]"
+    attr: href
+  reference_no:
+    from: css
+    selector: "td:nth-child(1)"
+    attr: text
+  # Gregorian date, DD/MM/YYYY. The Hijri date in column 4 has no field target,
+  # so it stays in row_text rather than being dropped on the floor.
+  published_date:
+    from: css
+    selector: "td:nth-child(3)"
+    attr: text
+  status:
+    from: css
+    selector: "td:nth-child(5)"
+    attr: text
+
+section_path:
+  # regulator and source_system come from the source YAML; the grid has no
+  # further hierarchy of its own.
+  prefix: []
+
+fetch_details: true
+notes: "DataTables grid; page_size 'All' replaces 69 pages of pagination."
+# Who this source belongs to. These two lead the folder trail AND the
+# section_path column in the Excel, so the crawler's own output shows the
+# same path the library will use. Defined here only — the pipeline reuses
+# them rather than prepending its own copy.
+# The PDF behind "Download Original PDF" IS the regulation here — the page is
+# a stub or a summary. So each attachment becomes its own document, with the
+# page kept as source_page_url. Contrast SBP, where the page is the circular
+# and its PDFs are annexures (default false).
+attachment_is_document: true
+
+library:
+  regulator: "SAMA"
+  source_system: "SAMA Circulars"
+
+# The regulator's own furniture, removed from the captured page. Without this,
+# every SAMA document begins "Entire section Custom print Text Only Rich Text
+# Print / Save as PDF Versions (6 versions) Download Original PDF" — stored as
+# document content and fed to the LLM as if it were regulation.
+# The PDF link's href is still harvested; only the visible button is removed.
+content:
+  strip:
+    - "table.disp_toolbar"          # Entire section | Custom print | Text Only | …
+    - "table:has(#amount_versions)"  # the "(6 versions)" switcher — :has() targets
+                                     # the wrapping table, which has no class of its own
+    - "a.title"                      # the "Versions" link
+    - "a.submenu.icopdf"             # the Download Original PDF button (href still harvested)
+    - "div.related-content"          # the "Related Content" list of OTHER circulars —
+                                     # other regulations' titles stored inside this one
+    - "div.parent_transalated_doc"   # the "Translated Document" block: the same text
+                                     # again in another language, which doubles the
+                                     # tokens and makes the LLM read it twice
+                                     # (site's spelling of the class, not a typo here)
+meta:
+  approved: true
+  approved_by: your name
+  approved_at: '2026-08-03T09:12:10+00:00'
+  form_hash: 8485c36bb69d
+  verify:
+    verdict: PASS
+    counts:
+    - 684
+    - 684
+    - 684
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+      reference_no: 100.0
+      published_date: 100.0
+      status: 98.4
+    verified_at: '2026-08-03T09:12:09+00:00'
+    forced: false
