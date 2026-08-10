@@ -75,8 +75,10 @@ from playwright.sync_api import sync_playwright
 # Shape-aware strategies (additive): detect tree / table layouts and dispatch.
 try:
     from strategies import detect_shape, crawl_tree, crawl_table, crawl_list
+    from blockcheck import blocked_reason
 except ImportError:  # when imported as a package
     from .strategies import detect_shape, crawl_tree, crawl_table, crawl_list
+    from .blockcheck import blocked_reason
 
 # Windows consoles default to cp1252; force UTF-8 so Arabic/curly chars don't crash logging.
 try:
@@ -1298,6 +1300,12 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
     link_parents = {}       # normalized url -> the page it was linked from
     section_anchor = None   # set from the seed's breadcrumb (last item)
 
+    # What the walk learned about itself. These were all emitted as events and
+    # then forgotten — baseline.py re-parsed stdout to get them back — so nothing
+    # downstream of the process could tell a clean run from a truncated one.
+    note = {"blocked_pages": 0, "errors": 0, "retries": 0,
+            "cap_hit": False, "seed_loaded": True, "stopped": "", "resume": {}}
+
     emit({"event": "start", "seed": seed_norm, "scope": scope,
           "max_pages": max_pages, "max_depth": max_depth})
 
@@ -1338,13 +1346,31 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                     if page.evaluate("()=>document.querySelectorAll('a[href]').length") > 15:
                         seed_loaded = True
                         break
+                    note["retries"] += 1
                     emit({"event": "retry", "url": seed_norm, "attempt": attempt,
                           "message": "seed rendered with no links"})
                 except Exception as e:
+                    note["retries"] += 1
                     emit({"event": "retry", "url": seed_norm, "attempt": attempt,
                           "message": str(e)[:160]})
                 page.wait_for_timeout(2000)
+            # A challenge page can satisfy the link check above, and a blocked
+            # SEED means every decision below it — scope, shape, the whole walk —
+            # was made against the WAF's page rather than the site's.
+            reason = blocked_reason(page)
+            if reason:
+                note["blocked_pages"] += 1
+                note["stopped"] = f"seed blocked by bot protection ({reason})"
+                emit({"event": "blocked", "url": seed_norm, "reason": reason})
             if not seed_loaded:
+                note["seed_loaded"] = False
+                note["errors"] += 1
+                # Not just a failed page: the seed decides scope AND shape for the
+                # whole run, so everything below it was decided on defaults
+                # (MERGE_LOG §13, robustness fix 1).
+                note["stopped"] = note["stopped"] or (
+                    "seed did not load after 3 attempts — scope and shape fell "
+                    "back to defaults, so this walk may be of the wrong pages")
                 emit({"event": "error", "url": seed_norm,
                       "message": "seed did not load after 3 attempts — scope and "
                                  "shape fall back to defaults"})
@@ -1372,25 +1398,30 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
         if strategy != "generic":
             if shape in ("tree", "table", "list"):
                 if shape == "tree":
-                    recs, docs = crawl_tree(ctx, seed_norm, out, max_pages=max_pages,
-                                            max_depth=max_depth, wait_ms=max(wait_ms, 2000))
+                    recs, docs, walked = crawl_tree(ctx, seed_norm, out, max_pages=max_pages,
+                                                    max_depth=max_depth,
+                                                    wait_ms=max(wait_ms, 2000))
                 elif shape == "list":
                     # For this shape max_pages bounds LISTING pages, not
                     # documents: SBP's 139 listing pages hold 4,160 entries, so
                     # the default 150 covers it. list_details=False stops before
                     # the expensive detail pass (see crawl_list).
-                    recs, docs = crawl_list(ctx, seed_norm, out,
-                                            max_pages=max_pages,
-                                            wait_ms=wait_ms,
-                                            fetch_details=list_details,
-                                            max_details=max_details)
+                    recs, docs, walked = crawl_list(ctx, seed_norm, out,
+                                                    max_pages=max_pages,
+                                                    wait_ms=wait_ms,
+                                                    fetch_details=list_details,
+                                                    max_details=max_details)
                 else:
-                    recs, docs = crawl_table(ctx, seed_norm, out, max_pages=max_pages * 50,
-                                             wait_ms=wait_ms)
+                    recs, docs, walked = crawl_table(ctx, seed_norm, out,
+                                                     max_pages=max_pages * 50,
+                                                     wait_ms=wait_ms)
+                # The walker reports what it hit; the seed checks above already
+                # put their own findings in `note`. Add, never overwrite.
+                _merge_note(note, walked)
                 # Write FIRST, close second. A dead browser can hang close(),
                 # and losing a completed walk to a failed teardown is the worst
                 # possible trade.
-                result = _finish(out, seed_norm, recs, docs, [], shape=shape)
+                result = _finish(out, seed_norm, recs, docs, [], shape=shape, note=note)
                 _safe_close(browser)
                 return result
             # shape == "generic": continue with the existing link-walk below.
@@ -1419,11 +1450,22 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                     break
                 except Exception as e:
                     last_err = str(e)[:200]
+                    note["retries"] += 1
                     emit({"event": "retry", "url": url, "attempt": attempt, "message": last_err})
                     page.wait_for_timeout(1500)
             if not nav_ok:
+                note["errors"] += 1
                 emit({"event": "error", "url": url, "depth": depth, "message": last_err})
                 continue
+            # Checked on every page, not just the seed: a WAF usually lets the
+            # first few through and starts serving challenges once it has decided
+            # we are a bot — which is exactly how SIMAH was tripped.
+            reason = blocked_reason(page)
+            if reason:
+                note["blocked_pages"] += 1
+                if note["blocked_pages"] <= 3:
+                    emit({"event": "blocked", "url": url, "reason": reason})
+                continue          # never record a challenge page as a page
             try:
                 # Many JS sites (e.g. SBP) render their list only on scroll (lazy load).
                 # Scroll down a few times to trigger it, then return to top.
@@ -1443,6 +1485,7 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                 except Exception:
                     pass
             except Exception as e:
+                note["errors"] += 1
                 emit({"event": "error", "url": url, "depth": depth, "message": str(e)[:200]})
                 continue
 
@@ -1649,6 +1692,19 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                     visited.add(nh)
                     queue.append((nh, depth + 1))
 
+        # The cap stops the walk with work still queued. That is the difference
+        # between "this is the site" and "this is 150 pages of the site", and
+        # what is left in the queues is where a resumed run would start.
+        left = len(queue) + len(page_queue)
+        if len(records) >= max_pages and left:
+            note["cap_hit"] = True
+            note["stopped"] = (f"page cap: {len(records)} of max_pages={max_pages}, "
+                               f"{left} URLs still queued")
+            note["resume"] = {"pages_walked": len(records), "queued": left,
+                              "next_urls": [u for u, _ in list(queue)[:5]]
+                                           or [u for u, _ in list(page_queue)[:5]]}
+            emit({"event": "cap", "pages": len(records), "queued": left})
+
         _safe_close(browser)
 
     # ---- write outputs ----
@@ -1659,7 +1715,7 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
     dropped_chrome = [d for u, d in chrome_documents.items() if u not in kept_urls]
 
     return _finish(out, seed_norm, records, list(documents.values()),
-                   dropped_chrome, shape="generic")
+                   dropped_chrome, shape="generic", note=note)
 
 
 def _safe_close(browser):
@@ -1685,11 +1741,60 @@ def _safe_close(browser):
     done.wait(10)
 
 
-def _finish(out, seed_norm, records, documents, chrome_dropped, shape):
+# THE OUTCOME, IN ONE WORD. `done` used to mean only "the walk reached _finish",
+# and every consumer read that as success — main() never even set an exit code. A
+# WAF page reaches _finish too, and its 1,054 characters clear the 200-char bar
+# that makes a page a document.
+#
+#   ok          pages recorded, nothing blocked, nothing cut short
+#   blocked     a page was a bot-protection wall; no count means anything
+#   zero        no pages recorded — a failed extraction, not an empty site
+#   incomplete  cap hit / seed never loaded / browser died / pages failed.
+#               REPORTED, NOT FATAL (MERGE_LOG §13: keep the rows, log
+#               INCOMPLETE). `stopped` and `resume` are what
+#               resume-from-where-it-died will read; today that is thrown away.
+#
+# NO-DOCS stays in baseline_report.py: only it has the cross-site context to tell
+# SAMA's real 3 files from a broken extraction, and it already flags it.
+FATAL_STATUSES = ("blocked", "zero")
+
+
+def _merge_note(note: dict, walked: dict) -> dict:
+    """Fold a walker's findings into the run's note. Counters add; the first
+    `stopped` wins, because the earliest thing that cut the walk short is the one
+    a reader needs to act on."""
+    for k in ("blocked_pages", "errors", "retries"):
+        note[k] = note.get(k, 0) + (walked or {}).get(k, 0)
+    note["stopped"] = note.get("stopped") or (walked or {}).get("stopped", "")
+    note["resume"] = note.get("resume") or (walked or {}).get("resume") or {}
+    return note
+
+
+def run_status(counts: dict) -> str:
+    """Classify a finished run. Pure function of the counters, so it is testable
+    without a browser and cannot drift from what `done` reports.
+
+    `errors` is counted but does not decide the status: a page that 404s is skipped
+    by design, and if 1 bad page in 150 said INCOMPLETE the word would stop meaning
+    anything. Only the walk being CUT SHORT flips it — cap, dead browser, or a seed
+    that never arrived (which decides scope and shape for everything after it).
+    """
+    if counts.get("blocked_pages"):
+        return "blocked"
+    if not counts.get("pages"):
+        return "zero"
+    if (counts.get("cap_hit") or counts.get("stopped")
+            or not counts.get("seed_loaded", True)):
+        return "incomplete"
+    return "ok"
+
+
+def _finish(out, seed_norm, records, documents, chrome_dropped, shape, note=None):
     """Shared tail for every walker: normalise, hash, write, return.
 
     Every path through crawl() ends here, so tree/table/generic produce the same
-    schema, the same files, and the same return value.
+    schema, files, return value — and now the same outcome vocabulary. `note`
+    carries what the walk learned; absent, the run is judged on its counts alone.
     Returns (records, documents).
     """
     # Rewrite only titles that several different documents share (SDAIA's "2025").
@@ -1711,15 +1816,34 @@ def _finish(out, seed_norm, records, documents, chrome_dropped, shape):
         d["content_hash"] = content_key(
             f"{d.get('doc_url','')}|{d.get('title','')}")
 
+    n = dict(note or {})
+    counts = {"pages": len(records), "documents": len(documents),
+              "blocked_pages": n.get("blocked_pages", 0),
+              "errors": n.get("errors", 0), "retries": n.get("retries", 0),
+              "cap_hit": bool(n.get("cap_hit")),
+              "seed_loaded": n.get("seed_loaded", True),
+              "stopped": n.get("stopped", "")}
+    status = run_status(counts)
+
+    # `status` travels in pages.json as well as the event: the file outlives the
+    # stdout stream, and whoever reads it later must be able to tell a crawl from
+    # a challenge page. Additive — every existing key is untouched. `pages` and
+    # `documents` stay the LISTS they have always been, so the counters go in
+    # under their own names.
+    outcome = {f"n_{k}" if k in ("pages", "documents") else k: v
+               for k, v in counts.items()}
     (out / "pages.json").write_text(
-        json.dumps({"seed": seed_norm, "shape": shape, "pages": records,
+        json.dumps({"seed": seed_norm, "shape": shape, "status": status,
+                    **outcome, "resume": n.get("resume") or {},
+                    "pages": records,
                     "documents": documents, "chrome_dropped": chrome_dropped},
                    ensure_ascii=False, indent=2),
         encoding="utf-8")
     _write_excel(out / "pages.xlsx", records, documents, chrome_dropped)
 
-    emit({"event": "done", "shape": shape, "pages": len(records),
-          "documents": len(documents), "chrome_dropped": len(chrome_dropped),
+    emit({"event": "done", "status": status, "shape": shape, **counts,
+          "resume": n.get("resume") or {},
+          "chrome_dropped": len(chrome_dropped),
           "titles_disambiguated": renamed,
           "out_dir": str(out), "xlsx": str(out / "pages.xlsx")})
     return records, documents
@@ -1791,6 +1915,57 @@ def main():
           scope=args.scope, headless=not args.headful, wait_ms=args.wait_ms,
           strategy=args.strategy, group_headings=args.group_headings)
 
+    # The status is authoritative, and `pages.json` is where it survives the
+    # process. A blocked or empty crawl exits non-zero so a caller that reads
+    # nothing else still cannot mistake it for a crawl; INCOMPLETE exits 0 by
+    # design — the rows are worth keeping, they just are not the whole site.
+    return _report_outcome(Path(args.out))
+
+
+def _report_outcome(out: Path) -> int:
+    """Print the outcome and turn it into an exit code. Reads pages.json rather
+    than a return value so it reports the same thing a later reader would see."""
+    try:
+        data = json.loads((out / "pages.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"\nNO-RESULT  -  could not read {out / 'pages.json'}: {e}",
+              file=sys.stderr)
+        return 1
+
+    status = data.get("status", "ok")
+    line = (f"{data.get('n_pages', 0)} pages | {data.get('n_documents', 0)} documents"
+            f" | {data.get('blocked_pages', 0)} blocked"
+            f" | {data.get('errors', 0)} errors | {data.get('retries', 0)} retries")
+    if status == "ok":
+        print(f"\nOK  -  {line}\n  {out}")
+        return 0
+
+    w = sys.stderr
+    print(f"\n{'=' * 70}\n{status.upper()}  -  {data.get('seed', '')}\n{'=' * 70}", file=w)
+    print(f"  {line}", file=w)
+    if data.get("stopped"):
+        print(f"  stopped: {data['stopped']}", file=w)
+    if data.get("resume"):
+        print(f"  resume:  {json.dumps(data['resume'])}", file=w)
+    print(f"  {_NEXT_STEP.get(status, '')}\n  read: {out / 'pages.json'}", file=w)
+    return 1 if status in FATAL_STATUSES else 0
+
+
+# Kept next to the exit code so the two cannot say different things. ASCII only:
+# this text lands in scheduler logs and pipes, where a Windows console encoding
+# turns a stray em-dash into a UnicodeEncodeError.
+_NEXT_STEP = {
+    "blocked": ("A bot-protection wall answered instead of the site. Nothing here can\n"
+                "  be used. Slow the pacing, or give this source a hand-written\n"
+                "  crawler. Do NOT re-run in a loop - that is what trips a WAF."),
+    "zero": ("No pages were recorded, which is a failed extraction, not an empty\n"
+             "  site. Check the scope and the shape first - calibrate_shape.py and\n"
+             "  calibrate_scope.py both exit non-zero on a wrong answer."),
+    "incomplete": ("Part of the site was not walked, so these counts are a floor, not a\n"
+                   "  total. Read `stopped` above before comparing this run with any\n"
+                   "  other, and never treat it as coverage."),
+}
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

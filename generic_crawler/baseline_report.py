@@ -88,6 +88,11 @@ def read_site_sheets(site_dir: Path):
 
 
 def flag_for(rec):
+    # The engine's own verdict wins where it has one: only the crawl can know it
+    # was served a bot-protection wall, and a blocked run's page and document
+    # counts are the WAF's, so no rule below them means anything.
+    if rec.get("engine_status") == "blocked":
+        return "BLOCKED"
     if rec.get("status") == "timeout":
         return "TIMEOUT"
     if rec.get("status") in ("no-result", None) and rec.get("pages") is None:
@@ -137,6 +142,8 @@ def main():
         summary.append({
             "site": name,
             "flag": flag_for(rec) if rec else ("ZERO" if n_pages_file == 0 else "OK"),
+            "engine_status": rec.get("engine_status", ""),
+            "stopped": rec.get("stopped", ""),
             "shape": rec.get("shape", ""),
             "scope": rec.get("scope_detected") or rec.get("scope_requested", ""),
             "pages": rec.get("pages", n_pages_file),

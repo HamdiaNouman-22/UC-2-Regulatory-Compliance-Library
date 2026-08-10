@@ -24,6 +24,25 @@ from pathlib import Path
 
 HINTS_DIR = Path("dynamic_crawler/hints")
 OUT_DIR = Path("output/formfill")
+SNAP_DIR = Path("output/snapshots")
+
+
+def _resolve_snapshot(value: str | None, name: str) -> Path | None:
+    """`--snapshot` with no value means "the stored one for this form"; with a value
+    it is a path. Absent means crawl live, as always."""
+    if value is None:
+        return None
+    if value == "auto":
+        from dynamic_crawler.formfill.snapshot import SnapshotStore
+        store = SnapshotStore(name, SNAP_DIR)
+        if not store.exists():
+            raise SystemExit(
+                f"no snapshot for {name} at {store.html_path}. Capture one first:\n"
+                f"  python -m dynamic_crawler.formfill snapshot "
+                f"dynamic_crawler/hints/{name}.yml")
+        print(f"replaying {store.describe()}", file=sys.stderr)
+        return store.html_path
+    return Path(value)
 
 
 def _paths(name: str) -> dict:
@@ -65,11 +84,27 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("show", help="print a form for review")
     p.add_argument("hints")
 
+    p = sub.add_parser("snapshot", help="capture the live page ONCE, for offline work")
+    p.add_argument("hints")
+    p.add_argument("--headless", action="store_true",
+                   help="capture without a visible window (default is headed: a real "
+                        "window is what a bot-fingerprint rule is least likely to block)")
+    p.add_argument("--force", action="store_true",
+                   help="attempt even inside the backoff window — only if the network "
+                        "or the site's rules actually changed")
+    p.add_argument("--status", action="store_true",
+                   help="report the stored snapshot and when the next attempt is due; "
+                        "makes no request")
+    p.add_argument("--dir", help=f"snapshot directory (default {SNAP_DIR})")
+
     p = sub.add_parser("run", help="crawl using a form")
     p.add_argument("hints")
     p.add_argument("--no-details", action="store_true", help="phase 1 only (the inventory)")
     p.add_argument("--max-details", type=int)
     p.add_argument("--max-pages", type=int)
+    p.add_argument("--snapshot", nargs="?", const="auto",
+                   help="replay the saved page instead of crawling — no network at "
+                        "all. Bare --snapshot uses the stored one for this form.")
     p.add_argument("--out")
 
     p = sub.add_parser("verify", help="run it N times and judge the spread")
@@ -78,6 +113,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tolerance", type=float, default=2.0, help="allowed %% spread across runs")
     p.add_argument("--max-pages", type=int, help="cap listing pages — for a quick check")
     p.add_argument("--sample", type=int, default=10, help="rows to include in the report")
+    p.add_argument("--snapshot", nargs="?", const="auto",
+                   help="verify against the saved page — no network. Proves the form "
+                        "reads THAT page deterministically; proves nothing about the "
+                        "site's own stability, so it cannot approve a form.")
     p.add_argument("--out")
 
     p = sub.add_parser("approve", help="stamp a verified form as approved")
@@ -134,6 +173,46 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
+    if a.cmd == "snapshot":
+        from dynamic_crawler.formfill.schema import load_hints
+        from dynamic_crawler.formfill.snapshot import SnapshotStore, capture
+        h = load_hints(a.hints)
+        store = SnapshotStore(h["name"], a.dir or SNAP_DIR)
+
+        if a.status:
+            print(store.describe())
+            allowed, why = store.may_attempt()
+            print(f"  live attempt allowed now: {allowed} — {why}")
+            return 0
+
+        # The one command in this repo that touches a blocked site.
+        print(f"ONE live request to {h['seed_url']}", file=sys.stderr)
+        res = capture(h, store, headed=not a.headless, force=a.force)
+        result = res["result"]
+        if result == "ok":
+            print(f"\nCAPTURED  {res['bytes']} bytes | {res['text_len']} chars of text"
+                  f" | expanded {res.get('expanded', 0)} section(s)")
+            print(f"  {res['path']}")
+            if res.get("changed"):
+                print("  CONTENT CHANGED since the last capture — the page was amended.")
+            print("  Everything from here can run offline: "
+                  f"`formfill run {a.hints} --snapshot`")
+            return 0
+        if result == "refused":
+            print(f"\nREFUSED — no request was made.\n  {res['reason']}", file=sys.stderr)
+            return 1
+        if result == "blocked":
+            print(f"\nBLOCKED — {res['reason']!r}. Nothing was saved: a challenge page "
+                  f"must never become the stored document.", file=sys.stderr)
+            print(f"  blocked {res['consecutive_blocks']}x in a row; next attempt "
+                  f"after {res['next_attempt_after']}", file=sys.stderr)
+            print("  Do not retry by hand. If nothing about the network changed, the "
+                  "remaining routes are an allowlist request to SIMAH or SAMA's copy "
+                  "of the same instruments.", file=sys.stderr)
+            return 1
+        print(f"\nFAILED to load (not a block) — {res['reason']}", file=sys.stderr)
+        return 1
+
     if a.cmd == "run":
         from dynamic_crawler.formfill import runner
         from dynamic_crawler.formfill.schema import approval_state, load_hints
@@ -142,9 +221,11 @@ def main(argv: list[str] | None = None) -> int:
         if not ok:
             print(f"note: {why}\n", file=sys.stderr)
         out = Path(a.out) if a.out else _paths(h["name"])["run"]
+        snap = _resolve_snapshot(a.snapshot, h["name"])
         runner.run(h, out, headless=headless,
                    fetch_details=False if a.no_details else None,
-                   max_details=a.max_details, max_pages=a.max_pages)
+                   max_details=a.max_details, max_pages=a.max_pages,
+                   snapshot=snap)
         return 0
 
     if a.cmd == "verify":
@@ -153,7 +234,8 @@ def main(argv: list[str] | None = None) -> int:
         h = load_hints(a.hints)
         out = Path(a.out) if a.out else _paths(h["name"])["verify"]
         rep = V.verify(a.hints, out, runs=a.runs, tolerance=a.tolerance,
-                       headless=headless, max_pages=a.max_pages, sample=a.sample)
+                       headless=headless, max_pages=a.max_pages, sample=a.sample,
+                       snapshot=_resolve_snapshot(a.snapshot, h["name"]))
         return 1 if rep["verdict"] == "FAIL" else 0
 
     if a.cmd == "approve":

@@ -11,11 +11,32 @@
 # Both are captured now. The first version of this form took only the PDF and
 # reported "1 document" — stable, 100% filled, and missing the actual law.
 #
+# MEASURED 2026-08-05, from the first successful capture (91 KB, 17 articles):
+#   9,016 characters of law, articles 1-17, plus the PDF. Getting there needed
+#   three fixes in runner.py that had nothing to do with this form:
+#
+#   * The page is SharePoint, so EVERYTHING sits inside <form id="aspnetForm">.
+#     JS_DETAIL used to delete forms, which deleted the whole law (8,182 chars ->
+#     0) and left a 444-character husk. Forms are unwrapped now, not removed.
+#   * The accordion is EXCLUSIVE (data-bs-parent="#rulesAccordion"), so bootstrap
+#     closes each panel when the next opens: clicking all 17 can never leave more
+#     than one open, and expand_selector cannot fix that. Rendered text therefore
+#     sees one article of seventeen. JS_DETAIL falls back to textContent for
+#     exactly this case. DO NOT "fix" the expand selector — it is not the problem.
+#   * #DeltaPlaceHolderMain (SharePoint's main-content placeholder) is now a
+#     content candidate; without it the capture also carried the ribbon, "Sign In"
+#     and the footer — 16,913 characters instead of 9,016.
+#
+# ACCESS: simah.com is behind a Cloudflare firewall rule. A headed browser with a
+# persistent profile got through on 2026-08-05 where headless was blocked. Work
+# from the snapshot (`run --snapshot`), and let the refresh clock decide when to
+# ask again — see HANDOFF.md §12.
+#
 # TWO SETTINGS DO THE WORK
 #
-#   expand_selector: the articles are collapsed until clicked. Captured closed,
-#     the saved HTML is 17 lines saying "Article-N" and no law at all. Clicking
-#     them first is also what makes the stored HTML match what a person sees.
+#   expand_selector: the articles are collapsed until clicked. Kept because it
+#     makes the stored HTML closer to what a person sees, but the TEXT no longer
+#     depends on it (see the exclusive-accordion note above).
 #
 #   include_page: the seed URL is itself a document, not just an index of other
 #     documents. True of any regulation published as a single page.

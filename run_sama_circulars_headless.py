@@ -1,21 +1,33 @@
 """
-Standalone, headless SAMA Circulars crawler -- run this file directly.
+Standalone SAMA Circulars crawler -- run this file directly.
 
-Not part of the DB/orchestrator pipeline (jobs/sama_job.py) and does not touch
-SQL Server. It only crawls https://rulebook.sama.gov.sa/en/sama-circulars using
-crawler.sama_circulars_crawler.SAMARulebookCrawler (Selenium, headless Chrome)
-and writes the results to output/standalone_crawler/sama_circulars_only/, so
-they can be handed off / merged in by hand.
+Not part of the DB/orchestrator pipeline (jobs/sama_job.py). It only crawls
+https://rulebook.sama.gov.sa/en/sama-circulars using
+crawler.sama_circulars_crawler.SAMARulebookCrawler (Selenium) and writes the
+results to output/standalone_crawler/sama_circulars_only/, so they can be
+handed off / merged in by hand.
+
+Runs headful (visible browser) by default -- pass --headless to hide it.
+
+By default it also opens a READ-ONLY connection to the regulations DB (same
+.env MSSQL_* config as the rest of the pipeline) and compares each circular's
+(reference_no, issue date) against what's already stored for
+regulator='SAMA', category='SAMA Circulars'. Circulars that are already in
+the DB with the same issue date are skipped without visiting their detail
+page -- only new circulars and ones whose issue date changed are fetched, so
+this becomes an incremental "just get the updates" run. If the DB is
+unreachable, it warns and falls back to a full crawl.
 
 Run:
     python run_sama_circulars_headless.py
-    python run_sama_circulars_headless.py --limit 20      # quick test run
-    python run_sama_circulars_headless.py --show           # debug with a visible browser
-    python run_sama_circulars_headless.py --delay 3        # slower, gentler on the site
+    python run_sama_circulars_headless.py --limit 20        # quick test run
+    python run_sama_circulars_headless.py --headless         # no visible browser
+    python run_sama_circulars_headless.py --delay 3          # slower, gentler on the site
+    python run_sama_circulars_headless.py --no-db-check      # skip DB diff, fetch everything
 """
 import argparse
-import os
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -25,18 +37,64 @@ from crawler.sama_circulars_crawler import SAMARulebookCrawler  # noqa: E402
 
 OUTDIR = PROJECT_ROOT / "output" / "standalone_crawler" / "sama_circulars_only"
 
+REGULATOR = "SAMA"
+CATEGORY = "SAMA Circulars"
+
+
+def get_known_circulars() -> dict:
+    """{reference_no: published_date} already stored for SAMA Circulars, read-only.
+
+    Returns {} (and prints a warning) if the DB can't be reached, so the caller
+    can fall back to a full crawl instead of failing outright.
+    """
+    try:
+        import os
+        import pyodbc
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        conn_str = (
+            f"DRIVER={os.getenv('MSSQL_DRIVER')};SERVER={os.getenv('MSSQL_SERVER')};"
+            f"DATABASE={os.getenv('MSSQL_DATABASE')};UID={os.getenv('MSSQL_USERNAME')};"
+            f"PWD={os.getenv('MSSQL_PASSWORD')};TrustServerCertificate=yes"
+        )
+        conn = pyodbc.connect(conn_str, timeout=30, readonly=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT reference_no, published_date FROM regulations "
+            "WHERE regulator = ? AND category = ? AND reference_no IS NOT NULL",
+            [REGULATOR, CATEGORY],
+        )
+        known = {row[0]: row[1] for row in cursor.fetchall()}
+        conn.close()
+        return known
+    except Exception as e:
+        print(f"Warning: could not read DB baseline ({e}). Falling back to a full crawl.")
+        return {}
+
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--limit", type=int, default=None, help="only crawl the first N circulars (default: all)")
-    ap.add_argument("--show", action="store_true", help="run with a visible browser window instead of headless")
+    ap.add_argument("--headless", action="store_true", help="run with no visible browser window (default: visible)")
     ap.add_argument("--delay", type=float, default=1.0, help="seconds to wait between each circular's detail-page request (default: 1.0)")
+    ap.add_argument("--no-db-check", action="store_true", help="skip the DB diff and fetch every circular")
     args = ap.parse_args()
 
     OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    crawler = SAMARulebookCrawler(headless=not args.show, request_delay=args.delay)
-    documents = crawler.fetch_documents(limit=args.limit)
+    known_documents = None
+    if not args.no_db_check:
+        known_documents = get_known_circulars()
+        if known_documents:
+            print(f"DB baseline: {len(known_documents)} SAMA circulars already stored -- will only fetch new/changed ones.")
+        else:
+            known_documents = None  # unreachable or empty -- full crawl
+
+    start = time.time()
+    crawler = SAMARulebookCrawler(headless=args.headless, request_delay=args.delay)
+    documents = crawler.fetch_documents(limit=args.limit, known_documents=known_documents)
+    elapsed = time.time() - start
 
     json_path = OUTDIR / "sama_circulars.json"
     crawler.save_to_json(documents, filename=str(json_path))
@@ -59,7 +117,8 @@ def main():
     except ImportError:
         print("pandas/openpyxl not installed -- skipped CSV/XLSX export, JSON only.")
 
-    print(f"\nDone: {len(documents)} circulars written to {OUTDIR}")
+    mins, secs = divmod(int(elapsed), 60)
+    print(f"\nDone: {len(documents)} circulars written to {OUTDIR} (took {mins}m {secs}s)")
 
 
 if __name__ == "__main__":

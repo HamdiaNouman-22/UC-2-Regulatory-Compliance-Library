@@ -343,9 +343,17 @@ class SAMARulebookCrawler:
             logger.error(f"Error in _extract_detail_page: {e}")
 
         return result
-    def fetch_documents(self, limit: Optional[int] = None) -> List[RegulatoryDocument]:
-        """Main method to fetch all SAMA circulars"""
+    def fetch_documents(self, limit: Optional[int] = None,
+                         known_documents: Optional[Dict[str, str]] = None) -> List[RegulatoryDocument]:
+        """Main method to fetch all SAMA circulars.
+
+        known_documents: optional {circular_no: published_date} of what's already
+        stored (e.g. from the DB). Rows whose circular_no + issue date both match
+        are skipped without visiting the detail page -- fetch_documents then only
+        returns new circulars and ones whose issue date changed since last crawl.
+        """
         documents = []
+        skipped_unchanged = 0
 
         try:
             logger.info("=" * 80)
@@ -381,6 +389,12 @@ class SAMARulebookCrawler:
             # Process each row
             for i, row in enumerate(rows_data, 1):
                 try:
+                    if known_documents is not None:
+                        known_date = known_documents.get(row['circular_no'])
+                        if known_date is not None and known_date == row['issue_date_gregorian']:
+                            skipped_unchanged += 1
+                            continue
+
                     logger.info(f"\n[{i}/{len(rows_data)}] Processing: {row['circular_no']} - {row['title'][:50]}...")
 
                     # Extract detail page data
@@ -426,7 +440,8 @@ class SAMARulebookCrawler:
                     continue
 
             logger.info("\n" + "=" * 80)
-            logger.info(f"CRAWLING COMPLETE: {len(documents)} documents extracted")
+            logger.info(f"CRAWLING COMPLETE: {len(documents)} documents extracted"
+                        + (f", {skipped_unchanged} skipped (already up to date)" if known_documents is not None else ""))
             logger.info("=" * 80)
 
         except Exception as e:

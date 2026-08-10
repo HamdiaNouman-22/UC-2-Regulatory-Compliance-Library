@@ -39,6 +39,11 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
 from dynamic_crawler.formfill.schema import compile_field_regexes
+from generic_crawler.crawler import (GENERIC_LINK_TEXT, disambiguate_titles,
+                                     title_from_slug)
+
+# "Press Here" is GOSI's; the rest come from the shared list.
+_GENERIC_TEXT = GENERIC_LINK_TEXT | {"press here", "here", "click", "link"}
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -94,8 +99,23 @@ JS_ROWS = r"""(cfg) => {
   // does not care about rendering, so it is the fallback.
   const txt = el => clean(el.innerText || el.textContent);
   const out = [];
-  const rows = Array.from(document.querySelectorAll(cfg.rowSel));
-  for (const row of rows) {
+  // Rows are searched inside one panel when the form declares `panels`, so the
+  // same selector yields a different row set per instrument on a tabbed page.
+  let root = document;
+  if (cfg.rootSel) {
+    root = document.querySelector(cfg.rootSel);
+    if (!root) return { rows: [], matched: 0 };
+  }
+  const rows = Array.from(root.querySelectorAll(cfg.rowSel));
+  for (let ri = 0; ri < rows.length; ri++) {
+    const row = rows[ri];
+    // A row inside a panel has no URL of its own, so it is addressed by a stamp
+    // and re-read from the same document in phase 2.
+    let ffRow = null;
+    if (cfg.stampBase !== null && cfg.stampBase !== undefined) {
+      ffRow = cfg.stampBase + ri;
+      row.setAttribute('data-ff-row', String(ffRow));
+    }
     // The link that opens this entry.
     let a = null;
     if (cfg.linkSel) a = row.querySelector(cfg.linkSel) || (row.matches(cfg.linkSel) ? row : null);
@@ -130,6 +150,8 @@ JS_ROWS = r"""(cfg) => {
       try { t = anc.querySelector(lv.title); } catch (e) { t = null; }
       section.push(t ? txt(t).slice(0, 120) : '');
     }
+    // The panel is the outermost level: "…> OH benefits Regulation > SECTION VI".
+    if (cfg.rootLabel) section.unshift(cfg.rootLabel);
 
     const fields = {};
     for (const f of cfg.cssFields) {
@@ -159,29 +181,139 @@ JS_ROWS = r"""(cfg) => {
       href: a ? a.href : '',
       link_text: a ? txt(a).slice(0, 400) : '',
       section,
+      ff_row: ffRow,
       fields
     });
   }
   return { rows: out, matched: rows.length };
 }"""
 
+# --------------------------------------------------------------------------- #
+# PANELS — one URL holding several documents in fragment-addressed tabs
+#
+# A tab is <a href="#2">; the panel <div id="2"> is ALREADY in the DOM. Nothing
+# navigates, so a link walk never follows one, and picking the longest
+# main-content candidate keeps exactly one panel. GOSI's Social Insurance page is
+# six separate legal instruments this way.
+# --------------------------------------------------------------------------- #
+
+JS_PANELS = r"""(sel) => {
+  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  let tabs = [];
+  try { tabs = Array.from(document.querySelectorAll(sel)); } catch (e) { return []; }
+  const out = [];
+  for (const t of tabs) {
+    const a = t.matches('a[href]') ? t : t.querySelector('a[href]');
+    if (!a) continue;
+    const frag = a.getAttribute('href') || '';
+    if (frag.length < 2 || frag[0] !== '#') continue;
+    let panel = null;
+    try { panel = document.getElementById(decodeURIComponent(frag.slice(1))); } catch (e) {}
+    // Two tabs pointing at one panel would double every row inside it.
+    if (!panel || panel.hasAttribute('data-ff-panel')) continue;
+    const i = out.length;
+    panel.setAttribute('data-ff-panel', String(i));
+    out.push({
+      index: i,
+      fragment: frag,
+      label: clean(a.innerText || a.textContent).slice(0, 300),
+      // textContent, never innerText — see _check_panels in schema.py.
+      text_len: clean(panel.textContent).length,
+      links: panel.querySelectorAll('a[href]').length
+    });
+  }
+  return out;
+}"""
+
+# Content of one stamped element, for rows that live inside the page rather than
+# at a URL of their own. textContent for the same reason as JS_DETAIL's fallback:
+# a collapsed accordion renders as its headings and nothing else.
+JS_IN_PAGE_DETAIL = r"""(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return null;
+  const clone = el.cloneNode(true);
+  clone.querySelectorAll('script,style,noscript').forEach(n => n.remove());
+  // `ctx` is the nearest heading above the link. A PDF inside a panel is usually
+  // anchored by "Press Here", and the heading is the document's real name.
+  const ctxOf = a => {
+    let n = a;
+    while (n && n !== el) {
+      let s = n.previousElementSibling;
+      while (s) {
+        if (/^H[1-6]$/.test(s.tagName)) return (s.textContent || '').replace(/\s+/g,' ').trim();
+        s = s.previousElementSibling;
+      }
+      n = n.parentElement;
+    }
+    return '';
+  };
+  const links = Array.from(el.querySelectorAll('a[href]'))
+    .map(a => ({href: a.href,
+                text: (a.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+                ctx: ctxOf(a).slice(0, 200)}));
+  return {html: clone.innerHTML, text: (clone.textContent || '').trim(), links};
+}"""
+
 JS_DETAIL = r"""(strip) => {
-  const pick = document.querySelector('main, [role="main"], article, #content, .content, #main');
+  // querySelector with a comma list returns the first match in DOCUMENT ORDER, not
+  // the first selector that matches: hrsd.gov.sa's stray <div class="content"> (7
+  // chars) beat <main class="main-content"> (3,639). Take the LONGEST candidate;
+  // empty ones are skipped so a page with no container still falls back to <body>.
+  // Platform conventions belong here, the same way [id^="book-navigation"] encodes
+  // Drupal: DeltaPlaceHolderMain is SharePoint's main-content placeholder. On
+  // SIMAH it holds the law and nothing else (9,016 chars) while the next container
+  // up adds the ribbon, "Sign In" and the footer (29,555).
+  const SELS = ['main', '[role="main"]', 'article', '#content', '.content', '#main',
+                '[id^="DeltaPlaceHolderMain"]', '.article-content'];
+  let pick = null, best = 0;
+  for (const sel of SELS) {
+    for (const el of document.querySelectorAll(sel)) {
+      const n = (el.innerText || '').trim().length;
+      if (n > best) { best = n; pick = el; }
+    }
+  }
+  // SECOND PASS, only when nothing scored: innerText reports RENDERED text, so a
+  // page whose content sits in collapsed panels scores zero everywhere. SIMAH's law
+  // is 17 articles in an EXCLUSIVE bootstrap accordion (data-bs-parent), so at most
+  // one can be open at a time and clicking cannot defeat that — innerText sees one
+  // article of seventeen. textContent does not care about rendering. Kept as a
+  // fallback rather than the default so that on a normal page the visible main
+  // content still wins, exactly as before.
+  if (!pick) {
+    for (const sel of SELS) {
+      for (const el of document.querySelectorAll(sel)) {
+        const n = (el.textContent || '').trim().length;
+        if (n > best) { best = n; pick = el; }
+      }
+    }
+  }
   const src = pick || document.body || document.documentElement;
   if (!src) return {html:'', text:'', links:[]};
   const clone = src.cloneNode(true);
-  clone.querySelectorAll('script,style,noscript,nav,aside,header,footer,form').forEach(n=>n.remove());
-  // The form's content.strip: the regulator's own furniture around the document.
-  // Removed from the CLONE only, and after the link harvest below reads `src`,
-  // so stripping the "Download Original PDF" button still leaves its href for
-  // org_pdf_link.
+  clone.querySelectorAll('script,style,noscript,nav,aside,header,footer').forEach(n=>n.remove());
+  // <form> is UNWRAPPED, not removed. SharePoint / ASP.NET WebForms wrap the entire
+  // page in <form id="aspnetForm">, so removing forms deleted SIMAH's whole law:
+  // 8,182 characters of articles became 0, with a 444-character husk of markup left
+  // behind and every other check still passing. Unwrapping drops the form semantics
+  // and keeps the content.
+  clone.querySelectorAll('form').forEach(f => {
+    while (f.firstChild) f.parentNode.insertBefore(f.firstChild, f);
+    f.remove();
+  });
+  // The form's content.strip: the regulator's own furniture around the
+  // document. Removed from the CLONE only, and after the link harvest
+  // below reads `src`, so stripping the "Download Original PDF" button
+  // still leaves its href for org_pdf_link.
   for (const sel of (strip || [])) {
     try { clone.querySelectorAll(sel).forEach(n => n.remove()); } catch (e) {}
   }
   const links = Array.from(src.querySelectorAll('a[href]'))
     .filter(a => !a.closest('header, footer, nav, [role="banner"], [role="contentinfo"]'))
     .map(a => ({href:a.href, text:(a.innerText||'').replace(/\s+/g,' ').trim().slice(0,200)}));
-  return {html: clone.innerHTML, text:(clone.innerText||'').trim(), links};
+  // The clone is detached, so it has no layout and innerText is unreliable on it —
+  // another reason textContent has to be the fallback here.
+  return {html: clone.innerHTML,
+          text:(clone.innerText || clone.textContent || '').trim(), links};
 }"""
 
 JS_HREFS = "() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href)"
@@ -209,6 +341,45 @@ JS_EXPAND = r"""(sel) => {
   }
   return clicked;
 }"""
+
+# --- click pagination -------------------------------------------------------
+# A JS pager offers no URL to plan with (MHRSD: <a href="#">, and ?page=N there
+# silently returns page 1). So it is walked by clicking, under the same rule as
+# generic_crawler's reveal_all_links(): CLICK AND VERIFY — a click counts as a
+# page turn only if the ROW SET changed. Without that, a dead control re-reads
+# page 1 forever and the run reports a clean multiple of the real count.
+
+# Fingerprint of the row set: count + each row's link. Cheap to poll, and page 2
+# cannot look like page 1.
+JS_ROW_SIG = r"""(a) => {
+  const rows = Array.from(document.querySelectorAll(a.rowSel));
+  return rows.length + '|' + rows.map(r => {
+    const l = r.querySelector(a.linkSel);
+    return (l && l.getAttribute('href')) || (r.innerText || '').slice(0, 40);
+  }).join('~');
+}"""
+
+# Some pagers keep "next" on the last page, hidden or disabled — existing is not
+# enough. el.click() rather than a pointer click: the pager sits below the fold
+# and these sites float chat widgets over it.
+JS_CLICK_NEXT = r"""(sel) => {
+  const usable = e => {
+    const r = e.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return false;
+    const st = getComputedStyle(e);
+    if (st.display === 'none' || st.visibility === 'hidden') return false;
+    if (e.disabled || e.getAttribute('aria-disabled') === 'true') return false;
+    return !/\bdisabled\b/.test(e.className || '');
+  };
+  const el = Array.from(document.querySelectorAll(sel)).find(usable);
+  if (!el) return 'no-control';
+  try { el.scrollIntoView({block: 'center'}); } catch (e) {}
+  try { el.click(); } catch (e) { return 'click-failed'; }
+  return 'clicked';
+}"""
+
+CLICK_SETTLE_MS = 8000    # how long a click gets to change the rows
+CLICK_POLL_MS = 250
 
 JS_TREE = r"""(cfg) => {
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
@@ -458,9 +629,119 @@ def _stated_total(page, cfg: dict) -> int | None:
         return None
 
 
-def _load(page, url: str, wait_ms: int, tries: int = 3) -> bool:
+def _row_signature(page, row_sel: str, link_sel: str) -> str:
+    try:
+        return page.evaluate(JS_ROW_SIG, {"rowSel": row_sel, "linkSel": link_sel})
+    except Exception:
+        return ""
+
+
+def _click_through(page, pagination: dict, row_sel: str, link_sel: str,
+                   css_fields: dict, rx_fields: dict, rows: list, seen: set,
+                   section_prefix, section_levels, wait_ms: int,
+                   page_log: list) -> dict:
+    """Walk a JavaScript pager, harvesting each page. Page 1 is already harvested.
+
+    Returns {"note": ..., "warnings": [...]}. Every turn is verified against the
+    row fingerprint, so the walk stops rather than looping on a dead control.
+    """
+    next_sel = pagination.get("next_selector") or ""
+    max_pages = int(pagination.get("max_pages", 200))
+    note = {"mode": "click", "pages_walked": 1, "stopped": "", "max_pages": max_pages}
+    warns: list[str] = []
+
+    empty_streak = 0
+    page_no = 1
+    for page_no in range(2, max_pages + 1):
+        sig_before = _row_signature(page, row_sel, link_sel)
+        url_before = page.url
+        try:
+            outcome = page.evaluate(JS_CLICK_NEXT, next_sel)
+        except Exception as e:
+            outcome = f"click-error: {str(e)[:60]}"
+        if outcome != "clicked":
+            note["stopped"] = f"page {page_no}: {outcome}"
+            if page_no == 2:
+                warns.append(f"pagination.next_selector {next_sel!r} matched no usable "
+                             f"control on the seed page ({outcome}) — only page 1 was "
+                             "walked. Check it against `formfill inspect`.")
+            break
+
+        changed, waited = False, 0
+        while waited < CLICK_SETTLE_MS:
+            page.wait_for_timeout(CLICK_POLL_MS)
+            waited += CLICK_POLL_MS
+            if _row_signature(page, row_sel, link_sel) != sig_before:
+                changed = True
+                break
+        if not changed:
+            # On the last page this is normal — the control is often still there.
+            # On the FIRST turn it means the selector never worked at all.
+            note["stopped"] = f"page {page_no}: rows unchanged after click"
+            if page_no == 2:
+                warns.append(f"pagination.next_selector {next_sel!r} was clicked but the "
+                             "row set never changed — only page 1 was walked. Wrong "
+                             "selector, or this pager needs mode: custom.")
+            break
+
+        page.wait_for_timeout(wait_ms)
+        h = _harvest(page, row_sel, link_sel, css_fields, rx_fields,
+                     page.url, rows, seen, section_prefix, section_levels)
+        page_log.append({"url": f"{page.url}#page-{page_no}", "matched": h["matched"],
+                         "new": h["new"],
+                         "status": "ok-clicked" + ("-navigated" if page.url != url_before else "")})
+        note["pages_walked"] = page_no
+        emit({"event": "click_page", "page": page_no, "matched": h["matched"],
+              "new": h["new"], "rows": len(rows)})
+
+        if h["new"] == 0:
+            empty_streak += 1
+            if empty_streak >= 2:
+                note["stopped"] = f"page {page_no}: two consecutive pages added no new rows"
+                break
+        else:
+            empty_streak = 0
+    else:
+        # Ran the whole budget without the pager ending: the count is the cap.
+        note["capped_by_max_pages"] = True
+        note["planned_pages"] = note["pages_walked"]
+        note["pages_wanted"] = f"more than {note['pages_walked']}"
+        note["stopped"] = f"hit max_pages ({max_pages})"
+
+    return {"note": note, "warnings": warns}
+
+
+# SNAPSHOTS — develop a form against a page we already have.
+#
+# One full run of SIMAH's form is TWO loads of one URL, so volume never tripped
+# Cloudflare: ITERATION did. Every selector fix and every `verify --runs 3` was
+# more live traffic for no new information. Capture once, then run offline.
+#
+# `<base href>` is not optional. Fields read `el.href` (the RESOLVED property, see
+# JS_ROWS), so without it every relative link resolves against about:blank and
+# document_url comes out quietly wrong.
+_BASE_RE = re.compile(r"<base\b", re.I)
+
+
+def snapshot_html(html: str, base_url: str) -> str:
+    """Saved page + a <base>, so relative links resolve as they did live."""
+    if _BASE_RE.search(html or ""):
+        return html
+    tag = f'<base href="{base_url}">'
+    m = re.search(r"<head[^>]*>", html or "", re.I)
+    return (html[:m.end()] + tag + html[m.end():]) if m else tag + (html or "")
+
+
+def _load(page, url: str, wait_ms: int, tries: int = 3, snap: str | None = None) -> bool:
     """These sites are flaky. An empty page must never be read as 'no rows' —
-    that is exactly the silent failure that puts holes in the library."""
+    that is exactly the silent failure that puts holes in the library.
+
+    `snap` is saved HTML: serve it instead of fetching, and touch no network.
+    """
+    if snap is not None:
+        page.set_content(snapshot_html(snap, url), wait_until="domcontentloaded")
+        page.wait_for_timeout(min(wait_ms, 300))
+        return True
     for _ in range(tries):
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=90000)
@@ -498,8 +779,15 @@ def _load(page, url: str, wait_ms: int, tries: int = 3) -> bool:
 
 def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 1200,
         fetch_details: bool | None = None, max_details: int | None = None,
-        max_pages: int | None = None, write_excel: bool = True) -> dict:
-    """Crawl `hints['seed_url']` exactly as the form says. Returns a run summary."""
+        max_pages: int | None = None, write_excel: bool = True,
+        snapshot: str | Path | None = None) -> dict:
+    """Crawl `hints['seed_url']` exactly as the form says. Returns a run summary.
+
+    `snapshot` is a saved copy of the seed page. Given one, the run makes NO
+    network requests: the same form, the same extraction, replayed against the
+    saved HTML. The summary records `source: snapshot` so a replay can never be
+    mistaken for a crawl of the live site.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -538,10 +826,49 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
         else {"ancestor": lv["ancestor"], "title": lv["title"]}
         for lv in (sp.get("levels") or [])]
 
+    panels_cfg = hints.get("panels") or {}
+    tabs_sel = panels_cfg.get("tabs") or ""
+    include_panel = bool(panels_cfg.get("include_panel"))
+    panels: list[dict] = []
+
     seed = hints["seed_url"]
     section = (hints.get("name") or urlparse(seed).netloc).split(".")[-1].title()
     is_tree = hints.get("shape") == "tree"
     tree_max_nodes = int((hints.get("tree") or {}).get("max_nodes", 1000))
+
+    # Read the snapshot ONCE. A missing file is a hard error, not a silent
+    # fallthrough to the live site: the whole point is that this run cannot
+    # generate traffic, and quietly crawling instead is the surprise that costs
+    # an IP block.
+    snap_html: str | None = None
+    if snapshot is not None:
+        snap_path = Path(snapshot)
+        if not snap_path.exists():
+            raise FileNotFoundError(
+                f"snapshot not found: {snap_path}. Capture one with "
+                f"`formfill snapshot {hints.get('name')}` — this run will not go live.")
+        snap_html = snap_path.read_text(encoding="utf-8")
+
+        # A SNAPSHOT IS ONE PAGE, so it can only replay a one-page form.
+        #
+        # Refused rather than half-served, because both alternatives are worse than
+        # an error: fetching pages 2..N would generate exactly the live traffic a
+        # snapshot exists to avoid, and skipping them would report a fraction of the
+        # site as if it were the whole thing. SBP's 139 listing pages and SAMA's
+        # 40-node tree need the network; SIMAH's single law page does not.
+        mode = (pagination.get("mode") or "none").lower()
+        if mode != "none":
+            raise ValueError(
+                f"{hints.get('name')}: --snapshot only works on a single-page form, "
+                f"and this one paginates (mode: {mode}). One saved page cannot stand "
+                f"in for a walk of many, and serving it for page 1 while fetching the "
+                f"rest would put live traffic behind a flag that promises none.")
+        if hints.get("shape") == "tree":
+            raise ValueError(
+                f"{hints.get('name')}: --snapshot only works on a single-page form, "
+                f"and shape: tree discovers its nodes by visiting them — the seed's "
+                f"menu shows a fraction of the tree (20 of SAMA's 40), so a replay "
+                f"would silently report that fraction as the whole rulebook.")
 
     rows: list[dict] = []
     seen: set[str] = set()
@@ -575,7 +902,7 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
 
         # ---------------- PHASE 1: the listing ----------------
         try:
-            if not _load(page, seed, wait_ms):
+            if not _load(page, seed, wait_ms, snap=snap_html):
                 warnings.append("seed page failed to load after 3 attempts")
             blocked_reason = _blocked(page)
             if blocked_reason:
@@ -604,6 +931,32 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                 section = re.sub(r"\s+", " ", h1).strip() or section
             except Exception:
                 pass
+
+            if tabs_sel:
+                panels = _find_panels(page, tabs_sel)
+                emit({"event": "panels", "found": len(panels),
+                      "labels": [p["label"] for p in panels]})
+                if not panels:
+                    warnings.append(
+                        f"panels.tabs {tabs_sel!r} matched no tab whose href is a "
+                        "fragment pointing at an element on this page — check it "
+                        "against `formfill inspect`")
+
+            # Each panel is one document: the tab names it, the panel's text IS
+            # its content. Same idea as include_page, one level in.
+            if include_panel:
+                for p in panels:
+                    url = f"{seed}{p['fragment']}"
+                    rows.append({
+                        "title": p["label"],
+                        "href": url,
+                        "row_text": "",
+                        "found_on": seed,
+                        "in_page": f"[data-ff-panel=\"{p['index']}\"]",
+                        "section_trail": list(section_prefix),
+                        "fields": {"title": p["label"], "document_url": url},
+                    })
+                    seen.add(url)
 
             # The seed page as a document in its own right, added FIRST so it
             # leads the inventory. Phase 2 opens it like any other row, which is
@@ -664,8 +1017,11 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                     page_log.append({"url": lurl, "matched": 0, "new": 0, "status": "load-failed"})
                     warnings.append(f"listing page failed to load: {lurl}")
                     continue
-                new = _harvest(page, row_sel, link_sel, css_fields, rx_fields,
-                               lurl, rows, seen, section_prefix, section_levels)
+                if i > 1 and tabs_sel:
+                    panels = _find_panels(page, tabs_sel)
+                new = _harvest_page(page, row_sel, link_sel, css_fields, rx_fields,
+                                    lurl, rows, seen, section_prefix, section_levels,
+                                    panels if tabs_sel else None)
                 matched = new["matched"]
 
                 # Does the page agree with us about how many rows it has?
@@ -820,6 +1176,13 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                 else:
                     emit({"event": "coverage_ok", "stated": list_total,
                           "harvested": len(rows)})
+            if pagination.get("mode") == "click" and not is_tree:
+                res = _click_through(page, pagination, row_sel, link_sel, css_fields,
+                                     rx_fields, rows, seen, section_prefix,
+                                     section_levels, wait_ms, page_log)
+                plan_note = res["note"]
+                warnings.extend(res["warnings"])
+                emit({"event": "plan", "pages": plan_note["pages_walked"], **plan_note})
         finally:
             page.close()
 
@@ -837,6 +1200,24 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
 
         if targets:
             dp = ctx.new_page()
+            # Rows that live inside the seed document share one load of it. The
+            # stamps from phase 1 were on a page that is now closed, so the same
+            # deterministic passes are replayed here to put them back.
+            in_page_ready: bool | None = None       # None = not attempted yet
+
+            def _prepare_in_page() -> bool:
+                if not _load(dp, seed, wait_ms, tries=2, snap=snap_html):
+                    warnings.append("could not reload the seed page for its panels — "
+                                    "panel text is missing from this run")
+                    return False
+                if expand_sel:
+                    _expand(dp, expand_sel)
+                again = _find_panels(dp, tabs_sel) if tabs_sel else []
+                if row_sel and tabs_sel:
+                    _harvest_page(dp, row_sel, link_sel, css_fields, rx_fields, seed,
+                                  [], set(), section_prefix, section_levels, again)
+                return True
+
             try:
                 for i, r in enumerate(targets, 1):
                     # A row that already points AT a file has no detail page to
@@ -846,7 +1227,8 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                     if r["href"] and _is_doc(r["href"]):
                         _add_document(documents, r["href"], r["title"],
                                       r.get("found_on") or seed,
-                                      " > ".join(r.get("section_trail") or []) or section)
+                                      " > ".join(r.get("section_trail") or []) or section,
+                                      declared=True)      # the form named this row
                         records.append(_record(r, section, seed))
                         continue
                     if not r["href"] or not _load(dp, r["href"], wait_ms, tries=2):
@@ -871,6 +1253,56 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                     except Exception:
                         records.append(_record(r, section, seed))
                         continue
+                    if r.get("in_page"):
+                        # No page to fetch: the content is an element of the seed
+                        # document, which is loaded once for every such row.
+                        if in_page_ready is None:
+                            in_page_ready = _prepare_in_page()
+                        if not in_page_ready:
+                            records.append(_record(r, section, seed))
+                            continue
+                        try:
+                            d = dp.evaluate(JS_IN_PAGE_DETAIL, r["in_page"])
+                        except Exception:
+                            d = None
+                        if not d:
+                            warnings.append(f"panel content not found again for "
+                                            f"{r['title']!r} ({r['in_page']})")
+                            records.append(_record(r, section, seed))
+                            continue
+                    else:
+                        # On a snapshot run the only page we hold is the seed, so a
+                        # row pointing at it (include_page) replays; any other row
+                        # would need the network and is left without detail content
+                        # rather than quietly fetched.
+                        row_snap = snap_html if (snap_html is not None
+                                                 and r["href"] == seed) else None
+                        if snap_html is not None and row_snap is None:
+                            records.append(_record(r, section, seed))
+                            continue
+                        if not r["href"] or not _load(dp, r["href"], wait_ms, tries=2,
+                                                      snap=row_snap):
+                            records.append(_record(r, section, seed))
+                            continue
+                        # Phase 2 loads a fresh tab, so anything the form expanded in
+                        # phase 1 is collapsed again here. Expand before capturing or
+                        # the saved HTML is the closed version of the page.
+                        if expand_sel:
+                            _expand(dp, expand_sel)
+                        reason = _blocked(dp)
+                        if reason:
+                            # Store the row, never the challenge page as its content.
+                            blocked += 1
+                            records.append(_record(r, section, seed))
+                            if blocked <= 3:
+                                warnings.append(
+                                    f"BLOCKED BY BOT PROTECTION at {r['href']}: {reason!r}")
+                            continue
+                        try:
+                            d = dp.evaluate(JS_DETAIL)
+                        except Exception:
+                            records.append(_record(r, section, seed))
+                            continue
                     # A tree is discovered as it is walked. Drupal book menus
                     # (and most rulebook sidebars) only render the branch you
                     # are currently in, so the seed page shows 20 nodes and the
@@ -912,7 +1344,13 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                             have = {c.strip().lower() for c in crumbs if c}
                             head = [c for c in library_crumbs
                                     if c.strip().lower() not in have]
-                            r["section_trail"] = head + list(crumbs)
+                            # And the panel label behind it: the breadcrumb
+                            # says where the PAGE sits, the panel says where
+                            # inside it. GOSI Social Insurance is six legal
+                            # instruments on one URL, which without this all
+                            # share a single folder.
+                            r["section_trail"] = head + list(crumbs) + (
+                                [r["panel_label"]] if r.get("panel_label") else [])
 
                     row_path = " > ".join(r.get("section_trail") or []) or section
                     doc_links, doc_files = [], []
@@ -924,9 +1362,13 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                             # "Download Original PDF" is a button label, not a
                             # title. Left as-is, every SAMA circular's PDF was
                             # filed under that name.
+                            # Scraped from an anchor, so a row the FORM declared
+                            # wins over this one (declared=False). Failing that,
+                            # a generic button label falls back to the row title —
+                            # "Download Original PDF" is not a document name.
                             _add_document(documents, h,
                                           _doc_title(l.get("text"), r["title"]),
-                                          r["href"], row_path)
+                                          r["href"], row_path, declared=False)
                     records.append(_record(r, section, seed, {
                         "n_pdfs": len(doc_links),
                         "pdf_links": " | ".join(doc_links),
@@ -950,13 +1392,18 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
             for r in rows:
                 if r["href"] and _is_doc(r["href"]):
                     _add_document(documents, r["href"], r["title"], seed,
-                                  " > ".join(r.get("section_trail") or []) or section)
+                                  " > ".join(r.get("section_trail") or []) or section,
+                                  declared=True)
 
         browser.close()
 
     for rec in records:
         rec["content_hash"] = content_key(rec.get("text") or rec.get("row_text") or "")
     docs = list(documents.values())
+    # A title shared by several different documents is not a title: GOSI files
+    # four occupational-hazard policies under one "Insurance coverage document"
+    # heading. Declared titles are the form's answer and are left alone.
+    retitled = disambiguate_titles([d for d in docs if not d.get("title_declared")])
     for d in docs:
         d["content_hash"] = content_key(f"{d.get('doc_url','')}|{d.get('title','')}")
 
@@ -975,12 +1422,21 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
         # What the site said about itself versus what we took. A gap here is a
         # coverage gap, and it is invisible to a stability check.
         "stated_vs_matched": stated_totals,
+        "panels": [{"label": p["label"], "fragment": p["fragment"],
+                    "text_len": p["text_len"]} for p in panels],
         "rows": len(rows),
         "records": len(records),
         "documents": len(docs),
+        "titles_disambiguated": retitled,
         "phase2_ran": bool(targets),
         "fill_rates": _fill_rates(rows, hints),
         "blocked_pages": blocked,
+        # Provenance. A replay produces the same rows as a crawl, which is what
+        # makes it useful and also what makes it dangerous: unlabelled, a snapshot
+        # run would tell change detection "unchanged" forever while the site moved
+        # on. Everything downstream reads this.
+        "source": "snapshot" if snap_html is not None else "live",
+        "snapshot": str(snapshot) if snap_html is not None else "",
         "warnings": warnings,
         "pages": page_log,
     }
@@ -1019,6 +1475,7 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
 
     (out / "pages.json").write_text(json.dumps(
         {"seed": seed, "shape": hints.get("shape"), "engine": "formfill",
+         "source": summary["source"], "snapshot": summary["snapshot"],
          "pages": records, "documents": docs}, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "rows.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "run.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1097,11 +1554,17 @@ def _walk_tree(page, tree: dict, rx_fields: dict, page_url: str, rows: list, see
 
 
 def _harvest(page, row_sel, link_sel, css_fields, rx_fields, page_url, rows, seen,
-             section_prefix=(), section_levels=(), dedupe_scope="") -> dict:
+             section_prefix=(), section_levels=(), dedupe_scope="",
+             root_sel=None, root_label="", root_fragment="",
+             stamp_base=None) -> dict:
+    """`root_sel` scopes the search to one panel; `stamp_base` marks each row so
+    phase 2 can find it again in the same document."""
     try:
         res = page.evaluate(JS_ROWS, {"rowSel": row_sel, "linkSel": link_sel,
                                       "cssFields": css_fields,
-                                      "sectionLevels": list(section_levels)})
+                                      "sectionLevels": list(section_levels),
+                                      "rootSel": root_sel, "rootLabel": root_label,
+                                      "stampBase": stamp_base})
     except Exception as e:
         emit({"event": "harvest_error", "url": page_url, "error": str(e)[:200]})
         return {"matched": 0, "new": 0}
@@ -1135,16 +1598,61 @@ def _harvest(page, row_sel, link_sel, css_fields, rx_fields, page_url, rows, see
         # sits outside one of the groups should read "Laws > Financial Sector",
         # not "Laws >  > Financial Sector".
         trail = [c for c in (list(section_prefix) + list(raw.get("section") or [])) if c]
-        rows.append({
+        # A row with no URL is identified by its place as well as its title: GOSI
+        # panels 4 and 5 both hold a "SECTION III: PROVISIONS CONCERNING
+        # VOLUNTARILY CONTRIBUTORS", and they are different documents.
+        key = href or f"{page_url}::{'/'.join(trail)}::{title}"
+        if not key.strip("::") or key in seen:
+            continue
+        seen.add(key)
+        row = {
             "title": title,
             "href": href,
             "row_text": raw.get("row_text", ""),
             "found_on": page_url,
             "section_trail": trail,
             "fields": fields,
-        })
+        }
+        if raw.get("ff_row") is not None and not href:
+            row["in_page"] = f"[data-ff-row=\"{raw['ff_row']}\"]"
+            row["panel_label"] = root_label
+            # It has no URL of its own; the tab that reveals it is the closest
+            # thing a reader can open. Identity comes from section_trail.
+            row["href"] = fields["document_url"] = f"{page_url}{root_fragment}"
+        rows.append(row)
         new += 1
     return {"matched": res.get("matched", 0), "new": new}
+
+
+def _harvest_page(page, row_sel, link_sel, css_fields, rx_fields, page_url, rows, seen,
+                  section_prefix, section_levels, panels) -> dict:
+    """One harvest per panel, or one for the whole page when the form declares no
+    panels. A form may declare panels and no row_selector (include_panel alone),
+    in which case there is nothing to harvest."""
+    if not row_sel:
+        return {"matched": 0, "new": 0}
+    if panels is None:
+        return _harvest(page, row_sel, link_sel, css_fields, rx_fields, page_url,
+                        rows, seen, section_prefix, section_levels)
+    total = {"matched": 0, "new": 0}
+    for p in panels:
+        r = _harvest(page, row_sel, link_sel, css_fields, rx_fields, page_url, rows,
+                     seen, section_prefix, section_levels,
+                     root_sel=f"[data-ff-panel=\"{p['index']}\"]", root_label=p["label"],
+                     root_fragment=p["fragment"], stamp_base=p["index"] * 100_000)
+        total["matched"] += r["matched"]
+        total["new"] += r["new"]
+    return total
+
+
+def _find_panels(page, tabs_sel: str) -> list[dict]:
+    """Resolve the tab strip to panels, stamping each one. Deterministic, so
+    running it again on a fresh load of the same page gives the same stamps."""
+    try:
+        return page.evaluate(JS_PANELS, tabs_sel)
+    except Exception as e:
+        emit({"event": "panels_error", "error": str(e)[:200]})
+        return []
 
 
 def _record(r: dict, section: str, seed: str, extra: dict | None = None) -> dict:
@@ -1206,7 +1714,8 @@ def _doc_title(link_text: str, row_title: str) -> str:
     return t
 
 
-def _add_document(documents: dict, url: str, title: str, found_on: str, section: str) -> None:
+def _add_document(documents: dict, url: str, title: str, found_on: str, section: str,
+                  declared: bool = False) -> None:
     """One row per FILE, not one per place the file is linked from.
 
     generic_crawler keys documents on (url, section_path) so a document
@@ -1219,6 +1728,22 @@ def _add_document(documents: dict, url: str, title: str, found_on: str, section:
     is the shallowest one), and the other placements are kept in `also_in` rather
     than thrown away. Deduplicated, the sandbox reports 3 — which is what
     generic_crawler's baseline says too.
+
+    `declared` says WHERE the title came from, and it is the one thing that can
+    overwrite an existing one:
+
+        declared=True   the form named this row a document entry and the gate
+                        measured how often that field fills. SIMAH's <h6> is
+                        "The Implementing Regulations for Credit Information Law".
+        declared=False  scraped from an anchor while scanning a page. SIMAH's
+                        anchor text is "Download PDF", which is not a title — the
+                        form file says so in a comment.
+
+    First-sighting-wins gave the anchor the last word whenever a page linked its own
+    declared row (`include_page`), so the library got "Download PDF". A declared
+    title now replaces a scraped one; nothing else about precedence changes, and a
+    declared title is never downgraded. Where a URL has only one kind of sighting —
+    every other form today — this is a no-op.
     """
     d = documents.get(url)
     if d is None:
@@ -1230,14 +1755,33 @@ def _add_document(documents: dict, url: str, title: str, found_on: str, section:
             "section_path": section,
             "times_linked": 1,
             "also_in": "",
+            "title_declared": bool(declared),
         }
         return
     d["times_linked"] += 1
+    if declared and not d.get("title_declared") and (title or "").strip():
+        d["title"] = title
+        d["title_declared"] = True
     if section and section != d["section_path"]:
         others = [s for s in d["also_in"].split(" | ") if s]
         if section not in others and len(others) < 20:
             others.append(section)
             d["also_in"] = " | ".join(others)
+
+
+def _scraped_doc_title(link: dict, fallback: str) -> str:
+    """Anchor text unless it is a call to action, then the nearest heading, then
+    the URL slug — generic_crawler's `best_doc_title` order, reusing its word
+    list. Only the in-page path uses this; changing the ordinary detail path
+    would move titles on six approved forms nothing has re-measured.
+    """
+    t = (link.get("text") or "").strip().replace("\xa0", " ")
+    if t.lower() not in _GENERIC_TEXT and len(t) > 3:
+        return t[:200]
+    ctx = (link.get("ctx") or "").strip()
+    if len(ctx) > 3:
+        return ctx[:200]
+    return title_from_slug(link.get("href") or "") or fallback
 
 
 def _is_doc(url: str) -> bool:

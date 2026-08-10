@@ -470,6 +470,41 @@ class MSSQLRepository(DocumentRepository):
         except Exception as e:
             logger.error(f"find_regulation_ids_by_section_code_prefix failed: {e}")
             return []
+    def get_regulation_id_by_document_url(self, document_url: str,
+                                          regulator: Optional[str] = None) -> Optional[int]:
+        """The id behind a document_url, so a caller can compare content hashes.
+
+        `document_exists_by_url` answers a similar question with a bool, which is
+        all `filter_new_documents` needs. Change detection needs the id itself:
+        without it there is no stored hash to compare against, and an amended
+        document is indistinguishable from an unchanged one.
+
+        Scoped by regulator when given. `get_regulation_id_by_source_url` above
+        hardcodes CBB in its SQL; this one takes the regulator as an argument so
+        the next caller does not have to add a third near-copy.
+
+        Added for SIMAH change detection (crawler/simah_wrapper.py). Nothing else
+        calls it, and no existing behaviour changes.
+        """
+        if not document_url:
+            return None
+        if regulator:
+            query = ("SELECT TOP 1 id FROM regulations "
+                     "WHERE document_url = ? AND regulator = ?")
+            params = (document_url, regulator)
+        else:
+            query = "SELECT TOP 1 id FROM regulations WHERE document_url = ?"
+            params = (document_url,)
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                row = cursor.fetchone()
+                return int(row[0]) if row else None
+        except Exception as e:
+            logger.error(f"Failed to look up regulation by document_url: {e}")
+            return None
+
 
     # ================================================================== #
     #  REGULATION RETRIEVAL                                                #
