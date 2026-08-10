@@ -213,29 +213,151 @@ still looking perfectly fine.
 
 ---
 
-## 7. What is NOT here
-
-**No approve → database step.** Nothing promotes a reviewed workbook into MSSQL.
-That is the missing half of the workflow.
-
-**`MSSQLRepository` cannot satisfy this orchestrator yet.** It is missing five
-methods that `ExcelRepo` implements:
+## 7. Approving a workbook into the database
 
 ```
-find_by_identity      required, unguarded — a real DB run crashes without it
-find_by_reference     required, unguarded
-last_good_run         guarded, but the completeness gate has no baseline without it
-record_run            guarded
-counts                guarded
+crawl -> classify -> .xlsx  ->  [ you read it ]  ->  promote -> MSSQL
 ```
 
-This is the actual reason the pipeline has never run end-to-end against the
-database, and it has to be built before the approve step can exist.
+```bash
+# 1. see what WOULD go in — opens no connection, writes nothing
+curl -X POST "http://127.0.0.1:8100/approve/{run_id}"
+
+# 2. actually insert. BOTH flags are required.
+curl -X POST "http://127.0.0.1:8100/approve/{run_id}?dry_run=false&confirm=true"
+```
+
+or from the command line, against any workbook:
+
+```bash
+venv/Scripts/python.exe -m dynamic_crawler.formfill.promote path/to/run.xlsx --dry-run
+venv/Scripts/python.exe -m dynamic_crawler.formfill.promote path/to/run.xlsx
+```
+
+**`dry_run` defaults to true, and `confirm` must ALSO be true to write.** Two
+flags rather than one because this is the only call in the app that can reach
+production, and a mistyped URL should not be able to.
+
+### What it does
+
+It **replays the workbook** rather than re-running the pipeline. Re-running
+would be less code and wrong: it would re-crawl (the site may have moved on
+since you looked), re-analyse (the LLM is not deterministic, and you already
+paid for those tokens), and could therefore insert something other than what you
+approved. Approval means *these rows*, not *whatever this regulator looks like
+now*.
+
+Ids are remapped, not copied — the workbook counts from 1 in its own world.
+The folder tree is walked parent-first, then regulations, then versions,
+analysis and mappings each pointed at the database's regulation ids.
+
+**Promoting the same workbook twice inserts nothing the second time.** Documents
+already present are matched on the same identity the orchestrator classifies
+with, `(document_url, doc_path)`, and skipped — which is what makes this safe to
+retry after a partial failure.
+
+The report tells you which:
+
+```json
+{"folders": 26, "inserted": 16, "skipped_already_present": 0,
+ "failed": 0, "regulation_versions": 3, "compliance_analysis": 0}
+```
+
+---
+
+## 7b. What is still NOT here
 
 **`db_compare.py` has never been run** (`site_runners/db_compare.py`). It is the
 only thing that would prove *coverage* — that the new engines find what the old
 per-regulator crawlers already put in the database. Everything measured so far
 proves consistency, not correctness.
+
+**`run_history` is created on first use.** `record_run` creates the table if it
+is missing. It is additive and nothing else reads it, but it is a schema change
+to whatever database you point this at — worth knowing before the first
+promote against production.
+
+**The requirement-matching corpus is still only real in MSSQL.** A workbook can
+never tell you whether matching would have found anything (§4), so that part is
+only observable after a promote.
+
+---
+
+## 7c. What is left before this REPLACES the current pipeline
+
+Everything above is a preview-and-approve loop running beside production. Making
+it *the* pipeline is a different question, and these are the open items in the
+order they block each other.
+
+### 1. Prove coverage — `db_compare.py`
+
+Nothing yet shows that the new engines find what the old per-regulator crawlers
+already put in the database. Every measurement so far is **consistency** (same
+code, same numbers), not **correctness**.
+
+The cheapest first answer is free: run a promote `--dry-run` against MSSQL and
+read `skipped_already_present`. A high number means the new crawl is finding what
+is already there; a low one means the two disagree and you want to know why
+before anything is switched over.
+
+### 2. Migrate the remaining regulators
+
+The old API drives four pipelines:
+
+```python
+REGULATOR_PIPELINES = {"SBP": ..., "SECP": ..., "SAMA": ..., "CBB": ...}
+```
+
+`config/sources/` currently has three entries, and they do not line up:
+
+| regulator | old pipeline | config/sources | note |
+|---|---|---|---|
+| SAMA | yes | yes (`custom`) | wraps the existing crawler — the hybrid working as intended |
+| SBP | yes | **no** | a form exists (`sbp.circulars`) but is not approved |
+| SECP | yes | **no** | no form, no source |
+| CBB | yes | **no** | still on `run_for_cbb`, its own door |
+| MISA | no | yes (`generic`) | new, generic engine |
+| SIMAH | no | yes — but **0 sources** | the file parses and lists nothing; either finish it or delete it |
+
+### 3. Retire the second door
+
+`NewOrchestrator`'s first claim is "one door — `run_for_regulator` handles every
+regulator including CBB". The old API does not use it: `/trigger/CBB/monitoring`
+still calls `run_cbb_monitoring`, which calls `run_for_cbb`. Until the API points
+at `NewOrchestrator`, CBB has a versioning path that the other regulators do not,
+which is the exact thing the rewrite set out to remove.
+
+### 4. Check what the old filter was dropping
+
+`filter_new_documents` ends with:
+
+```python
+logger.warning(f"Skipping {doc.title} (missing published_date)")
+```
+
+Documents with no published date and no URL match are **silently discarded**
+today. `classify_documents` does not do this. So a migration should expect the
+new pipeline to find MORE documents than the old one, and the difference needs
+looking at rather than being assumed correct in either direction.
+
+### 5. Approve the forms
+
+`sbp.circulars`, `simah.rules`, `tadawul.rules` and both `moh.rules_*` are
+`approved=false`. The API runs them anyway because a preview is exactly when you
+want to look at an unapproved form — but nothing should be promoted from one.
+
+### 6. Point the scheduler at it
+
+`apis/pipeline_api.py` schedules `REGULATOR_PIPELINES[...]`. Nothing schedules
+the new orchestrator, so today every run of it is manual.
+
+### The order I would go in
+
+1. promote `--dry-run` against MSSQL for one regulator — the coverage answer
+2. one regulator fully across (SAMA is the safest: its crawler is unchanged, only
+   the orchestrator around it moves)
+3. CBB onto `run_for_regulator`, deleting the second door
+4. the rest, then the scheduler
 
 ---
 

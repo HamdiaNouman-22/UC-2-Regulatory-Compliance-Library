@@ -236,6 +236,50 @@ def trigger(form: str,
     return report
 
 
+@app.post("/approve/{run_id}", tags=["approve"])
+def approve(run_id: str, dry_run: bool = True, confirm: bool = False):
+    """Put an approved run's workbook into MSSQL.
+
+    The second half of the workflow: a run writes a workbook and touches no
+    database, you read it, and this puts exactly those rows in.
+
+    - **dry_run** — default TRUE. Reports what would be inserted and opens no
+      connection. Look at this before anything else.
+    - **confirm** — must ALSO be true to write. Two flags rather than one
+      because this is the only call in the app that can reach production, and
+      a mistyped url should not be able to.
+
+    Already-present documents are skipped on the identity the orchestrator
+    classifies with, so promoting the same workbook twice inserts nothing the
+    second time. That makes it safe to retry after a partial failure.
+    """
+    r = _runs.get(run_id)
+    if not r or not r.get("excel"):
+        raise HTTPException(404, "no such run, or it produced no workbook")
+    xlsx = Path(r["excel"])
+    if not xlsx.exists():
+        raise HTTPException(404, f"workbook is gone: {xlsx}")
+
+    from dynamic_crawler.formfill.promote import promote, _build_repo
+
+    write = bool(confirm) and not dry_run
+    if not write:
+        report = promote(xlsx, None, dry_run=True)
+        report["note"] = ("DRY RUN — nothing was written. Re-send with "
+                          "dry_run=false&confirm=true to insert.")
+        return report
+
+    logger.warning("PROMOTING %s TO MSSQL", xlsx)
+    try:
+        repo = _build_repo()
+    except Exception as e:
+        raise HTTPException(500, f"could not connect to MSSQL: {e}")
+    report = promote(xlsx, repo, dry_run=False)
+    report["note"] = "written to MSSQL"
+    _runs[run_id]["promoted"] = report
+    return report
+
+
 @app.post("/trigger/source/{regulator}", tags=["run"])
 def trigger_source(regulator: str,
                    limit: Optional[int] = 5,
