@@ -35,6 +35,16 @@
 regulator: SIMAH
 owner: ai.team
 
+# Read by build_regulator_crawler, which refuses rather than composing an empty
+# crawl. Delete this key to enable, once both gates at the top of this file are
+# met — an empty `sources:` list on its own cannot say any of this.
+# Plain ASCII on purpose: this string is raised and logged, and a console on
+# cp1252 has killed a run over a non-ASCII character before.
+disabled: >-
+  simah.com is Cloudflare-blocked (1020-class) and the form has never been
+  approved against a real capture. Review 2026-09-04; nothing unblocks itself
+  on a date.
+
 sources: []
 
 # - name: "Rules and Regulations"

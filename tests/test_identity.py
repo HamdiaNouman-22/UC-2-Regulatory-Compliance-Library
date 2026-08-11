@@ -62,7 +62,7 @@ for _name in _PREFIXES:
             sys.modules[_name] = _m
 
 from crawler.generic_crawler_wrapper import (                        # noqa: E402
-    CompositeCrawler, _source_options)
+    CompositeCrawler, _source_options, build_regulator_crawler)
 from dynamic_crawler.formfill.orch import NewOrchestrator            # noqa: E402
 
 
@@ -436,6 +436,59 @@ def test_a_single_source_run_records_one_row_only():
 def test_history_key_stays_within_the_column():
     o = orch(FakeRepo())
     assert len(o._history_key("x" * 400)) == 200
+
+
+# --------------------------------------------------------------------------- #
+#  a regulator that is off on purpose                                          #
+# --------------------------------------------------------------------------- #
+
+SOURCES_DIR = Path(__file__).resolve().parents[1] / "config" / "sources"
+
+
+def _shipped_configs():
+    import yaml
+    return {f: yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            for f in sorted(SOURCES_DIR.glob("*.yml"))}
+
+
+def test_a_disabled_regulator_refuses_and_says_why():
+    with pytest.raises(ValueError) as e:
+        build_regulator_crawler({"regulator": "SIMAH", "sources": [],
+                                 "disabled": "blocked until September"})
+    assert "blocked until September" in str(e.value)
+
+
+def test_disabled_wins_over_a_source_list_someone_left_behind():
+    """Otherwise re-enabling is one uncommented block away from a live crawl of
+    a host we may not touch."""
+    with pytest.raises(ValueError) as e:
+        build_regulator_crawler({
+            "regulator": "SIMAH", "disabled": "blocked",
+            "sources": [{"name": "x", "mode": "custom",
+                         "crawler_class": "crawler.nope.Nope"}]})
+    assert "disabled on purpose" in str(e.value)
+
+
+def test_an_empty_list_is_refused_and_points_at_the_key():
+    """An empty list cannot be told from an unfinished file, so the message has
+    to name the way to say 'off on purpose'."""
+    with pytest.raises(ValueError) as e:
+        build_regulator_crawler({"regulator": "TEST", "sources": []})
+    assert "disabled:" in str(e.value)
+
+
+def test_every_shipped_config_lists_sources_or_says_why_not():
+    """The invariant: nothing in config/sources/ parses to nothing in silence."""
+    for path, cfg in _shipped_configs().items():
+        assert cfg.get("sources") or cfg.get("disabled"), (
+            f"{path.name} has neither sources nor a `disabled:` reason")
+
+
+def test_simah_is_the_disabled_one_and_keeps_its_review_date():
+    cfg = _shipped_configs()[SOURCES_DIR / "simah.yml"]
+    assert cfg.get("sources") == []
+    assert "2026-09-04" in cfg["disabled"], (
+        "the review date is the only thing that gets this file looked at again")
 
 
 if __name__ == "__main__":

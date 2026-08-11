@@ -487,9 +487,16 @@ def build_regulator_crawler(config: dict):
     regulator = config.get("regulator")
     if not regulator:
         raise ValueError("config has no 'regulator'")
+    # A regulator that is off on purpose says so. An empty list cannot be told
+    # from an unfinished file, and it reads as working wherever configs are
+    # listed rather than run.
+    off = config.get("disabled")
+    if off:
+        raise ValueError(f"{regulator}: disabled on purpose. {off}")
     sources = config.get("sources") or []
     if not sources:
-        raise ValueError(f"{regulator}: config lists no sources")
+        raise ValueError(f"{regulator}: config lists no sources. If that is "
+                         f"deliberate, say so in `disabled:`")
 
     built, options = [], []
     for src in sources:

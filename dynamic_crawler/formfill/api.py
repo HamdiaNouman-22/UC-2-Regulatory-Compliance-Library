@@ -104,13 +104,18 @@ def _sources() -> Dict[str, dict]:
                                    "error": f"unreadable: {e}"}
             continue
         srcs = cfg.get("sources") or []
-        out[cfg.get("regulator", f.stem.upper())] = {
+        entry = {
             "path": str(f.relative_to(REPO_ROOT)),
             "owner": cfg.get("owner"),
             "n_sources": len(srcs),
             "sources": [{"name": s.get("name"), "mode": s.get("mode", "generic"),
                          "seed_url": s.get("seed_url")} for s in srcs],
         }
+        # Say why a regulator is off. Without this the listing shows a zero next
+        # to the working configs, which reads as one that finds nothing.
+        if cfg.get("disabled"):
+            entry["disabled"] = str(cfg["disabled"])
+        out[cfg.get("regulator", f.stem.upper())] = entry
     return out
 
 
