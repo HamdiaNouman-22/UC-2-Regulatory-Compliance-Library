@@ -50,6 +50,7 @@ from typing import Dict, List, Optional
 
 from orchestrator.orchestrator import MIN_TEXT_LEN, Orchestrator
 
+from dynamic_crawler import crawl_absence
 from dynamic_crawler.changesignal import clean_fields, fields_of, identity_key
 from dynamic_crawler.formfill.textinput import decide_for_document
 
@@ -66,6 +67,7 @@ class NewOrchestrator(Orchestrator):
                  version_key: Optional[str] = "reference_no",
                  analyse: bool = False,
                  limit: Optional[int] = None,
+                 change_root=None,
                  **kw):
         # The analyzers are constructed by the parent's __init__ and are only
         # touched when analyse=True, so an analysis-free run costs nothing.
@@ -75,6 +77,9 @@ class NewOrchestrator(Orchestrator):
         self.version_key = version_key or None
         self.analyse = analyse
         self.limit = limit
+        # Where the per-document miss streaks live. Its own directory, not one a
+        # change sweep also writes — see crawl_absence.CRAWL_ROOT.
+        self.change_root = change_root
         self.report: Dict = {}
         # The folder walk is a get-then-insert across several repo calls, so a
         # lock inside the repo cannot make it safe. Two documents sharing a
@@ -483,8 +488,14 @@ class NewOrchestrator(Orchestrator):
 
     def check_run_trustworthy(self, docs: List) -> tuple:
         """(trustworthy, [reasons]). Only a trustworthy run may act on
-        'disappeared'; an untrustworthy one still ingests new and modified."""
+        'disappeared'; an untrustworthy one still ingests new and modified.
+
+        The count problems are also kept on their own: the withdrawal decision
+        allows one document where this flat 5% allows none, and it needs to tell
+        the two kinds of problem apart without parsing the message.
+        """
         problems = []
+        self._count_problems: List[str] = []
         crawl = getattr(self.crawler, "last_result", None) or {}
         run = crawl.get("run") or {}
 
@@ -500,6 +511,7 @@ class NewOrchestrator(Orchestrator):
             problem = self._count_problem("total", last["row_count"], len(docs))
             if problem:
                 problems.append(problem)
+                self._count_problems.append(problem)
 
         # Per source as well as in total. A composite logs a failed source and
         # carries on, so a small source dying entirely hides inside a 5% tolerance
@@ -513,7 +525,40 @@ class NewOrchestrator(Orchestrator):
                     problem = self._count_problem(label, prev, len(group))
                     if problem:
                         problems.append(problem)
+                        self._count_problems.append(problem)
         return (not problems), problems
+
+    def _withdrawals(self, buckets: Dict[str, List], groups: Dict[str, List],
+                     problems: List[str]) -> dict:
+        """The withdrawal decision for the documents this run did not see.
+
+        Call this BEFORE `record_run`, or the count baseline is this run's own row
+        and the check can never fire. The count problems are dropped from the
+        reasons because this layer re-asks that question with its own allowance.
+        """
+        store = crawl_absence.store_for(self.source_name,
+                                        root=getattr(self, "change_root", None))
+        crawl_absence.note_seen(store, buckets["new"] + buckets["modified"]
+                                + buckets["unchanged"] + buckets["not_reread"],
+                                self.identity)
+        skipped = len(buckets["not_reread"]) + self._not_reread_stored
+        block = crawl_absence.judge(
+            store, buckets["disappeared"],
+            identity=self.identity,
+            labels=list(groups),
+            counts={label: len(group) for label, group in groups.items()},
+            priors={label: (self._last_good(self._history_key(label)) or {})
+                    .get("row_count") for label in groups},
+            problems=[p for p in problems
+                      if p not in getattr(self, "_count_problems", [])],
+            systems=crawl_absence.source_system_labels(self.crawler),
+            # A run that walked past pages without opening them is not entitled
+            # to call anything absent, the same rule as a sweep's --no-documents.
+            targeted=(f"this run walked past {skipped} page(s) or row(s) without "
+                      f"opening them; only a full crawl may propose"
+                      if skipped else ""))
+        store.save()
+        return block
 
     # ------------------------------------------------------------------ #
     #  THE TEXT DECISION                                                  #
@@ -722,6 +767,11 @@ class NewOrchestrator(Orchestrator):
                 "run_trustworthy": trustworthy,
                 "gate_problems": problems,
                 "disappeared_actioned": False,
+                # Nothing is absent on this path, but the streak memory is still
+                # written: a run that recorded nothing leaves every document
+                # unattributed, and an unattributed absence can never be judged.
+                "withdrawals": self._withdrawals(
+                    buckets, self._docs_by_source(docs), problems),
                 "version_tokens_stored": tokens_stored,
                 "tables": self.repo.counts() if hasattr(self.repo, "counts") else {},
             }
@@ -747,6 +797,7 @@ class NewOrchestrator(Orchestrator):
 
         verdict = "PASS" if trustworthy else "QUARANTINED"
         groups = self._docs_by_source(docs)
+        withdrawals = self._withdrawals(buckets, groups, problems)
         if hasattr(self.repo, "record_run"):
             self.repo.record_run(self.source_name, len(docs), inv, verdict,
                                  "; ".join(problems)[:400])
@@ -770,10 +821,10 @@ class NewOrchestrator(Orchestrator):
             "inventory_hash": inv,
             "run_trustworthy": trustworthy,
             "gate_problems": problems,
-            # Nothing on this path withdraws anything. This read True on any
-            # trustworthy run with a non-empty bucket, reporting an action that
-            # no code performs.
+            # Still False, and it is not the same claim as `withdrawals`: that
+            # block is a proposal for a person, and no code here writes a status.
             "disappeared_actioned": False,
+            "withdrawals": withdrawals,
             "version_tokens_stored": tokens_stored,
             "tables": self.repo.counts() if hasattr(self.repo, "counts") else {},
         }
@@ -790,11 +841,9 @@ class NewOrchestrator(Orchestrator):
         if buckets["disappeared"]:
             self.report["note"] = (
                 f"{len(buckets['disappeared'])} document(s) were not seen this run. "
-                + ("The run is not trustworthy, so they are not even candidates."
-                   if not trustworthy else
-                   "The run is trustworthy, so they are candidates — but a "
-                   "withdrawal needs two consecutive runs and then a person, and "
-                   "nothing on this path performs one."))
+                + f"See `withdrawals`: {withdrawals['counts']}. Nothing is "
+                  f"withdrawn by this run — the block is a proposal, and the "
+                  f"status write needs a senior developer's approval.")
         return self.report
 
 
