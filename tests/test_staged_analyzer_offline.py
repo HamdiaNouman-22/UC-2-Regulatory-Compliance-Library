@@ -40,6 +40,19 @@ work = json.loads(json.dumps(s1))
 a._dedupe_exact(work)
 check("keeps 3 obligations total", sum(len(r["obligations"]) for r in work["requirements"]) == 3)
 
+# Regression: dedup must be per requirement group, not global. Two topic groups
+# can legitimately contain the same sentence; a global `seen` deleted the second
+# group entirely.
+_cross = {"requirements": [
+    {"requirement_id": "REQ-001", "requirement_title": "Reporting", "obligations": [
+        {"obligation_id": "A", "obligation_text": "The bank must notify SAMA.", "source_reference": "x"}]},
+    {"requirement_id": "REQ-002", "requirement_title": "Licensing", "obligations": [
+        {"obligation_id": "B", "obligation_text": "The bank must notify SAMA.", "source_reference": "y"}]},
+]}
+_n = a._dedupe_exact(_cross)
+check("same text in DIFFERENT groups is kept", _n == 0 and len(_cross["requirements"]) == 2,
+      f"removed={_n} groups={[r['requirement_id'] for r in _cross['requirements']]}")
+
 # ---------------------------------------------------------------- stage 2
 print("\n[2] stage2 delta rehydration")
 index = a._index_stage1(work)
@@ -136,6 +149,15 @@ check("stage3_json keeps obligations shape",
       "obligations" in json.loads(rows2[1]["stage3_json"]))
 check("stage2_json keeps normalized_obligations shape",
       "normalized_obligations" in json.loads(rows2[0]["stage2_json"]))
+
+# Regression: when stage 2 returns nothing (parse failure) the row must fall back
+# to stage 1's obligations. `.get(key, default)` did not, because the key exists
+# with an empty list -- so rows were written with zero obligations, silently.
+_empty_s2 = a._rehydrate_stage2(work, a._index_stage1(work), [])
+_fallback_rows = a._assemble_rows(work, _empty_s2, {"requirements": []}, "", 1)
+_n_obs = len(json.loads(_fallback_rows[0]["analysis_json"])["obligations"])
+check("stage2 parse failure falls back to stage 1 obligations", _n_obs > 0,
+      f"got {_n_obs} obligations, expected stage 1's")
 
 # markdown escaping
 print("\n[6] misc")

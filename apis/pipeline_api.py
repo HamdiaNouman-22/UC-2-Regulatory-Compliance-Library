@@ -21,6 +21,7 @@ from processor.metadata_extractor import extract_metadata_from_text, extract_doc
 import docx as python_docx
 from fastapi.responses import JSONResponse, Response
 from processor.staged_LLM_Analyzer import StagedLLMAnalyzer
+from processor import analysis_cache
 from processor.requirement_matcher import RequirementMatcher
 from processor.LlmAnalyzer import LLMAnalyzer
 from orchestrator.orchestrator import Orchestrator
@@ -2589,17 +2590,22 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
     For CBB, fetches content from regulation_versions.
     Use ?force=true to re-run and overwrite existing analysis.
     """
-    if not force:
-        existing_rows = repo.get_compliance_analysis(regulation_id)
-        if existing_rows:
-            return {
-                "success": True,
-                "regulation_id": regulation_id,
-                "skipped": True,
-                "reason": "Analysis already exists. Use ?force=true to re-run.",
-                "existing_count": len(existing_rows),
-                "next_step": f"POST /trigger/requirement-matching/{regulation_id}",
-            }
+    # The content-hash decision needs clean_text, which is computed further
+    # down, so the real skip happens after normalization. This early return only
+    # covers the case where text extraction itself fails -- previously the
+    # endpoint never reached extraction when an analysis already existed, and
+    # that must keep working.
+    existing_rows = [] if force else repo.get_compliance_analysis(regulation_id)
+
+    def _skip_response(reason: str, rows):
+        return {
+            "success": True,
+            "regulation_id": regulation_id,
+            "skipped": True,
+            "reason": reason,
+            "existing_count": len(rows),
+            "next_step": f"POST /trigger/requirement-matching/{regulation_id}",
+        }
 
     regulation = repo.get_regulation_by_id(regulation_id)
     if not regulation:
@@ -2661,6 +2667,30 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
     raw_date = regulation.get("published_date")
     published_date = str(raw_date)[:10] if raw_date else ""
 
+    # ── Content-hash cache ────────────────────────────────────────────
+    # Re-analysing identical text produces a DIFFERENT answer (measured: 27/38/44
+    # obligations across three runs of one document -- docs/determinism.md), so
+    # not re-running is the only way to keep a stored analysis stable. This also
+    # makes the skip text-aware: a document that HAS changed now re-analyses
+    # automatically, instead of keeping a stale result indefinitely.
+    should_run, input_hash, cache_reason = analysis_cache.decide(
+        extra_meta=extra_meta,
+        clean_text=clean_text,
+        model=staged_analyzer.model,
+        has_existing_rows=bool(existing_rows),
+        force=force,
+    )
+    if not should_run:
+        if not analysis_cache.stored_hash(extra_meta):
+            # First sighting of a pre-cache analysis: record the hash now so the
+            # next call can make a real comparison.
+            analysis_cache.record(repo, regulation_id, extra_meta,
+                                  input_hash, staged_analyzer.model)
+        logger.info(f"Staged analysis SKIPPED for {regulation_id}: {cache_reason}")
+        return _skip_response(cache_reason, existing_rows)
+
+    logger.info(f"Staged analysis RUNNING for {regulation_id}: {cache_reason}")
+
     rows = staged_analyzer.analyze(
         text=clean_text,
         regulation_id=regulation_id,
@@ -2692,6 +2722,10 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
 
     # Store with version_id (populated for CBB, None for others)
     repo.store_analysis(rows, version_id=version_id)
+    # Only after a successful store -- a hash recorded against an analysis that
+    # failed to persist would suppress the retry.
+    analysis_cache.record(repo, regulation_id, extra_meta, input_hash,
+                          staged_analyzer.model)
     _invalidate_ar_cache(regulation_id)
 
     exec_counts, crit_counts = {}, {}

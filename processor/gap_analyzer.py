@@ -5,7 +5,19 @@ import re
 import requests
 from typing import List, Dict, Any
 
+from processor.llm_client import LLMClient
+
 logger = logging.getLogger(__name__)
+
+# This class audits coverage, it does not draft. Its own system prompt, kept
+# from the original implementation rather than inheriting the client default.
+_GAP_SYSTEM_PROMPT = (
+    "You are a senior compliance auditor with deep expertise in "
+    "regulatory analysis. You assess documents against regulatory "
+    "obligations with precision and without hallucination."
+)
+
+_NO_RESPONSE = '{"results": []}'
 
 
 class GapAnalyzer:
@@ -17,14 +29,24 @@ class GapAnalyzer:
     def __init__(
         self,
         model: str = "deepseek/deepseek-v3.2",
-        max_chunk_size: int = 12000
+        max_chunk_size: int = 12000,
+        deterministic: bool = False
     ):
         self.model = model
         self.max_chunk_size = max_chunk_size
-        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
-
-        if not self.openrouter_api_key:
-            raise ValueError("Missing OPENROUTER_API_KEY environment variable")
+        # Shared client for retry, truncation detection and the process-wide
+        # concurrency bound this class previously had none of.
+        #
+        # deterministic=False preserves the original request shape. Enabling it
+        # measurably changes verdicts, so that is a separate decision -- see
+        # docs/determinism.md.
+        self.client = LLMClient(
+            model=model,
+            system_prompt=_GAP_SYSTEM_PROMPT,
+            deterministic=deterministic,
+            title="Regulatory Compliance Copilot",
+            timeout=120,
+        )
 
     # ------------------------------------------------------------------ #
     #  PUBLIC ENTRY POINT                                                  #
@@ -280,40 +302,19 @@ Output format:
         return chunks
 
     def _call_llm(self, prompt: str) -> str:
-        url = "https://openrouter.ai/api/v1/chat/completions"
-
-        headers = {
-            "Authorization": f"Bearer {self.openrouter_api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "Regulatory Compliance Copilot"
-        }
-
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a senior compliance auditor with deep expertise in "
-                        "regulatory analysis. You assess documents against regulatory "
-                        "obligations with precision and without hallucination."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "temperature": 0.1,
-            "max_tokens": 8000
-        }
-
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            return content.strip() if content else '{"results": []}'
-        except requests.exceptions.RequestException as e:
-            logger.error(f"OpenRouter API error: {e}")
-            raise
+        # expect_json=False matches the original call, which never set
+        # response_format; _parse_gap_response already handles fenced replies.
+        #
+        # Note: a reply that hits max_tokens now raises TruncatedResponseError
+        # instead of being parsed as if complete. In the chunked path each chunk
+        # is already wrapped in try/except and will be skipped with a log line;
+        # in the single-pass path it propagates, which is the intended change --
+        # a loud failure beats a half-parsed coverage verdict.
+        content = self.client.complete(
+            prompt,
+            temperature=0.1,
+            max_tokens=8000,
+            expect_json=False,
+            label="gap",
+        )
+        return content or _NO_RESPONSE
