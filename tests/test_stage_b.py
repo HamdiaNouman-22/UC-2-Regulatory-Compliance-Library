@@ -541,8 +541,8 @@ def test_a_broken_sibling_does_not_quarantine_a_healthy_sources_row():
     report = _composite_run(repo, {"circulars": 100, "rulebook": 20})
 
     gate = report["gate_by_source"]
-    assert gate["rulebook"]["verdict"] == "QUARANTINED"
-    assert gate["circulars"]["verdict"] == "PASS", (
+    assert gate["rulebook"]["baseline_verdict"] == "QUARANTINED"
+    assert gate["circulars"]["baseline_verdict"] == "PASS", (
         "the run's verdict was stamped on a source that was inside tolerance")
     assert report["run_trustworthy"] is False, "the run itself is still distrusted"
 
@@ -557,7 +557,7 @@ def test_a_healthy_sources_baseline_survives_a_broken_sibling():
     assert repo.last_good_run("src/circulars")["row_count"] == 112, (
         "the baseline must track the source, not the last run the whole "
         "regulator passed")
-    assert [r["gate_by_source"]["circulars"]["verdict"] for r in reports] == \
+    assert [r["gate_by_source"]["circulars"]["baseline_verdict"] for r in reports] == \
         ["PASS"] * 4, "circulars grew 4% a run and never left tolerance"
 
 
@@ -565,7 +565,7 @@ def test_a_run_wide_problem_quarantines_every_sources_row():
     repo = HistoryRepo()
     report = _composite_run(repo, {"circulars": 100, "rulebook": 60}, blocked=3)
     for label, entry in report["gate_by_source"].items():
-        assert entry["verdict"] == "QUARANTINED", label
+        assert entry["baseline_verdict"] == "QUARANTINED", label
         assert "bot-protection" in entry["problems"][0]
 
 
@@ -587,7 +587,7 @@ def test_a_total_count_problem_spares_a_source_that_passed_its_own_check():
     assert any(p.startswith("total:") for p in report["gate_problems"]), \
         "160 -> 180 must move the total out of tolerance"
     for label in ("circulars", "rulebook"):
-        assert report["gate_by_source"][label]["verdict"] == "PASS", (
+        assert report["gate_by_source"][label]["baseline_verdict"] == "PASS", (
             f"{label} was checked against its own baseline and passed")
 
 
@@ -600,12 +600,12 @@ def test_a_total_count_problem_still_blocks_a_source_with_no_baseline():
                                    "sandbox": 20})
 
     entry = report["gate_by_source"]["sandbox"]
-    assert entry["verdict"] == "QUARANTINED"
+    assert entry["baseline_verdict"] == "QUARANTINED"
     assert entry["problems"][0].startswith("total:")
     assert repo.last_good_run("src/sandbox") is None
 
 
-def test_the_aggregate_row_keeps_the_runs_own_verdict():
+def test_the_aggregate_row_is_recorded_for_the_whole_run():
     repo = HistoryRepo()
     _composite_run(repo, {"circulars": 100, "rulebook": 60})
     _composite_run(repo, {"circulars": 100, "rulebook": 20})
@@ -617,6 +617,82 @@ def test_a_single_source_run_still_writes_exactly_one_row():
     report = _composite_run(repo, {"circulars": 100})
     assert len(repo.named("record_run")) == 1
     assert "gate_by_source" not in report
+
+
+# --------------------------------------------------------------------------- #
+#  which counts may become the baseline                                         #
+# --------------------------------------------------------------------------- #
+
+def test_a_count_that_grew_becomes_the_baseline_though_the_run_is_distrusted():
+    """Two questions, one column. A run distrusted for a rise is still the best
+    record of what the source now holds, and refusing to remember it is what
+    made the gate re-detect the same step change for ever."""
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100})
+    report = _composite_run(repo, {"circulars": 130})
+
+    assert report["run_trustworthy"] is False, "a 30% jump is still a surprise"
+    assert report["baseline_verdict"] == "PASS"
+    assert repo.last_good_run("src")["row_count"] == 130
+
+
+def test_a_step_change_stops_being_reported_on_the_next_run():
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100})
+    _composite_run(repo, {"circulars": 130})
+    report = _composite_run(repo, {"circulars": 130})
+    assert report["gate_problems"] == [], "the gate must not re-detect it for ever"
+    assert report["run_trustworthy"] is True
+
+
+def test_a_count_that_fell_never_becomes_the_baseline_however_often_it_repeats():
+    """SDAIA returned 415/363/439 on three runs of identical code. A low prior
+    is what opens the withdrawal gate, so a drop waits for a person."""
+    repo = HistoryRepo()
+    _composite_run(repo, {"laws": 415})
+    for _ in range(3):
+        report = _composite_run(repo, {"laws": 363})
+        assert report["baseline_verdict"] == "QUARANTINED"
+    assert repo.last_good_run("src")["row_count"] == 415
+
+
+def test_a_rise_does_not_excuse_a_problem_of_another_kind():
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100})
+    report = _composite_run(repo, {"circulars": 130}, blocked=2)
+    assert report["baseline_verdict"] == "QUARANTINED"
+    assert repo.last_good_run("src")["row_count"] == 100
+
+
+def test_a_new_source_takes_a_baseline_only_from_a_run_with_nothing_against_it():
+    """The rise argument is about raising a prior, not inventing a first one:
+    the run that carries the total problem must not set sandbox's baseline."""
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100, "rulebook": 60})
+    first = _composite_run(repo, {"circulars": 100, "rulebook": 60,
+                                  "sandbox": 20})
+    assert first["gate_by_source"]["sandbox"]["baseline_verdict"] == "QUARANTINED"
+    assert repo.last_good_run("src/sandbox") is None
+
+    second = _composite_run(repo, {"circulars": 100, "rulebook": 60,
+                                   "sandbox": 20})
+    assert second["gate_problems"] == [], "the total settled at 180"
+    assert second["gate_by_source"]["sandbox"]["baseline_verdict"] == "PASS"
+    assert repo.last_good_run("src/sandbox")["row_count"] == 20
+
+
+def test_one_source_growing_does_not_hand_a_sibling_a_baseline_it_lost():
+    """The rise is rulebook's; circulars fell at the same time and must not be
+    carried through on rulebook's problem."""
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100, "rulebook": 60})
+    report = _composite_run(repo, {"circulars": 80, "rulebook": 130})
+
+    gate = report["gate_by_source"]
+    assert gate["rulebook"]["baseline_verdict"] == "PASS"
+    assert gate["circulars"]["baseline_verdict"] == "QUARANTINED"
+    assert repo.last_good_run("src/circulars")["row_count"] == 100
+    assert repo.last_good_run("src/rulebook")["row_count"] == 130
 
 
 # --------------------------------------------------------------------------- #

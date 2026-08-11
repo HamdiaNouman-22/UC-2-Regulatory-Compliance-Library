@@ -486,6 +486,36 @@ class NewOrchestrator(Orchestrator):
         return (f"{label}: count moved {prev} -> {now} ({spread:.1f}%), over the "
                 f"{COUNT_TOLERANCE_PCT}% tolerance")
 
+    def _note_count(self, label: str, prev: int, now: int,
+                    problems: List[str]) -> None:
+        """Record a count problem and which way it moved. `_baseline_verdict`
+        needs the direction — a count that rose is still a safe baseline."""
+        problem = self._count_problem(label, prev, now)
+        if not problem:
+            return
+        problems.append(problem)
+        self._count_problems.append(problem)
+        if now > prev:
+            self._grew.append(problem)
+
+    def _baseline_verdict(self, problems: List[str], label: str = "") -> str:
+        """Whether this count may be the baseline the next run compares against.
+
+        Not the same question as whether the run may act on absences, and
+        sharing one answer deadlocked the gate: a run distrusted for a count is
+        also a run that refuses to remember what it saw, so the same problem is
+        re-detected for ever. A prior that is too high only makes the withdrawal
+        gate stricter; a prior that is too low is what opens it. So a count that
+        rose is remembered and a count that fell waits for a person.
+        """
+        grew = getattr(self, "_grew", [])
+        if label in getattr(self, "_unchecked", []) and problems:
+            # The rise argument is about RAISING a prior, never about inventing
+            # a first one: this source's count has not been checked against
+            # anything, so a run carrying any problem must not set its baseline.
+            return "QUARANTINED"
+        return "PASS" if all(p in grew for p in problems) else "QUARANTINED"
+
     def check_run_trustworthy(self, docs: List) -> tuple:
         """(trustworthy, [reasons]). Only a trustworthy run may act on
         'disappeared'; an untrustworthy one still ingests new and modified.
@@ -496,7 +526,9 @@ class NewOrchestrator(Orchestrator):
         """
         problems = []
         self._count_problems: List[str] = []
-        # Sources this run had no baseline for, so their count was never checked.
+        # The count problems that were a RISE, and the sources this run had no
+        # baseline for, so their count was never checked.
+        self._grew: List[str] = []
         self._unchecked: List[str] = []
         crawl = getattr(self.crawler, "last_result", None) or {}
         run = crawl.get("run") or {}
@@ -510,10 +542,7 @@ class NewOrchestrator(Orchestrator):
 
         last = self._last_good(self.source_name)
         if last and last.get("row_count"):
-            problem = self._count_problem("total", last["row_count"], len(docs))
-            if problem:
-                problems.append(problem)
-                self._count_problems.append(problem)
+            self._note_count("total", last["row_count"], len(docs), problems)
 
         # Per source as well as in total. A composite logs a failed source and
         # carries on, so a small source dying entirely hides inside a 5% tolerance
@@ -526,10 +555,7 @@ class NewOrchestrator(Orchestrator):
                 if not prev:
                     self._unchecked.append(label)
                     continue
-                problem = self._count_problem(label, prev, len(group))
-                if problem:
-                    problems.append(problem)
-                    self._count_problems.append(problem)
+                self._note_count(label, prev, len(group), problems)
         return (not problems), problems
 
     def _source_gate(self, groups: Dict[str, List],
@@ -818,7 +844,7 @@ class NewOrchestrator(Orchestrator):
         if todo:
             self._process_docs(todo, regulator_name)
 
-        verdict = "PASS" if trustworthy else "QUARANTINED"
+        verdict = self._baseline_verdict(problems)
         groups = self._docs_by_source(docs)
         withdrawals = self._withdrawals(buckets, groups, problems)
         gate = self._source_gate(groups, problems)
@@ -835,7 +861,7 @@ class NewOrchestrator(Orchestrator):
                     own = gate[label]
                     self.repo.record_run(self._history_key(label), len(group),
                                          self._inventory_hash(group),
-                                         "PASS" if not own else "QUARANTINED",
+                                         self._baseline_verdict(own, label),
                                          "; ".join(own)[:400])
 
         self.report = {
@@ -848,6 +874,10 @@ class NewOrchestrator(Orchestrator):
             "analyse": self.analyse,
             "inventory_hash": inv,
             "run_trustworthy": trustworthy,
+            # Whether this count becomes the baseline, which is a different
+            # question: a run distrusted only because the inventory GREW is
+            # still the best record of what the source now holds.
+            "baseline_verdict": verdict,
             "gate_problems": problems,
             # Still False, and it is not the same claim as `withdrawals`: that
             # block is a proposal for a person, and no code here writes a status.
@@ -859,7 +889,7 @@ class NewOrchestrator(Orchestrator):
         if len(groups) > 1:
             self.report["by_source"] = {k: len(v) for k, v in groups.items()}
             self.report["gate_by_source"] = {
-                label: {"verdict": "PASS" if not own else "QUARANTINED",
+                label: {"baseline_verdict": self._baseline_verdict(own, label),
                         "problems": own}
                 for label, own in gate.items()}
         if buckets["not_reread"] or self._not_reread_stored:

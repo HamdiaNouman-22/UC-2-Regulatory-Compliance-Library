@@ -258,6 +258,25 @@ the cheapest possible early exit and it will be the common case.
   source with no history must not have its first baseline set by a short run.
   The run's own verdict is unchanged, and `gate_by_source` in the report says
   which source was stopped by what.
+- **The recorded verdict answers "may this count be the baseline?", which is not
+  "may this run act on absences?".** Sharing one answer deadlocked the gate: a run
+  distrusted for a count was also a run that refused to remember what it saw, so
+  the same step change was re-detected for ever and no source that grew ever got
+  a new baseline. **A count that ROSE is remembered; a count that FELL is not.** A
+  prior that is too high only makes the withdrawal gate stricter, while a prior
+  that is too low is what opens it on the documents a truncated crawl lost. The
+  report carries both answers — `run_trustworthy` and `baseline_verdict` — and a
+  rise does not excuse a problem of any other kind. A source with no baseline at
+  all takes its first one only from a run with nothing against it: raising a
+  prior is not the same as inventing one.
+
+**What this leaves, and it must be built with the withdrawal write:** a count that
+FELL for a real reason still waits for a person, by design — and confirming those
+withdrawals is not enough on its own. `mark_regulation_withdrawn` removes the rows
+from the library, but the crawl's count stays below a baseline nobody lowered, so
+the gate goes on quarantining the source for the shrink it just approved. **Whatever
+wires up the status write has to bring the baseline down in the same step.** Nothing
+does today, because nothing withdraws.
 - **The identity keys are `field=value` pairs, not bare values**, because one run
   can carry two sources keyed on different fields entirely.
 - **`source` is `NVARCHAR(200)` and the writer logs its own failures**, so an
