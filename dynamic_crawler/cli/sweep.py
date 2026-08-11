@@ -5,13 +5,16 @@ regulator, and the only thing written anywhere is the sweep's own state file und
 output/change_state/ — which is what the NEXT sweep compares against. Nothing
 here touches a regulations row.
 
-Two signals, one entry point, because both answer the same question and keep
+Three signals, one entry point, because they answer the same question and keep
 their memory in the same place:
 
     stored-inventory  re-read the version token of every url we already store.
                       Detect only — it cannot see a document it never stored.
     gosi              one JSON request per seed page, which returns the WHOLE
                       page, so this one can also report a document as absent.
+    snapshot-articles one hash per article of a page already saved on disk.
+                      No request at all, which is what makes it usable against
+                      a host we are blocked from.
 
 Usage:
     python -m dynamic_crawler.cli.sweep --regulator SDAIA \\
@@ -21,6 +24,9 @@ Usage:
         --source "Laws and Regulations" --with-db --limit 5 --dry-run
 
     python -m dynamic_crawler.cli.sweep --signal gosi --source SocialInsurance
+
+    python -m dynamic_crawler.cli.sweep --signal snapshot-articles \\
+        --regulator SIMAH --source simah.rules
 
 A first sweep of a source stores a baseline and reports every document as new.
 That is not a change report; the second sweep is.
@@ -38,6 +44,7 @@ from dynamic_crawler.gosi_signal import SEEDS, GosiJsonSweep
 from dynamic_crawler.inventory_sweep import (StoredInventorySweep,
                                              WorkbookInventory, load_config,
                                              settings_for, skip_hosts)
+from dynamic_crawler.snapshot_articles import SnapshotArticleSweep
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +97,18 @@ def sweep(regulator: str, source_system: str, *, repo=None, workbook=None,
     return _run(signal, f"{regulator}/{source_system}", state_root, dry_run)
 
 
+def snapshot_sweep(form: str, *, regulator: str = "SIMAH", state_root=None,
+                   snapshot_dir=None, allow_stale: bool = False,
+                   dry_run: bool = False) -> dict:
+    """Hash each article of a page already saved on disk. No request is made."""
+    from dynamic_crawler.formfill.snapshot import SnapshotStore
+
+    store = SnapshotStore(form, directory=snapshot_dir)
+    signal = SnapshotArticleSweep(form, store=store, page=form,
+                                  allow_stale=allow_stale)
+    return _run(signal, f"{regulator}/{form}", state_root, dry_run)
+
+
 def gosi_sweep(seed: str, *, regulator: str = "GOSI", config_path=None,
                state_root=None, workers=None, probe_documents: bool = True,
                dry_run: bool = False) -> dict:
@@ -127,9 +146,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Ask a regulator which version it holds of what we store")
     ap.add_argument("--signal", default="stored-inventory",
-                    choices=("stored-inventory", "gosi"),
+                    choices=("stored-inventory", "gosi", "snapshot-articles"),
                     help="stored-inventory: probe every url we already store. "
-                         "gosi: one JSON request per seed page")
+                         "gosi: one JSON request per seed page. "
+                         "snapshot-articles: a saved page, no request at all")
     ap.add_argument("--regulator", default="GOSI",
                     help="as stored in the regulations row, e.g. SDAIA. "
                          "Required for --signal stored-inventory")
@@ -143,6 +163,11 @@ def main() -> int:
     ap.add_argument("--no-documents", action="store_true",
                     help="gosi: read the page only. It then reports no absence "
                          "at all, because the documents it skipped would be it")
+    ap.add_argument("--allow-stale", action="store_true",
+                    help="snapshot-articles: sweep a snapshot past its grace "
+                         "period anyway. It reports what the page said when it "
+                         "was captured, not what it says now")
+    ap.add_argument("--snapshot-dir", help="default: output/snapshots")
     ap.add_argument("--limit", type=int, help="probe only the first N documents")
     ap.add_argument("--workers", type=int, help="override the configured probes "
                                                 "in flight")
@@ -156,6 +181,13 @@ def main() -> int:
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+
+    if a.signal == "snapshot-articles":
+        report = snapshot_sweep(a.source_system, regulator=a.regulator,
+                                state_root=a.state_root,
+                                snapshot_dir=a.snapshot_dir,
+                                allow_stale=a.allow_stale, dry_run=a.dry_run)
+        return _emit(report, a.json_out)
 
     if a.signal == "gosi":
         if a.source_system not in SEEDS:
