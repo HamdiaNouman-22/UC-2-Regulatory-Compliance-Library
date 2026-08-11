@@ -1,0 +1,190 @@
+<mxfile host="app.diagrams.net" agent="claude-code">
+  <diagram name="Regulation Flow" id="reg-flow-2">
+    <mxGraphModel dx="4064" dy="1547" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1700" background="light-dark(#FFFFFF,#FFFFFF)" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="bg_white" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=none;movable=0;resizable=0;editable=0;connectable=0;locked=1;" value="" vertex="1">
+          <mxGeometry height="1700" width="1800" x="-180" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="boundary_my" parent="1" style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#000000;dashed=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=12;fontColor=#000000;" value="UC2 SYSTEM" vertex="1">
+          <mxGeometry height="1435" width="1297" x="-140" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="boundary_ext_sites" parent="1" style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#000000;dashed=1;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontSize=11;fontColor=#000000;" value="REGULATOR SOURCE SITES · EXTERNAL" vertex="1">
+          <mxGeometry height="190" width="360" x="1200" y="280" as="geometry" />
+        </mxCell>
+        <mxCell id="boundary_sysx2" parent="1" style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#000000;dashed=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontSize=12;fontColor=#000000;" value="SYSX2 · EXTERNAL" vertex="1">
+          <mxGeometry height="120" width="400" x="740" y="1540" as="geometry" />
+        </mxCell>
+        <mxCell id="trigger_user" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=13;verticalAlign=middle;align=center;" value="&lt;b&gt;User clicks “Trigger Button”&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;POST /trigger/{regulator}-&amp;gt; Runs for only only selected regulator&lt;br&gt;POST /trigger/full-&amp;gt; Runs for all regulators&lt;/font&gt;" vertex="1">
+          <mxGeometry height="82" width="330" x="110" y="90" as="geometry" />
+        </mxCell>
+        <mxCell id="trigger_sched" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=13;verticalAlign=middle;align=center;" value="&lt;b&gt;Scheduled trigger&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;APScheduler background job fires at scheduled_time&lt;br&gt;configured via POST /schedule · POST /update-schedule&lt;br&gt;&lt;i&gt;the firing itself is internal, not an HTTP call&lt;/i&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="82" width="330" x="470" y="90" as="geometry" />
+        </mxCell>
+        <mxCell id="orchestrator" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=13;verticalAlign=middle;align=center;" value="&lt;b&gt;Orchestrator&lt;/b&gt;" vertex="1">
+          <mxGeometry height="92" width="420" x="245" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="crawler_generic" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=13;verticalAlign=middle;align=center;" value="&lt;b&gt;Crawler&lt;/b&gt;" vertex="1">
+          <mxGeometry height="92" width="330" x="290" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_sites" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=12.5;verticalAlign=top;align=center;spacingTop=44;" value="&lt;b&gt;Regulator source websites&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;SAMA · SBP · SECP · CBB · SIMAH · MISA · CMA …&lt;br&gt;&lt;i&gt;not our infrastructure — a real HTTP round trip&lt;/i&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="150" width="320" x="1220" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="classify_version" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=11.5;verticalAlign=middle;align=center;" value="&lt;b&gt;Classify &amp;amp; version&lt;/b&gt; (per document, by content_hash + identity)&lt;br&gt;&lt;font style=&quot;font-size:9.5px&quot;&gt;&lt;b&gt;new&lt;/b&gt; → insert regulations + first regulation_versions row (active)&lt;br&gt;&lt;b&gt;modified&lt;/b&gt; → mark old regulation_versions inactive, archive present compliance_analysis, insert new active version, re-run analysis&lt;br&gt;&lt;br&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="100" width="420" x="246" y="480" as="geometry" />
+        </mxCell>
+        <mxCell id="db1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=12;fontStyle=1;verticalAlign=top;align=center;spacingTop=10;" value="UC2 DB — core intake tables" vertex="1">
+          <mxGeometry height="142.5" width="880" x="26" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="db1_regulations" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=11;" value="regulations" vertex="1">
+          <mxGeometry height="30" width="270" x="39" y="652" as="geometry" />
+        </mxCell>
+        <mxCell id="db1_regversions" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=11;" value="regulation_versions" vertex="1">
+          <mxGeometry height="30" width="270" x="321" y="652" as="geometry" />
+        </mxCell>
+        <mxCell id="db1_category" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=11;" value="compliancecategory -&amp;gt; Contains regulations folder paths" vertex="1">
+          <mxGeometry height="30" width="270" x="603" y="652" as="geometry" />
+        </mxCell>
+        <mxCell id="db1_pipestatus" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=11;" value="&lt;b&gt;pipeline_status&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8.5px;font-family:Arial&quot;&gt;one row per run — RUNNING → DONE / FAILED, written by the API around each /trigger/* call&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="270" x="39" y="694" as="geometry" />
+        </mxCell>
+        <mxCell id="db1_pipeschedule" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=11;" value="&lt;b&gt;pipeline_schedule&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8.5px;font-family:Arial&quot;&gt;set by POST /schedule — read by the scheduler; PENDING → RUNNING → DONE&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="270" x="321" y="694" as="geometry" />
+        </mxCell>
+        <mxCell id="db1_logs" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=11;" value="&lt;b&gt;processinglogs&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8.5px;font-family:Arial&quot;&gt;per-step audit trail: insert, llm_analysis, requirement_matching, cbb_version …&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="270" x="603" y="694" as="geometry" />
+        </mxCell>
+        <mxCell id="db2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=12;fontStyle=1;verticalAlign=top;align=center;spacingTop=10;" value="My System DB — analysis &amp; matching tables (written by processing APIs)" vertex="1">
+          <mxGeometry height="182" width="1040" x="-54" y="807" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_compliance_analysis" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="compliance_analysis" vertex="1">
+          <mxGeometry height="30" width="240" x="-40" y="848" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_analysis_versions" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="compliance_analysis_versions" vertex="1">
+          <mxGeometry height="30" width="240" x="230" y="848" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_compliance_req" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="compliance_req" vertex="1">
+          <mxGeometry height="30" width="240" x="505" y="848" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_sama_mapping" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="sama_req_mapping" vertex="1">
+          <mxGeometry height="30" width="222" x="760" y="848" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_demo_control" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="demo_control" vertex="1">
+          <mxGeometry height="30" width="240" x="-40" y="890" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_demo_kpi" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="demo_kpi" vertex="1">
+          <mxGeometry height="30" width="240" x="230" y="890" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_req_control_link" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="demo_req_control_link" vertex="1">
+          <mxGeometry height="30" width="240" x="505" y="890" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_req_kpi_link" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="demo_req_kpi_link" vertex="1">
+          <mxGeometry height="30" width="222" x="760" y="900" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_gap_analysis" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="gap_analysis" vertex="1">
+          <mxGeometry height="30" width="240" x="-40" y="939" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_gap_session" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="gap_analysis_session" vertex="1">
+          <mxGeometry height="30" width="240" x="230" y="939" as="geometry" />
+        </mxCell>
+        <mxCell id="db2_ar_cache" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontFamily=Courier New;fontSize=10.5;" value="ar_response_cache" vertex="1">
+          <mxGeometry height="30" width="240" x="505" y="939" as="geometry" />
+        </mxCell>
+        <mxCell id="review" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=12.5;verticalAlign=middle;align=center;" value="&lt;b&gt;Human in the loop&lt;br&gt;&lt;font style=&quot;font-size: 11px;&quot;&gt;reviews regulations and reqs extracted against it&lt;/font&gt;&lt;/b&gt;" vertex="1">
+          <mxGeometry height="60" width="340" x="296" y="1060" as="geometry" />
+        </mxCell>
+        <mxCell id="decision" parent="1" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=13;fontStyle=1;" value="Accept&#xa;regulation?" vertex="1">
+          <mxGeometry height="130" width="190" x="371" y="1200" as="geometry" />
+        </mxCell>
+        <mxCell id="version_reentry_note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;dashed=1;fontColor=#000000;fontSize=11.5;verticalAlign=middle;align=center;" value="&lt;b&gt;Updates via versioning re-use this same path&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9.5px&quot;&gt;A &lt;i&gt;modified&lt;/i&gt; regulation goes back through Classify &amp;amp; version → UC2 → SysX2 DB — so accept/reject IS how an update would reach SysX2.&lt;br&gt;&lt;br&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="100" width="440" x="-140" y="1180" as="geometry" />
+        </mxCell>
+        <mxCell id="reject_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=12.5;verticalAlign=middle;align=center;" value="&lt;b&gt;Stays in UC2 DB&lt;/b&gt;&lt;br&gt;regulations.status = &#39;rejected&#39;" vertex="1">
+          <mxGeometry height="82" width="380" x="276" y="1390" as="geometry" />
+        </mxCell>
+        <mxCell id="accepted_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=12.5;verticalAlign=middle;align=center;" value="&lt;b&gt;Accepted — stays in UC2 DB&lt;/b&gt;&lt;br&gt;regulations.status = &#39;accepted&#39;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;row is kept here AND handed to the sync step below — not moved, copied&lt;/font&gt;" vertex="1">
+          <mxGeometry height="82" width="380" x="750" y="1236" as="geometry" />
+        </mxCell>
+        <mxCell id="sync_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;dashed=1;fontColor=#000000;fontSize=12.5;verticalAlign=middle;align=center;" value="&lt;b&gt;Sync / export step — PROPOSED&lt;/b&gt;&lt;br&gt;pushes a copy of the accepted regulation + analysis&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;POST /sync/regulation/{id} → SysX2&lt;br&gt;— not implemented yet&lt;/font&gt;" vertex="1">
+          <mxGeometry height="82" width="380" x="750" y="1368" as="geometry" />
+        </mxCell>
+        <mxCell id="sysx2_db" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;fontColor=#000000;fontSize=13;fontStyle=1;verticalAlign=middle;align=center;" value="&lt;b&gt;SysX2 DB&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;receives a copy&lt;/font&gt;" vertex="1">
+          <mxGeometry height="72" width="360" x="760" y="1580" as="geometry" />
+        </mxCell>
+        <mxCell id="e_user_orch" edge="1" parent="1" source="trigger_user" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;endArrow=block;" target="orchestrator">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_sched_orch" edge="1" parent="1" source="trigger_sched" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;endArrow=block;" target="orchestrator">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_orch_generic" edge="1" parent="1" source="orchestrator" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=10;endArrow=block;" target="crawler_generic" value="calls self.crawler.fetch_documents()">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_generic_out" edge="1" parent="1" source="crawler_generic" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=9.5;endArrow=block;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" target="ext_sites" value="HTTP GET — crawl page / listing  (OUT)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="920.05" y="367.57" />
+              <mxPoint x="920.05" y="360.05" />
+              <mxPoint x="1220.05" y="360.05" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_generic_in" edge="1" parent="1" source="ext_sites" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=9.5;endArrow=block;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.55;entryDx=0;entryDy=0;" target="crawler_generic" value="HTML + PDF links  (IN)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_generic_classify" edge="1" parent="1" source="crawler_generic" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=10;endArrow=block;" target="classify_version" value="returns List[RegulatoryDocument] to Orchestrator">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_classify_db1" edge="1" parent="1" source="classify_version" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=10;endArrow=block;" target="db1" value="writes: _insert_regulation() / insert_regulation_version()">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_db1_db2" edge="1" parent="1" source="db1" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=9.5;endArrow=block;align=left;" target="db2" value="POST /trigger/staged-analysis/{id} — 4-stage LLM extracts obligations&#xa;POST /trigger/requirement-matching/{id} — compares them to compliance_req / demo_control / demo_kpi&#xa;match_status: fully_matched / partially_matched / new — &quot;new&quot; inserts a suggested requirement+control+KPI row">
+          <mxGeometry relative="1" x="0.028" y="24" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_db2_review" edge="1" parent="1" source="db2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=10;endArrow=block;" target="review" value="GET /regulation/{id}&#xa;GET /compliance-analysis/{id}">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_review_decision" edge="1" parent="1" source="review" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;endArrow=block;" target="decision">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_decision_reject" edge="1" parent="1" source="decision" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=10;endArrow=block;" target="reject_box" value="reject — POST /update-status/regulations&#xa;{status:&quot;rejected&quot;}">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_decision_accept" edge="1" parent="1" source="decision" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=10;endArrow=block;" target="accepted_box" value="accept — POST /update-status/regulations&#xa;{status:&quot;accepted&quot;}">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_accepted_sync" edge="1" parent="1" source="accepted_box" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=10;endArrow=block;" target="sync_box" value="also handed to sync step">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_sync_sysx2" edge="1" parent="1" source="sync_box" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=10;endArrow=block;dashed=1;" target="sysx2_db" value="PROPOSED: POST /sync/regulation/{id} → SysX2 (crosses boundary)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="g65JpstldPp43u4abM1E-4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;dashed=1;fontColor=#000000;fontSize=12.5;verticalAlign=middle;align=center;" value="&lt;b&gt;SysX2 — baseline catalog&lt;/b&gt;  (PROPOSED, inbound)&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;compliance_req, demo_control, demo_kpi + their linkage tables are local to UC2 DB right now but they need to come from sysX2 DB moving forward&lt;br&gt;(same external system as SysX2 DB further below)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="182" width="330" x="1240" y="738" as="geometry" />
+        </mxCell>
+        <mxCell id="g65JpstldPp43u4abM1E-8" edge="1" parent="1" source="g65JpstldPp43u4abM1E-4" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#000000;fontColor=#000000;fontSize=9.5;endArrow=block;dashed=1;exitX=-0.009;exitY=0.673;exitDx=0;exitDy=0;exitPerimeter=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="db2" value="">
+          <mxGeometry relative="1" x="-0.7092" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="1237.05" y="863.74" />
+              <mxPoint x="1180" y="863.74" />
+              <mxPoint x="1180" y="794.16" />
+              <mxPoint x="1040" y="794.16" />
+              <mxPoint x="1040" y="897.95" />
+            </Array>
+            <mxPoint x="1187.6599999999999" y="863.7440000000001" as="sourcePoint" />
+            <mxPoint x="1079.999999999999" y="794.2136842105263" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="g65JpstldPp43u4abM1E-10" connectable="0" parent="g65JpstldPp43u4abM1E-8" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontColor=#000000;" value="&lt;span style=&quot;font-size: 10px; color: #000000;&quot;&gt;seeds: compliance_req · demo_control · demo_kpi ·&lt;/span&gt;&lt;div&gt;&lt;span style=&quot;font-size: 10px; color: #000000;&quot;&gt;&amp;nbsp;demo_req_control_link · demo_req_kpi_link&lt;/span&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry relative="1" x="-0.6423" y="3" as="geometry">
+            <mxPoint x="-57" y="-4" as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

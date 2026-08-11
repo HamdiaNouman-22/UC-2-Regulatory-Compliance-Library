@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 1320" font-family="Arial, Helvetica, sans-serif">
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <marker id="arrowAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5fd6"/>
+    </marker>
+  </defs>
+
+  <!-- white background -->
+  <rect x="0" y="0" width="1300" height="1320" fill="#ffffff"/>
+
+  <!-- My System boundary -->
+  <rect x="70" y="55" width="1130" height="1123" rx="14" fill="none" stroke="#999999" stroke-dasharray="6 5"/>
+  <text x="94" y="82" font-size="12" letter-spacing="1" fill="#000000">MY SYSTEM · THIS REPO</text>
+
+  <!-- Main system boundary -->
+  <rect x="838" y="1188" width="410" height="112" rx="14" fill="none" stroke="#2f5fd6" stroke-dasharray="6 5"/>
+  <text x="862" y="1215" font-size="12" letter-spacing="1" fill="#000000">MAIN SYSTEM · EXTERNAL</text>
+
+  <!-- ===== Row 1: two crawler strategies + manual ===== -->
+  <rect x="110" y="100" width="330" height="92" rx="10" fill="#f2f2f2" stroke="#333333"/>
+  <text x="275" y="126" text-anchor="middle" font-size="13" font-weight="700" fill="#000000">Generic crawler</text>
+  <text x="275" y="146" text-anchor="middle" font-size="10.5" fill="#000000">generic_crawler/crawler.py</text>
+  <text x="275" y="160" text-anchor="middle" font-size="10.5" fill="#000000">config/sources/*.yml — no per-site code</text>
+  <text x="275" y="176" text-anchor="middle" font-size="9.5" fill="#333333">wrapped by generic_crawler_wrapper.py::GenericSiteCrawler</text>
+
+  <rect x="470" y="100" width="330" height="92" rx="10" fill="#f2f2f2" stroke="#333333"/>
+  <text x="635" y="126" text-anchor="middle" font-size="13" font-weight="700" fill="#000000">Formfill crawler</text>
+  <text x="635" y="146" text-anchor="middle" font-size="10.5" fill="#000000">dynamic_crawler/formfill/runner.py</text>
+  <text x="635" y="160" text-anchor="middle" font-size="10.5" fill="#000000">Phase 1 listing (form fields) + Phase 2 detail</text>
+  <text x="635" y="176" text-anchor="middle" font-size="9.5" fill="#333333">same output schema as generic crawler</text>
+
+  <rect x="830" y="100" width="330" height="92" rx="10" fill="#f2f2f2" stroke="#333333"/>
+  <text x="995" y="126" text-anchor="middle" font-size="13" font-weight="700" fill="#000000">Manual entry</text>
+  <text x="995" y="146" text-anchor="middle" font-size="10.5" fill="#000000">Analyst adds / uploads a regulation directly</text>
+  <text x="995" y="164" text-anchor="middle" font-size="9.5" fill="#333333">skips the crawler + orchestrator entirely</text>
+
+  <!-- crawler strategies converge on the shared interface -->
+  <line x1="275" y1="192" x2="360" y2="232" stroke="#000000" marker-end="url(#arrow)"/>
+  <line x1="635" y1="192" x2="550" y2="232" stroke="#000000" marker-end="url(#arrow)"/>
+  <text x="455" y="212" text-anchor="middle" font-size="10" fill="#000000">fetch_documents() → List[RegulatoryDocument]</text>
+
+  <!-- manual entry arrow, bypasses orchestrator, goes to intake box directly -->
+  <line x1="995" y1="192" x2="900" y2="400" stroke="#000000" marker-end="url(#arrow)"/>
+  <text x="905" y="270" font-size="10.5" fill="#000000">POST /regulations/add</text>
+  <text x="905" y="284" font-size="10.5" fill="#000000">POST /upload-regulation</text>
+
+  <!-- ===== Orchestrator box ===== -->
+  <rect x="245" y="232" width="420" height="92" rx="10" fill="#ffffff" stroke="#333333"/>
+  <text x="455" y="256" text-anchor="middle" font-size="13" font-weight="700" fill="#000000">Orchestrator (or NewOrchestrator)</text>
+  <text x="455" y="274" text-anchor="middle" font-size="10.5" fill="#000000">orchestrator/orchestrator.py</text>
+  <text x="455" y="288" text-anchor="middle" font-size="10.5" fill="#000000">or subclass dynamic_crawler/formfill/orch.py::NewOrchestrator</text>
+  <text x="455" y="304" text-anchor="middle" font-size="9.5" fill="#333333">both write through the same MSSQLRepository — same tables either way</text>
+
+  <text x="455" y="222" text-anchor="middle" font-size="9.5" fill="#333333">triggered by POST /trigger/{regulator} · /trigger/full · /trigger/CBB/monitoring · scheduled job</text>
+
+  <!-- orchestrator writes into intake tables -->
+  <line x1="455" y1="324" x2="455" y2="400" stroke="#000000" marker-end="url(#arrow)"/>
+  <text x="30" y="366" font-size="10.5" fill="#000000">_insert_regulation()</text>
+  <text x="30" y="380" font-size="10.5" fill="#000000">insert_regulation_version()</text>
+
+  <!-- ===== DB box 1: core intake ===== -->
+  <rect x="210" y="400" width="880" height="150" rx="10" fill="#f6f7f9" stroke="#333333"/>
+  <text x="650" y="424" text-anchor="middle" font-size="12" font-weight="700" fill="#000000">My System DB — core intake tables</text>
+
+  <g font-size="11" font-family="Consolas, monospace">
+    <rect x="234" y="438" width="270" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="369" y="457" text-anchor="middle" fill="#000000">regulations</text>
+
+    <rect x="516" y="438" width="270" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="651" y="457" text-anchor="middle" fill="#000000">regulation_versions</text>
+
+    <rect x="798" y="438" width="270" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="933" y="457" text-anchor="middle" fill="#000000">compliancecategory</text>
+
+    <rect x="234" y="480" width="270" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="369" y="499" text-anchor="middle" fill="#000000">pipeline_status</text>
+
+    <rect x="516" y="480" width="270" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="651" y="499" text-anchor="middle" fill="#000000">pipeline_schedule</text>
+
+    <rect x="798" y="480" width="270" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="933" y="499" text-anchor="middle" fill="#000000">processinglogs</text>
+  </g>
+
+  <!-- arrow to DB box 2 -->
+  <line x1="650" y1="550" x2="650" y2="598" stroke="#000000" marker-end="url(#arrow)"/>
+  <text x="656" y="568" font-size="10.5" fill="#000000">POST /trigger/staged-analysis/{id}</text>
+  <text x="656" y="582" font-size="10.5" fill="#000000">POST /trigger/requirement-matching/{id}</text>
+
+  <!-- ===== DB box 2: derived analysis ===== -->
+  <rect x="130" y="600" width="1040" height="182" rx="10" fill="#f6f7f9" stroke="#333333"/>
+  <text x="650" y="624" text-anchor="middle" font-size="12" font-weight="700" fill="#000000">My System DB — analysis &amp; matching tables (written by processing APIs)</text>
+
+  <g font-size="10.5" font-family="Consolas, monospace">
+    <rect x="154" y="638" width="240" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="274" y="657" text-anchor="middle" fill="#000000">compliance_analysis</text>
+
+    <rect x="410" y="638" width="240" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="530" y="657" text-anchor="middle" fill="#000000">compliance_analysis_versions</text>
+
+    <rect x="666" y="638" width="240" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="786" y="657" text-anchor="middle" fill="#000000">compliance_req</text>
+
+    <rect x="922" y="638" width="222" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="1033" y="657" text-anchor="middle" fill="#000000">sama_req_mapping</text>
+
+    <rect x="154" y="680" width="240" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="274" y="699" text-anchor="middle" fill="#000000">demo_control</text>
+
+    <rect x="410" y="680" width="240" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="530" y="699" text-anchor="middle" fill="#000000">demo_kpi</text>
+
+    <rect x="666" y="680" width="240" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="786" y="699" text-anchor="middle" fill="#000000">demo_req_control_link</text>
+
+    <rect x="922" y="680" width="222" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="1033" y="699" text-anchor="middle" fill="#000000">demo_req_kpi_link</text>
+
+    <rect x="154" y="722" width="240" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="274" y="741" text-anchor="middle" fill="#000000">gap_analysis</text>
+
+    <rect x="410" y="722" width="240" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="530" y="741" text-anchor="middle" fill="#000000">gap_analysis_session</text>
+
+    <rect x="666" y="722" width="240" height="30" rx="5" fill="#ffffff" stroke="#999999"/>
+    <text x="786" y="741" text-anchor="middle" fill="#000000">ar_response_cache</text>
+  </g>
+
+  <!-- arrow to review -->
+  <line x1="650" y1="782" x2="650" y2="826" stroke="#000000" marker-end="url(#arrow)"/>
+  <text x="656" y="800" font-size="10.5" fill="#000000">GET /regulation/{id}</text>
+  <text x="656" y="814" font-size="10.5" fill="#000000">GET /compliance-analysis/{id}</text>
+
+  <!-- Review box -->
+  <rect x="480" y="828" width="340" height="60" rx="10" fill="#f2f2f2" stroke="#333333"/>
+  <text x="650" y="852" text-anchor="middle" font-size="12.5" font-weight="700" fill="#000000">Reviewer opens regulation</text>
+  <text x="650" y="870" text-anchor="middle" font-size="11" fill="#000000">reads extracted requirements + gap analysis</text>
+
+  <!-- arrow to decision -->
+  <line x1="650" y1="888" x2="650" y2="922" stroke="#000000" marker-end="url(#arrow)"/>
+
+  <!-- Decision diamond -->
+  <polygon points="650,920 745,985 650,1050 555,985" fill="#ffffff" stroke="#333333"/>
+  <text x="650" y="980" text-anchor="middle" font-size="13" font-weight="700" fill="#000000">Accept</text>
+  <text x="650" y="997" text-anchor="middle" font-size="13" font-weight="700" fill="#000000">regulation?</text>
+
+  <!-- Reject branch -->
+  <line x1="580" y1="1015" x2="400" y2="1072" stroke="#9a5b12" marker-end="url(#arrow)"/>
+  <text x="410" y="1035" font-size="11" fill="#000000">reject</text>
+  <text x="290" y="1052" font-size="10" fill="#000000">POST /update-status/regulations</text>
+  <text x="330" y="1065" font-size="10" fill="#000000">{status:"rejected"}</text>
+
+  <rect x="150" y="1076" width="380" height="82" rx="10" fill="#faf1e3" stroke="#9a5b12"/>
+  <text x="340" y="1102" text-anchor="middle" font-size="12.5" font-weight="700" fill="#000000">Stays in My System DB</text>
+  <text x="340" y="1120" text-anchor="middle" font-size="11" fill="#000000">regulations.status = 'rejected'</text>
+  <text x="340" y="1136" text-anchor="middle" font-size="10.5" fill="#000000">still editable / resubmittable — never leaves this DB</text>
+
+  <!-- Accept branch -->
+  <line x1="720" y1="1015" x2="920" y2="1072" stroke="#2f5fd6" marker-end="url(#arrowAccent)"/>
+  <text x="850" y="1035" font-size="11" fill="#000000">accept</text>
+  <text x="800" y="1052" font-size="10" fill="#000000">POST /update-status/regulations</text>
+  <text x="820" y="1065" font-size="10" fill="#000000">{status:"accepted"}</text>
+
+  <rect x="750" y="1076" width="380" height="82" rx="10" stroke-dasharray="5 4" fill="#e8eefc" stroke="#2f5fd6"/>
+  <text x="940" y="1100" text-anchor="middle" font-size="12.5" font-weight="700" fill="#000000">Sync / export step</text>
+  <text x="940" y="1118" text-anchor="middle" font-size="10.5" fill="#000000">pushes accepted regulation + analysis onward</text>
+  <text x="940" y="1134" text-anchor="middle" font-size="10" fill="#000000">no dedicated push API found in this repo — confirm</text>
+
+  <!-- arrow across boundary to Main System -->
+  <line x1="940" y1="1158" x2="1043" y2="1186" stroke="#2f5fd6" marker-end="url(#arrowAccent)"/>
+
+  <!-- Main system DB -->
+  <rect x="858" y="1206" width="370" height="72" rx="10" fill="#e8eefc" stroke="#2f5fd6"/>
+  <text x="1043" y="1236" text-anchor="middle" font-size="13" font-weight="700" fill="#000000">Main System DB</text>
+  <text x="1043" y="1254" text-anchor="middle" font-size="10.5" fill="#000000">record leaves My System permanently</text>
+
+</svg>
