@@ -137,6 +137,13 @@ puts them in a `not_reread` bucket: not compared, not written, and not counted
 absent. A row dropped from a targeted run instead of recorded is a row §4's gate
 reports as disappeared.
 
+Where a source's token moves in bulk, a second tier fetches the document's own
+text and only a moved hash makes it `modified`. A sweep that could not read that
+text reports the document `unknown` and **leaves the stored token where it was**,
+so the next sweep still sees the move and tries again. Reading `unknown` as a
+transient is wrong: it is a document whose change nobody has judged yet, and it
+stays in the shortlist until one does.
+
 ### Tree sites (SAMA sandbox, rulebooks) — no cheap listing exists
 
 A tree has no listing page to diff; you have to walk it. It is cheap anyway

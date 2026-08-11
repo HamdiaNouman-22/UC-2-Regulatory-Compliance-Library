@@ -252,6 +252,13 @@ def run_sweep(signal: ChangeSignal, store, record: bool = True) -> tuple:
             obs.confirm_hash = _confirm(signal, obs)      # the shortlist only
             confirmed += 1
             verdict, reason = verdict_for(obs, stored, confirm_required=True)
+            if verdict == UNKNOWN:
+                # The confirm did not run, so this document was never judged.
+                # Storing the token it moved TO would consume the change: the
+                # next sweep compares new against new and reads `unchanged` for
+                # good. The mirror of the store's rule that a failed probe must
+                # not erase a token — this one must not advance one.
+                obs.token = str((stored or {}).get("token") or "")
 
         buckets[verdict].append((obs, reason))
         if record:
