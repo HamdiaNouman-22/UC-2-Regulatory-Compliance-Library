@@ -232,12 +232,17 @@ def run_sweep(signal: ChangeSignal, store, record: bool = True) -> tuple:
     observations = list(signal.sweep() or [])
     buckets = {NEW: [], MODIFIED: [], UNCHANGED: [], UNKNOWN: [], MISSING: []}
     by_basis, collisions, seen, confirmed = {}, [], set(), 0
+    prior = store.last_observed(signal.name) if hasattr(store, "last_observed") else None
 
     for obs in observations:
         by_basis[obs.basis] = by_basis.get(obs.basis, 0) + 1
         clash = store.collision(obs.key, obs.fields)
         if clash:
             collisions.append(clash)      # never merge two documents' history
+            # Seen, and left alone. NOT dropped: `missing` is everything this
+            # sweep did not see, so dropping it would offer a document the sweep
+            # just read as a candidate for withdrawal.
+            seen.add(obs.key)
             continue
 
         seen.add(obs.key)
@@ -250,7 +255,7 @@ def run_sweep(signal: ChangeSignal, store, record: bool = True) -> tuple:
 
         buckets[verdict].append((obs, reason))
         if record:
-            store.record(obs, verdict)
+            store.record(obs, verdict, signal.name)
 
     absent = sorted(store.keys() - seen) if signal.covers_inventory else []
     for key in absent:
@@ -268,8 +273,13 @@ def run_sweep(signal: ChangeSignal, store, record: bool = True) -> tuple:
         "confirm_required": signal.confirm_required,
         "confirmed": confirmed,
         "collisions": collisions,
+        # What the previous sweep saw, read BEFORE this one is noted: the
+        # withdrawal gate refuses a sweep whose count collapsed.
+        "observed_last": prior,
         "state_file": str(store.path),
     }
+    if record and hasattr(store, "note_run"):
+        store.note_run(signal.name, len(observations))
     if not signal.covers_inventory:
         report["counts"].pop(MISSING)
         report["missing"] = ("not measured — this sweep reads only documents "

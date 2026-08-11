@@ -219,6 +219,49 @@ class MSSQLRepository(DocumentRepository):
         except Exception as e:
             logger.error(f"mark_regulation_deleted failed for reg {regulation_id}: {e}")
 
+    def mark_regulation_withdrawn(self, regulation_id: int, reason: str) -> None:
+        """A regulator has withdrawn this document. Nothing calls this yet.
+
+        `status = 'withdrawn'` and a marker version, never a DELETE: both repos'
+        `find_regulations_by_source` already exclude the status, so the row leaves
+        the completeness gate and every change sweep while staying readable.
+        Raises rather than logging, because a half-applied withdrawal is worse
+        than a failed one.
+        """
+        from datetime import date as _date
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT regulator FROM regulations WHERE id = ?",
+                           [regulation_id])
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"no regulation {regulation_id} to withdraw")
+            cursor.execute(
+                """
+                UPDATE regulation_versions
+                SET status = 'inactive'
+                WHERE regulation_id = ? AND status = 'active'
+                """,
+                [regulation_id])
+            cursor.execute(
+                """
+                INSERT INTO regulation_versions
+                    (regulation_id, regulator, content_html, content_text,
+                     content_hash, updated_date, change_summary, status)
+                OUTPUT INSERTED.version_id
+                VALUES (?, ?, NULL, NULL, NULL, ?, ?, 'withdrawn')
+                """,
+                [regulation_id, row[0], _date.today().isoformat(),
+                 str(reason or "")[:400]])
+            version = cursor.fetchone()
+            cursor.execute(
+                "UPDATE regulations SET status = 'withdrawn', "
+                "updated_at = SYSDATETIMEOFFSET() WHERE id = ?",
+                [regulation_id])
+            conn.commit()
+        logger.warning("regulation %s withdrawn (version %s): %s", regulation_id,
+                       int(version[0]) if version else None, reason)
+
     # ================================================================== #
     #  REGULATION INSERT / UPDATE                                          #
     # ================================================================== #

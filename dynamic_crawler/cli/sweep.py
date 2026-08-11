@@ -36,6 +36,10 @@ Usage:
 
 A first sweep of a source stores a baseline and reports every document as new.
 That is not a change report; the second sweep is.
+
+Every report carries a `withdrawals` block: which absent documents meet the
+two-consecutive-sweeps rule and which condition stopped the rest. It is a
+proposal for a person — nothing here withdraws anything.
 """
 
 import argparse
@@ -53,6 +57,7 @@ from dynamic_crawler.inventory_sweep import (StoredInventorySweep,
                                              skip_hosts)
 from dynamic_crawler.sitemap_signal import DEFAULT_CUT, SitemapLastmodSweep
 from dynamic_crawler.snapshot_articles import SnapshotArticleSweep
+from dynamic_crawler import withdrawal
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +77,23 @@ def _run(signal, source: str, state_root=None, dry_run: bool = False) -> dict:
         report["state_written"] = False
 
     # The shortlist is the product, so print it rather than only counting it.
+    def entry(o, why: str) -> dict:
+        """The `missing` bucket holds bare identity keys, not observations.
+
+        Not one getattr with a default: `getattr(str, "title")` finds the string
+        METHOD, so this raised on the first document any sweep reported absent.
+        """
+        if isinstance(o, str):
+            return {"key": o, "title": "", "why": why}
+        return {"key": o.key, "title": str(o.title or "")[:70], "why": why}
+
     verdicts = (cs.MODIFIED, cs.UNKNOWN, cs.NEW, cs.MISSING)
     report["shortlist"] = {
-        verdict: [{"key": o.key if hasattr(o, "key") else o,
-                   "title": getattr(o, "title", "")[:70],
-                   "why": why}
-                  for o, why in buckets[verdict]]
+        verdict: [entry(o, why) for o, why in buckets[verdict]]
         for verdict in verdicts if buckets.get(verdict)}
+    # Absence counted is not absence acted on. This says which absences meet the
+    # rule and which condition stopped the rest; nothing is withdrawn by it.
+    report["withdrawals"] = withdrawal.proposals(signal, store, report, buckets)
     return report
 
 

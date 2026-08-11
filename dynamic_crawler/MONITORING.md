@@ -179,6 +179,28 @@ Even when a run is trustworthy, I would not delete. Mark
 `status = 'withdrawn'` with the date, and let a person confirm. Regulators do
 withdraw documents, but rarely, and it is worth a human glance.
 
+**Built 2026-08-10 for the change sweeps only** — `dynamic_crawler/withdrawal.py`.
+Every sweep report carries a `withdrawals` block: `withdrawal-proposed` needs the
+document absent from two consecutive sweeps **spanning 20 hours**, attributed to
+the signal that is judging it; anything else is `watching` or `not-judged` and
+says which condition stopped it. Four things learned building it:
+
+- **A signal may only judge absences it recorded.** The state file is per source,
+  not per signal, so two signals can share one — and each would otherwise report
+  the other's documents as withdrawal candidates.
+- **Counting sweeps is not measuring time.** Nothing stops two runs of the CLI a
+  second apart, and a regulator halfway through republishing is not a withdrawal.
+- **The count allowance is one document OR 5%, whichever is larger.** Most sources
+  here hold 12–17 documents, where one document is 6–8%: a flat 5% blocks every
+  real single withdrawal and the whole layer never proposes anything.
+- **A signal that cannot see the whole inventory proposes nothing at all**, which
+  is what keeps the sweep over stored urls and the sitemap out of this entirely.
+
+`mark_regulation_withdrawn` exists on both repos and **is called by nothing** —
+it sets the status and inserts a marker version rather than deleting, so the row
+leaves the gate and every sweep while staying readable. The crawl path's own
+`disappeared` bucket is still reported and never actioned.
+
 ### Store three numbers per run per source
 
 That is all the history you need:
