@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import pyodbc
 import json
 import time
@@ -219,6 +219,49 @@ class MSSQLRepository(DocumentRepository):
         except Exception as e:
             logger.error(f"mark_regulation_deleted failed for reg {regulation_id}: {e}")
 
+    def mark_regulation_withdrawn(self, regulation_id: int, reason: str) -> None:
+        """A regulator has withdrawn this document. Nothing calls this yet.
+
+        `status = 'withdrawn'` and a marker version, never a DELETE: both repos'
+        `find_regulations_by_source` already exclude the status, so the row leaves
+        the completeness gate and every change sweep while staying readable.
+        Raises rather than logging, because a half-applied withdrawal is worse
+        than a failed one.
+        """
+        from datetime import date as _date
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT regulator FROM regulations WHERE id = ?",
+                           [regulation_id])
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"no regulation {regulation_id} to withdraw")
+            cursor.execute(
+                """
+                UPDATE regulation_versions
+                SET status = 'inactive'
+                WHERE regulation_id = ? AND status = 'active'
+                """,
+                [regulation_id])
+            cursor.execute(
+                """
+                INSERT INTO regulation_versions
+                    (regulation_id, regulator, content_html, content_text,
+                     content_hash, updated_date, change_summary, status)
+                OUTPUT INSERTED.version_id
+                VALUES (?, ?, NULL, NULL, NULL, ?, ?, 'withdrawn')
+                """,
+                [regulation_id, row[0], _date.today().isoformat(),
+                 str(reason or "")[:400]])
+            version = cursor.fetchone()
+            cursor.execute(
+                "UPDATE regulations SET status = 'withdrawn', "
+                "updated_at = SYSDATETIMEOFFSET() WHERE id = ?",
+                [regulation_id])
+            conn.commit()
+        logger.warning("regulation %s withdrawn (version %s): %s", regulation_id,
+                       int(version[0]) if version else None, reason)
+
     # ================================================================== #
     #  REGULATION INSERT / UPDATE                                          #
     # ================================================================== #
@@ -430,6 +473,25 @@ class MSSQLRepository(DocumentRepository):
                 parts = [s] if s else []
         return " > ".join(str(p).strip() for p in parts if str(p).strip())
 
+    @staticmethod
+    def _with_extra_meta(r: dict) -> dict:
+        """extra_meta is JSON text in the column and a dict everywhere else.
+
+        Both identity lookups omitted it, so the archive step read the old row's
+        content_text as "" and every archived version was stored empty.
+        """
+        raw = r.get("extra_meta")
+        if isinstance(raw, dict):
+            return r
+        r["extra_meta"] = {}
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                r["extra_meta"] = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                pass
+        return r
+
     def find_by_identity(self, document_url: str, doc_path) -> Optional[dict]:
         """The identity classify_documents uses: (document_url, doc_path).
 
@@ -446,17 +508,101 @@ class MSSQLRepository(DocumentRepository):
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT id, title, document_url, doc_path, content_hash, "
-                    "compliancecategory_id, category, status "
+                    "compliancecategory_id, category, status, "
+                    "CAST(extra_meta AS NVARCHAR(MAX)) as extra_meta "
                     "FROM regulations WHERE document_url = ?", (document_url,))
                 cols = [c[0] for c in cursor.description]
                 for row in cursor.fetchall():
                     r = dict(zip(cols, row))
                     if self._norm_doc_path(r.get("doc_path")) == want:
-                        return r
+                        return self._with_extra_meta(r)
             return None
         except Exception as e:
             logger.error(f"find_by_identity failed: {e}")
             return None
+
+    #: Columns a source YAML may key its identity on. Whitelisted because the
+    #: names reach a WHERE clause; values are always parameterised.
+    IDENTITY_COLUMNS = frozenset({
+        "document_url", "doc_path", "reference_no", "title", "category",
+        "source_page_url", "source_system", "regulator", "published_date",
+    })
+
+    def find_by_identity_fields(self, fields: dict) -> Optional[dict]:
+        """Identity lookup on whichever columns the source config names.
+
+        `doc_path` is JSON text written by our own code, so it is compared in
+        python after the SQL narrows on everything else — same reason
+        `find_by_identity` does.
+        """
+        fields = {k: v for k, v in (fields or {}).items() if v not in (None, "")}
+        if not fields:
+            return None
+        bad = set(fields) - self.IDENTITY_COLUMNS
+        if bad:
+            raise ValueError(
+                f"identity column(s) not allowed: {sorted(bad)}. "
+                f"Allowed: {sorted(self.IDENTITY_COLUMNS)}")
+
+        sql_fields = {k: v for k, v in fields.items() if k != "doc_path"}
+        where = " AND ".join(f"{k} = ?" for k in sql_fields) or "1 = 1"
+        want = self._norm_doc_path(fields["doc_path"]) if "doc_path" in fields else None
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, title, document_url, doc_path, content_hash, "
+                    "reference_no, compliancecategory_id, category, status, "
+                    "CAST(extra_meta AS NVARCHAR(MAX)) as extra_meta "
+                    f"FROM regulations WHERE {where}", list(sql_fields.values()))
+                cols = [c[0] for c in cursor.description]
+                for row in cursor.fetchall():
+                    r = dict(zip(cols, row))
+                    if want is None or self._norm_doc_path(r.get("doc_path")) == want:
+                        return self._with_extra_meta(r)
+            return None
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"find_by_identity_fields failed: {e}")
+            return None
+
+    def find_regulations_by_source(self, source_system: str,
+                                   regulator: Optional[str] = None) -> List[dict]:
+        """Every live regulation this source stored, for the completeness gate.
+
+        Two regulators publish under "Rules and Regulations" and two more under
+        "Laws and Regulations", so `source_system` alone can return another
+        regulator's documents — which then read as disappeared. Scope it whenever
+        the regulator is known. extra_meta carries the source's identity fields
+        and the last version token; a change sweep cannot read either without it.
+        """
+        if not source_system:
+            return []
+        where = "WHERE source_system = ? "
+        params = [source_system]
+        if regulator:
+            where += "AND regulator = ? "
+            params.append(regulator)
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, title, document_url, doc_path, content_hash, "
+                    "reference_no, regulator, source_system, category, status, "
+                    "CAST(extra_meta AS NVARCHAR(MAX)) as extra_meta "
+                    "FROM regulations "
+                    + where +
+                    "  AND (status IS NULL OR status <> 'withdrawn')",
+                    params)
+                cols = [c[0] for c in cursor.description]
+                return [self._with_extra_meta(dict(zip(cols, row)))
+                        for row in cursor.fetchall()]
+        except Exception as e:
+            # Raises rather than returning []: an empty list here reads as
+            # "nothing disappeared" and would silently disarm the gate.
+            logger.error(f"find_regulations_by_source failed: {e}")
+            raise
 
     def find_by_reference(self, reference_no: str) -> Optional[dict]:
         """The tiebreak: the same reference number at a NEW url is the same
@@ -953,37 +1099,97 @@ class MSSQLRepository(DocumentRepository):
     def store_staged_analysis(self, rows: List[dict]) -> None:
         self.store_analysis(rows, version_id=None)
 
+    # The copy half of the archive. `is_current` is written as 0 rather than
+    # copied from the source row: these rows ARE the archive, so landing them
+    # flagged current was wrong regardless of the retire step below.
+    _ARCHIVE_ANALYSIS_SQL = """
+        INSERT INTO compliance_analysis_versions
+            (regulation_id, version_id,
+             requirement_id, requirement_title,
+             execution_category, criticality, obligation_type,
+             stage1_json, stage2_json, stage3_json, stage4_md,
+             analysis_json, schema_version, status, is_current,
+             created_at)
+        SELECT
+            regulation_id, ?,
+            requirement_id, requirement_title,
+            execution_category, criticality, obligation_type,
+            stage1_json, stage2_json, stage3_json, stage4_md,
+            analysis_json, schema_version, 'inactive', 0,
+            GETDATE()
+        FROM compliance_analysis
+        WHERE regulation_id = ?
+          AND is_current = 1
+    """
+
+    # The retire half. MUST run after the copy: the SELECT above is scoped by
+    # `is_current = 1`, so retiring first would archive nothing.
+    _RETIRE_ANALYSIS_SQL = """
+        UPDATE compliance_analysis
+        SET is_current = 0,
+            status     = 'inactive'
+        WHERE regulation_id = ?
+          AND is_current = 1
+    """
+
+    def _archive_analysis_stmts(self, cursor, regulation_id: int,
+                                version_id: int) -> Tuple[int, int]:
+        """Issue both archive statements on an open cursor. Returns
+        (archived, retired).
+
+        Split out from the public method so the ORDER and SCOPE of the two
+        statements can be tested without a database — see
+        tests/test_stage_a.py. Those are the two things that were wrong.
+        """
+        cursor.execute(self._ARCHIVE_ANALYSIS_SQL, [version_id, regulation_id])
+        archived = cursor.rowcount
+        cursor.execute(self._RETIRE_ANALYSIS_SQL, [regulation_id])
+        retired = cursor.rowcount
+        return archived, retired
+
     def archive_current_analysis(self, regulation_id: int, version_id: int) -> int:
-        """
-        Archive current compliance_analysis rows for a regulation+version
-        into compliance_analysis_versions.
-        Returns count archived.
-        """
-        query = """
-            INSERT INTO compliance_analysis_versions
-                (regulation_id, version_id,
-                 requirement_id, requirement_title,
-                 execution_category, criticality, obligation_type,
-                 stage1_json, stage2_json, stage3_json, stage4_md,
-                 analysis_json, schema_version, status, is_current,
-                 created_at)
-            SELECT
-                regulation_id, ?,
-                requirement_id, requirement_title,
-                execution_category, criticality, obligation_type,
-                stage1_json, stage2_json, stage3_json, stage4_md,
-                analysis_json, schema_version, 'inactive', is_current,
-                GETDATE()
-            FROM compliance_analysis
-            WHERE regulation_id = ?
-              AND is_current = 1
+        """Move the current compliance_analysis rows into
+        compliance_analysis_versions. Returns the count archived.
+
+        THE BUG THIS FIXES. This method used to run the INSERT ... SELECT alone.
+        Copying without retiring left the old rows with `is_current = 1`, and
+        every reader of this table filters on exactly that flag
+        (`get_compliance_analysis`, and apis/pipeline_api.py). So after an
+        update a regulation returned BOTH its old and its new requirement set as
+        live, and the next update archived both again — the archive table growing
+        quadratically. `ExcelRepo.archive_current_analysis` retires correctly,
+        which is why every preview run looked clean while production doubled.
+
+        `is_current = 0` rather than DELETE. The class docstring in
+        orchestrator.py says "deleted", but since every reader already filters on
+        the flag, flipping it hides the rows exactly as a delete would and keeps
+        them recoverable if an archive turns out to have been wrong.
+
+        Both statements share ONE transaction, so a crash between them leaves
+        neither applied — the archive and the retire cannot diverge.
+
+        Safe to re-run: a second call finds no `is_current = 1` rows, archives 0
+        and retires 0. That is what makes it retryable after a partial failure.
         """
         with self._get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute(query, [version_id, regulation_id])
-            archived = cursor.rowcount
+            archived, retired = self._archive_analysis_stmts(
+                cursor, regulation_id, version_id)
             conn.commit()
-            return archived
+
+        if archived != retired:
+            # Not raised: the transaction already committed and the rows are
+            # consistent with each other. This means rowcount reporting differed
+            # from what we expect, which is worth investigating but not worth
+            # failing an ingestion run over.
+            logger.error(
+                f"archive_current_analysis count mismatch for regulation "
+                f"{regulation_id}: archived {archived}, retired {retired}")
+        else:
+            logger.info(
+                f"Archived and retired {archived} analysis rows for regulation "
+                f"{regulation_id} (version_id={version_id})")
+        return archived
 
     # ================================================================== #
     #  COMPLIANCE ANALYSIS — READ                                          #
@@ -1218,19 +1424,52 @@ class MSSQLRepository(DocumentRepository):
     #  REQUIREMENT MATCHING — STORE                                        #
     # ================================================================== #
 
+    # Clearing is scoped to (regulation_id, version_id) rather than to the
+    # regulation alone. For CBB each content version keeps its own mapping set,
+    # so clearing everything for the regulation would destroy real history. For
+    # every other regulator version_id is NULL, and those are exactly the rows
+    # that used to accumulate one full set per re-analysis.
+    _CLEAR_MAPPINGS_NULL_VERSION_SQL = (
+        "DELETE FROM sama_requirement_mapping "
+        "WHERE regulation_id = ? AND version_id IS NULL")
+    _CLEAR_MAPPINGS_SQL = (
+        "DELETE FROM sama_requirement_mapping "
+        "WHERE regulation_id = ? AND version_id = ?")
+
     def store_requirement_mappings(self, mappings: list, version_id: Optional[int] = None):
-        query = """
+        """Replace this regulation+version's mappings instead of appending.
+
+        THE BUG THIS FIXES. This was a plain INSERT loop with no cleanup, so
+        re-analysing a regulation appended a second full set of mappings. For CBB
+        `version_id` at least told the sets apart; for every other regulator it is
+        NULL, so old and new mappings were indistinguishable.
+
+        Clear and insert share one transaction: a crash cannot leave the
+        regulation with no mappings at all.
+        """
+        if not mappings:
+            return
+
+        insert_sql = """
             INSERT INTO sama_requirement_mapping (
                 regulation_id, extracted_requirement_text,
                 matched_requirement_id, match_status, match_explanation,
                 version_id
             ) VALUES (?, ?, ?, ?, ?, ?)
         """
+        reg_ids = sorted({m["regulation_id"] for m in mappings})
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
+                replaced = 0
+                for rid in reg_ids:
+                    if version_id is None:
+                        cursor.execute(self._CLEAR_MAPPINGS_NULL_VERSION_SQL, (rid,))
+                    else:
+                        cursor.execute(self._CLEAR_MAPPINGS_SQL, (rid, version_id))
+                    replaced += max(cursor.rowcount, 0)
                 for m in mappings:
-                    cursor.execute(query, (
+                    cursor.execute(insert_sql, (
                         m["regulation_id"],
                         m["extracted_requirement_text"],
                         m.get("matched_requirement_id"),
@@ -1240,7 +1479,8 @@ class MSSQLRepository(DocumentRepository):
                     ))
                 conn.commit()
                 logger.info(
-                    f"Stored {len(mappings)} requirement mappings (version_id={version_id})"
+                    f"Stored {len(mappings)} requirement mappings "
+                    f"(version_id={version_id}, replaced {replaced} prior row(s))"
                 )
         except Exception as e:
             logger.error(f"Failed to store requirement mappings: {e}")
@@ -1265,7 +1505,52 @@ class MSSQLRepository(DocumentRepository):
             logger.error(f"Failed to flag partially matched requirements: {e}")
             raise
 
+    def find_requirement_by_ref_key(self, ref_key: str) -> Optional[int]:
+        """COMPLIANCEREQUIREMENT_ID for a ref_key, or None.
+
+        Lowest id wins, so repeated calls resolve to the same row even if
+        duplicates already exist from before this check was added.
+        """
+        if not ref_key:
+            return None
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT TOP 1 COMPLIANCEREQUIREMENT_ID FROM COMPLIANCE_REQUIREMENT "
+                    "WHERE REF_KEY = ? ORDER BY COMPLIANCEREQUIREMENT_ID ASC",
+                    (ref_key,))
+                row = cursor.fetchone()
+                return int(row[0]) if row else None
+        except Exception as e:
+            logger.error(f"find_requirement_by_ref_key failed: {e}")
+            return None
+
     def insert_new_suggested_requirement(self, requirement: dict) -> int:
+        """Insert a suggested requirement, or return the id already holding this
+        ref_key.
+
+        THE BUG THIS FIXES. Nothing checked for an existing row, so every
+        re-analysis of a regulation inserted a fresh set of AUTO-… requirements
+        into COMPLIANCE_REQUIREMENT.
+
+        This is only correct because the caller's ref_key is derived from the
+        requirement TEXT (see Orchestrator._run_requirement_matching). It used to
+        be AUTO-<regulation_id>-<loop index>, and an index is not an identity: the
+        LLM can emit a different number of requirements, in a different order, on
+        the next run — so AUTO-42-0 could name different regulatory text each
+        time, and returning the existing row for it would be wrong. With a
+        content-derived key, a matching key means the same text, and reusing the
+        row is the right answer rather than a collision to work around.
+        """
+        ref_key = requirement.get("ref_key", "SAMA-AUTO")
+        existing = self.find_requirement_by_ref_key(ref_key)
+        if existing is not None:
+            logger.info(
+                f"Suggested requirement {ref_key} already exists as {existing}; "
+                f"reusing rather than inserting a duplicate")
+            return existing
+
         query = """
             INSERT INTO COMPLIANCE_REQUIREMENT (TITLE, DESCRIPTION, REF_KEY, REF_NO, IS_SUGGESTED, CREATEDON)
             OUTPUT INSERTED.COMPLIANCEREQUIREMENT_ID
@@ -1277,7 +1562,7 @@ class MSSQLRepository(DocumentRepository):
                 cursor.execute(query, (
                     requirement.get("title", "")[:500],
                     requirement.get("description", ""),
-                    requirement.get("ref_key", "SAMA-AUTO"),
+                    ref_key,
                     requirement.get("ref_no", "")
                 ))
                 new_id = cursor.fetchone()[0]
@@ -1502,7 +1787,21 @@ class MSSQLRepository(DocumentRepository):
     #  LOGGING                                                             #
     # ================================================================== #
 
-    def _log_processing(self, regulation_id, step, status, message, details=None, document_url=None):
+    def _log_processing(self, regulation_id, step, status, message, details=None,
+                        document_url=None, duration_ms=None):
+        """`duration_ms` rides inside the existing `details` JSON column.
+
+        Deliberately not a new column: this is diagnostic data, and an ALTER
+        TABLE against production to hold a timing field is not a trade worth
+        making. Query it with JSON_VALUE(details, '$.duration_ms').
+
+        Nothing in the pipeline recorded how long a step took, so "the pipeline
+        is slow" could only be guessed at. Collecting it now means the deferred
+        optimisation work starts with history instead of from zero.
+        """
+        if duration_ms is not None:
+            details = dict(details or {})
+            details["duration_ms"] = int(duration_ms)
         details_json = json.dumps(details) if details else None
         query = """
             INSERT INTO processinglogs (regulation_id, step, status, message, details)

@@ -223,6 +223,10 @@ crawl -> classify -> .xlsx  ->  [ you read it ]  ->  promote -> MSSQL
 # 1. see what WOULD go in — opens no connection, writes nothing
 curl -X POST "http://127.0.0.1:8100/approve/{run_id}"
 
+# 1b. same, but allowed to READ the database so `skipped_already_present`
+#     is a real number instead of a structural 0. Still writes nothing.
+curl -X POST "http://127.0.0.1:8100/approve/{run_id}?with_db=true"
+
 # 2. actually insert. BOTH flags are required.
 curl -X POST "http://127.0.0.1:8100/approve/{run_id}?dry_run=false&confirm=true"
 ```
@@ -231,12 +235,20 @@ or from the command line, against any workbook:
 
 ```bash
 venv/Scripts/python.exe -m dynamic_crawler.formfill.promote path/to/run.xlsx --dry-run
+venv/Scripts/python.exe -m dynamic_crawler.formfill.promote path/to/run.xlsx --dry-run --with-db
 venv/Scripts/python.exe -m dynamic_crawler.formfill.promote path/to/run.xlsx
 ```
 
 **`dry_run` defaults to true, and `confirm` must ALSO be true to write.** Two
 flags rather than one because this is the only call in the app that can reach
 production, and a mistyped URL should not be able to.
+
+**`with_db` / `--with-db` grants reads, never writes.** A dry run without it
+holds no repository object at all, so it cannot ask "is this already in the
+library?" — the check is skipped and `skipped_already_present` can only be 0.
+Every write in `promote()` is gated on `dry_run` independently, so a dry run
+holding a repository issues `SELECT`s and nothing else. Read `db_consulted` in
+the report before you trust the skip count.
 
 ### What it does
 
@@ -260,8 +272,12 @@ The report tells you which:
 
 ```json
 {"folders": 26, "inserted": 16, "skipped_already_present": 0,
+ "db_consulted": false,
  "failed": 0, "regulation_versions": 3, "compliance_analysis": 0}
 ```
+
+`"db_consulted": false` means that `0` was never measured — nobody asked the
+database. With `with_db=true` it reads `true` and the skip count is real.
 
 ---
 
@@ -295,10 +311,22 @@ Nothing yet shows that the new engines find what the old per-regulator crawlers
 already put in the database. Every measurement so far is **consistency** (same
 code, same numbers), not **correctness**.
 
-The cheapest first answer is free: run a promote `--dry-run` against MSSQL and
-read `skipped_already_present`. A high number means the new crawl is finding what
-is already there; a low one means the two disagree and you want to know why
+The cheapest first answer is free, but it needs `--with-db`:
+
+```bash
+venv/Scripts/python.exe -m dynamic_crawler.formfill.promote run.xlsx --dry-run --with-db
+```
+
+Then read `skipped_already_present`. A high number means the new crawl is finding
+what is already there; a low one means the two disagree and you want to know why
 before anything is switched over.
+
+**Without `--with-db` this measures nothing.** A plain dry run holds no
+repository, skips the already-present check entirely, and reports `0` — which
+reads as "the new crawler overlaps with the database on nothing", the exact
+opposite of what a `0` there would mean if it had been measured. Confirm
+`"db_consulted": true` in the report before drawing any conclusion. A read-only
+login is enough; every write in `promote()` is gated on `dry_run` separately.
 
 ### 2. Migrate the remaining regulators
 

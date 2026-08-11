@@ -263,6 +263,10 @@ class GenericSiteCrawler:
         # every short article on a rulebook site.
         pdf = (r.get("pdf_links") or "").split(" | ")[0].strip()
         extra_pdf = {"org_pdf_link": pdf} if pdf.startswith("http") else {}
+        # A targeted run walked past this row without opening it. Carried so the
+        # classifier can tell "not re-read" from "read and now empty"; absent on
+        # every ordinary run rather than stamped False on every document.
+        extra_skip = {"detail_skipped": True} if r.get("detail_skipped") else {}
         # The listing row is the only place the reference number and issue date
         # appear on most list sites — the detail page rarely repeats them.
         row_text = r.get("row_text") or ""
@@ -292,6 +296,7 @@ class GenericSiteCrawler:
                 "parent_page_url": r.get("parent_page_url", ""),
                 "row_text": row_text,
                 **extra_pdf,
+                **extra_skip,
             },
         )
 
@@ -373,21 +378,60 @@ class CompositeCrawler:
     crawlers and hand-written ones. Any object with fetch_documents() works.
 
     A failing source is logged and skipped; it must not take the others down.
+
+    It also stamps each document with the settings of the source that produced
+    it. This loop is the only place that knows which source that was: the
+    documents leave here as one flat list, and a custom source can write under
+    several source_systems (SAMACombinedCrawler is three crawlers).
     """
 
-    def __init__(self, crawlers: List[object]):
+    def __init__(self, crawlers: List[object], options: Optional[List[dict]] = None):
         self.crawlers = crawlers
+        # One dict per crawler — name, identity, version_key. A missing key means
+        # the regulator's default, so empty dicts are the old behaviour exactly.
+        self.options = list(options or [{} for _ in crawlers])
+
+    def _label(self, i: int) -> str:
+        return (self.options[i].get("name")
+                or getattr(self.crawlers[i], "seed_url", None)
+                or type(self.crawlers[i]).__name__)
+
+    @property
+    def source_names(self) -> List[str]:
+        """The sources this was built with, whether or not they produced anything.
+        A source that returned nothing is the case worth being able to see."""
+        return [self._label(i) for i in range(len(self.crawlers))]
+
+    @property
+    def source_systems(self) -> List[str]:
+        """Every source_system these sources write under. The completeness gate
+        needs all of them: one composite can hold several."""
+        out = []
+        for c in self.crawlers:
+            for s in (getattr(c, "source_systems", None)
+                      or [getattr(c, "source_system", None)]):
+                if s and s not in out:
+                    out.append(s)
+        return out
 
     def fetch_documents(self, limit: Optional[int] = None) -> List[RegulatoryDocument]:
         docs: List[RegulatoryDocument] = []
-        for c in self.crawlers:
-            name = getattr(c, "seed_url", None) or type(c).__name__
+        for i, c in enumerate(self.crawlers):
+            label, opts = self._label(i), self.options[i]
             try:
                 got = c.fetch_documents() or []
+                for d in got:
+                    meta = dict(getattr(d, "extra_meta", None) or {})
+                    meta["crawl_source"] = label
+                    if "identity" in opts:
+                        meta["identity_fields"] = opts["identity"]
+                    if "version_key" in opts:
+                        meta["version_key"] = opts["version_key"]
+                    d.extra_meta = meta
                 docs.extend(got)
-                logger.info("  source ok: %s -> %d documents", name, len(got))
+                logger.info("  source ok: %s -> %d documents", label, len(got))
             except Exception as e:
-                logger.error("  source FAILED: %s -> %s", name, e, exc_info=True)
+                logger.error("  source FAILED: %s -> %s", label, e, exc_info=True)
         return docs[:limit] if limit else docs
 
 
@@ -443,16 +487,44 @@ def build_regulator_crawler(config: dict):
     regulator = config.get("regulator")
     if not regulator:
         raise ValueError("config has no 'regulator'")
+    # A regulator that is off on purpose says so. An empty list cannot be told
+    # from an unfinished file, and it reads as working wherever configs are
+    # listed rather than run.
+    off = config.get("disabled")
+    if off:
+        raise ValueError(f"{regulator}: disabled on purpose. {off}")
     sources = config.get("sources") or []
     if not sources:
-        raise ValueError(f"{regulator}: config lists no sources")
+        raise ValueError(f"{regulator}: config lists no sources. If that is "
+                         f"deliberate, say so in `disabled:`")
 
-    built = []
+    built, options = [], []
     for src in sources:
         merged = dict(src)
         merged.setdefault("regulator", regulator)
         built.append(build_source(merged))
-    return CompositeCrawler(built)
+        options.append(_source_options(src, config))
+    return CompositeCrawler(built, options)
+
+
+def _source_options(src: dict, config: dict) -> dict:
+    """Per-source settings for the orchestrator, falling back to the regulator's.
+
+    What counts as "the same document" belongs to the SOURCE: one regulator can
+    hold a grid with a reference number and a link walk without one, and a single
+    identity for the whole file cannot serve both. `version_key` is looked up with
+    `in` rather than `or` because `version_key: null` disables the new-url
+    tiebreak, which is a different instruction from not mentioning it.
+    """
+    opts = {"name": src.get("name")}
+    identity = src.get("identity") or config.get("identity")
+    if identity:
+        opts["identity"] = identity
+    for level in (src, config):
+        if "version_key" in level:
+            opts["version_key"] = level["version_key"]
+            break
+    return opts
 
 
 __all__ = ["GenericSiteCrawler", "CompositeCrawler",

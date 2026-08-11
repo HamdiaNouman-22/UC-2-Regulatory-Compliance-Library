@@ -104,13 +104,18 @@ def _sources() -> Dict[str, dict]:
                                    "error": f"unreadable: {e}"}
             continue
         srcs = cfg.get("sources") or []
-        out[cfg.get("regulator", f.stem.upper())] = {
+        entry = {
             "path": str(f.relative_to(REPO_ROOT)),
             "owner": cfg.get("owner"),
             "n_sources": len(srcs),
             "sources": [{"name": s.get("name"), "mode": s.get("mode", "generic"),
                          "seed_url": s.get("seed_url")} for s in srcs],
         }
+        # Say why a regulator is off. Without this the listing shows a zero next
+        # to the working configs, which reads as one that finds nothing.
+        if cfg.get("disabled"):
+            entry["disabled"] = str(cfg["disabled"])
+        out[cfg.get("regulator", f.stem.upper())] = entry
     return out
 
 
@@ -237,7 +242,8 @@ def trigger(form: str,
 
 
 @app.post("/approve/{run_id}", tags=["approve"])
-def approve(run_id: str, dry_run: bool = True, confirm: bool = False):
+def approve(run_id: str, dry_run: bool = True, confirm: bool = False,
+            with_db: bool = False):
     """Put an approved run's workbook into MSSQL.
 
     The second half of the workflow: a run writes a workbook and touches no
@@ -248,6 +254,11 @@ def approve(run_id: str, dry_run: bool = True, confirm: bool = False):
     - **confirm** — must ALSO be true to write. Two flags rather than one
       because this is the only call in the app that can reach production, and
       a mistyped url should not be able to.
+    - **with_db** — a dry run with no connection cannot ask whether a document
+      is already in the library, so `skipped_already_present` is structurally 0
+      and `db_consulted` is false. Set this to READ (never write) during a dry
+      run and get a real coverage number. Writes stay gated on the two flags
+      above.
 
     Already-present documents are skipped on the identity the orchestrator
     classifies with, so promoting the same workbook twice inserts nothing the
@@ -264,7 +275,16 @@ def approve(run_id: str, dry_run: bool = True, confirm: bool = False):
 
     write = bool(confirm) and not dry_run
     if not write:
-        report = promote(xlsx, None, dry_run=True)
+        try:
+            repo = _build_repo() if with_db else None
+            if repo is not None:
+                # find_by_identity returns None on connection failure, which is
+                # indistinguishable from "not found". Probe with a SELECT that
+                # is allowed to raise, so a bad login is a 500 and not a 0.
+                repo.get_folder_id("__connectivity_probe__", None)
+        except Exception as e:
+            raise HTTPException(500, f"could not connect to MSSQL: {e}")
+        report = promote(xlsx, repo, dry_run=True)
         report["note"] = ("DRY RUN — nothing was written. Re-send with "
                           "dry_run=false&confirm=true to insert.")
         return report
@@ -333,6 +353,12 @@ def trigger_source(regulator: str,
             crawler=crawler, repo=repo, downloader=None,
             source_name=f"source:{reg_name}", analyse=analyse,
             limit=(limit or None),
+            # What counts as "the same document" is a property of the SOURCE, and
+            # each source in this file may set its own. These two are the
+            # regulator-wide fallback for the sources that do not; omitting
+            # identity means (document_url, doc_path).
+            identity=cfg.get("identity"),
+            version_key=cfg.get("version_key", "reference_no"),
         )
         try:
             report = orch.run_for_regulator(reg_name)

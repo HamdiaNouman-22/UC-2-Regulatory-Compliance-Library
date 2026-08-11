@@ -195,6 +195,8 @@ KNOWN_KEYS = {
     # extraction and output
     "fields", "section_path", "fetch_details", "content", "library",
     "include_page", "attachment_is_document",
+    # change detection: ask the server for each document's version token
+    "version_probe", "version_probe_workers",
     # provenance, written by the tooling rather than by hand
     "approved", "approved_at", "approved_by", "verified_at",
     "proposed_at", "proposed_by", "notes", "meta",
@@ -326,6 +328,11 @@ def validate_hints(h: dict) -> list[str]:
     # Defaults to false because that is the option that never invents documents.
     if not isinstance(h.get("attachment_is_document", False), bool):
         errs.append("attachment_is_document must be true or false")
+    if not isinstance(h.get("version_probe", False), bool):
+        errs.append("version_probe must be true or false")
+    workers = h.get("version_probe_workers")
+    if workers is not None and not (isinstance(workers, int) and workers >= 1):
+        errs.append("version_probe_workers must be a positive integer")
 
     # Clicked on every page before anything is read. For accordions, "show more"
     # buttons and tab strips, where the content exists in the DOM but collapsed —

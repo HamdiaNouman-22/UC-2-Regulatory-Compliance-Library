@@ -169,12 +169,72 @@ class ExcelRepo:
                 parts = [s] if s else []
         return " > ".join(str(p).strip() for p in parts if str(p).strip())
 
+    @staticmethod
+    def _with_extra_meta(r: Optional[dict]) -> Optional[dict]:
+        """extra_meta as a dict, however the workbook happened to store it.
+        Mirrors the MSSQL method so both repos hand back the same shape."""
+        if r is None:
+            return None
+        raw = r.get("extra_meta")
+        if isinstance(raw, dict):
+            return r
+        r["extra_meta"] = {}
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                r["extra_meta"] = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                pass
+        return r
+
     def find_by_identity(self, document_url: str, doc_path: str) -> Optional[dict]:
         """The identity lookup `classify_documents` uses: (document_url, doc_path)."""
         want = self._norm_path(doc_path)
-        return next((dict(r) for r in self.t["regulations"]
-                     if r.get("document_url") == document_url
-                     and self._norm_path(r.get("doc_path")) == want), None)
+        return self._with_extra_meta(
+            next((dict(r) for r in self.t["regulations"]
+                  if r.get("document_url") == document_url
+                  and self._norm_path(r.get("doc_path")) == want), None))
+
+    def find_by_identity_fields(self, fields: dict) -> Optional[dict]:
+        """Identity lookup on whichever columns the source config names.
+        Mirrors the MSSQL method."""
+        fields = {k: v for k, v in (fields or {}).items() if v not in (None, "")}
+        if not fields:
+            return None
+        for r in self.t["regulations"]:
+            for k, v in fields.items():
+                stored = self._norm_path(r.get(k)) if k == "doc_path" else r.get(k)
+                want = self._norm_path(v) if k == "doc_path" else v
+                if stored != want:
+                    break
+            else:
+                return self._with_extra_meta(dict(r))
+        return None
+
+    def find_regulations_by_source(self, source_system: str,
+                                   regulator: Optional[str] = None) -> list:
+        """Everything stored for this source. Mirrors the MSSQL method — same
+        regulator scoping, and extra_meta comes back parsed there too."""
+        if not source_system:
+            return []
+        return [self._with_extra_meta(dict(r)) for r in self.t["regulations"]
+                if r.get("source_system") == source_system
+                and (not regulator or r.get("regulator") == regulator)
+                and (r.get("status") or "") != "withdrawn"]
+
+    def mark_regulation_withdrawn(self, regulation_id: int, reason: str) -> None:
+        """A regulator has withdrawn this document. Nothing calls this yet.
+
+        Mirrors the MSSQL method — status, a marker version, no delete. Added on
+        both sides at once because three bugs so far have been a repo method that
+        existed on one.
+        """
+        if not self.get_regulation_by_id(regulation_id):
+            raise ValueError(f"no regulation {regulation_id} to withdraw")
+        self.mark_all_versions_inactive(regulation_id)
+        self.insert_regulation_version(regulation_id, status="withdrawn",
+                                       change_summary=str(reason or "")[:400])
+        self.update_regulation(regulation_id, status="withdrawn")
 
     def find_by_reference(self, reference_no: str) -> Optional[dict]:
         """The tiebreak: same reference number at a new URL is a new VERSION of an
@@ -300,11 +360,15 @@ class ExcelRepo:
 
     # ---------------- logging + run history ------------------------------- #
 
-    def _log_processing(self, regulation_id, step, status, message, doc_url=None, **kw):
+    def _log_processing(self, regulation_id, step, status, message, doc_url=None,
+                        duration_ms=None, **kw):
+        # duration_ms is a real column here rather than JSON: a preview workbook
+        # is read by eye, and the point of the timing is to be sortable in Excel.
         self.t["processing_log"].append({
             "log_id": self._id("processing_log"), "regulation_id": regulation_id,
             "step": step, "status": status, "message": _flat(message),
             "document_url": doc_url,
+            "duration_ms": int(duration_ms) if duration_ms is not None else None,
             "logged_at": datetime.now().isoformat(timespec="seconds"),
         })
 

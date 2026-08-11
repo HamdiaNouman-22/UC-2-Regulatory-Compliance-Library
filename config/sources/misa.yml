@@ -8,6 +8,18 @@
 #
 # Both produce List[RegulatoryDocument], so the pipeline cannot tell them apart.
 #
+# Two optional keys per source decide how change detection matches a document
+# against the one already stored. Set them on the source, not on the regulator —
+# a grid with a reference number and a link walk without one need different
+# answers. A top-level value serves as the default for sources that omit them.
+#
+#   identity: [reference_no]   what makes two documents "the same document".
+#                              Default [document_url, doc_path]. Every field
+#                              blank on a document aborts the run rather than
+#                              silently merging it with the next one.
+#   version_key: reference_no  the field that recognises the same document
+#                              republished at a NEW url. `null` switches it off.
+#
 # Run it:
 #   venv/Scripts/python.exe jobs/run_regulator.py MISA --dry-run     # nothing written
 #   venv/Scripts/python.exe jobs/run_regulator.py MISA               # full pipeline
