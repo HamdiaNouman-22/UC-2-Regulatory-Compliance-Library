@@ -495,6 +495,131 @@ def test_nothing_on_this_path_writes_a_withdrawn_status():
 
 
 # --------------------------------------------------------------------------- #
+#  the gate verdict, per source                                                 #
+# --------------------------------------------------------------------------- #
+
+class HistoryRepo(FakeRepo):
+    """FakeRepo with a working run_history: PASS-only lookup, as both repos are."""
+
+    def __init__(self, rows=None):
+        self.history = []
+        super().__init__(rows)
+
+    def record_run(self, source, row_count, inventory_hash, verdict, note=""):
+        self.calls.append(("record_run",
+                           (source, row_count, inventory_hash, verdict, note), {}))
+        self.history.append({"source": source, "row_count": row_count,
+                             "verdict": verdict, "note": note})
+
+    def last_good_run(self, source):
+        runs = [r for r in self.history
+                if r["source"] == source and r["verdict"] == "PASS"]
+        return runs[-1] if runs else None
+
+
+def _composite_run(repo, counts, *, blocked=0):
+    """One run of a composite: {source label: how many documents it returned}."""
+    docs = [Doc(document_url=f"{label}-{i}", doc_path=[], content_hash="h",
+                extra_meta={"crawl_source": label})
+            for label, n in counts.items() for i in range(n)]
+    crawler = FakeCrawler(docs, source_system="SRC")
+    crawler.source_names = list(counts)
+    if blocked:
+        crawler.last_result = {"run": {"blocked_pages": blocked}}
+    o = build(repo, crawler)
+    o._process_docs = lambda todo, name: None
+    return o.run_for_regulator("REG")
+
+
+def _rows_for(repo, source):
+    return [c[1] for c in repo.named("record_run") if c[1][0] == source]
+
+
+def test_a_broken_sibling_does_not_quarantine_a_healthy_sources_row():
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100, "rulebook": 60})
+    report = _composite_run(repo, {"circulars": 100, "rulebook": 20})
+
+    gate = report["gate_by_source"]
+    assert gate["rulebook"]["verdict"] == "QUARANTINED"
+    assert gate["circulars"]["verdict"] == "PASS", (
+        "the run's verdict was stamped on a source that was inside tolerance")
+    assert report["run_trustworthy"] is False, "the run itself is still distrusted"
+
+
+def test_a_healthy_sources_baseline_survives_a_broken_sibling():
+    """The reason the verdict is per source: last_good_run is PASS-only, so a
+    frozen baseline makes a healthy source fail its own count check later."""
+    repo = HistoryRepo()
+    reports = [_composite_run(repo, {"circulars": circulars, "rulebook": rulebook})
+               for circulars, rulebook in ((100, 60), (104, 20), (108, 60),
+                                           (112, 60))]
+    assert repo.last_good_run("src/circulars")["row_count"] == 112, (
+        "the baseline must track the source, not the last run the whole "
+        "regulator passed")
+    assert [r["gate_by_source"]["circulars"]["verdict"] for r in reports] == \
+        ["PASS"] * 4, "circulars grew 4% a run and never left tolerance"
+
+
+def test_a_run_wide_problem_quarantines_every_sources_row():
+    repo = HistoryRepo()
+    report = _composite_run(repo, {"circulars": 100, "rulebook": 60}, blocked=3)
+    for label, entry in report["gate_by_source"].items():
+        assert entry["verdict"] == "QUARANTINED", label
+        assert "bot-protection" in entry["problems"][0]
+
+
+def test_a_quarantined_sources_row_records_why():
+    """It used to keep only problems prefixed with the source's own name, so a
+    row quarantined by a run-wide problem was written with an empty reason."""
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100, "rulebook": 60}, blocked=3)
+    assert all("bot-protection" in row[4]
+               for row in _rows_for(repo, "src/circulars"))
+
+
+def test_a_total_count_problem_spares_a_source_that_passed_its_own_check():
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100, "rulebook": 60})
+    report = _composite_run(repo, {"circulars": 100, "rulebook": 60,
+                                   "sandbox": 20})
+
+    assert any(p.startswith("total:") for p in report["gate_problems"]), \
+        "160 -> 180 must move the total out of tolerance"
+    for label in ("circulars", "rulebook"):
+        assert report["gate_by_source"][label]["verdict"] == "PASS", (
+            f"{label} was checked against its own baseline and passed")
+
+
+def test_a_total_count_problem_still_blocks_a_source_with_no_baseline():
+    """A source that was never checked has only the total as evidence — and a
+    short run must not be allowed to set its first baseline."""
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100, "rulebook": 60})
+    report = _composite_run(repo, {"circulars": 100, "rulebook": 60,
+                                   "sandbox": 20})
+
+    entry = report["gate_by_source"]["sandbox"]
+    assert entry["verdict"] == "QUARANTINED"
+    assert entry["problems"][0].startswith("total:")
+    assert repo.last_good_run("src/sandbox") is None
+
+
+def test_the_aggregate_row_keeps_the_runs_own_verdict():
+    repo = HistoryRepo()
+    _composite_run(repo, {"circulars": 100, "rulebook": 60})
+    _composite_run(repo, {"circulars": 100, "rulebook": 20})
+    assert [row[3] for row in _rows_for(repo, "src")] == ["PASS", "QUARANTINED"]
+
+
+def test_a_single_source_run_still_writes_exactly_one_row():
+    repo = HistoryRepo()
+    report = _composite_run(repo, {"circulars": 100})
+    assert len(repo.named("record_run")) == 1
+    assert "gate_by_source" not in report
+
+
+# --------------------------------------------------------------------------- #
 
 if __name__ == "__main__":
     failed = 0

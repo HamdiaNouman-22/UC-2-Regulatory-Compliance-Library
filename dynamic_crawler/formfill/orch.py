@@ -496,6 +496,8 @@ class NewOrchestrator(Orchestrator):
         """
         problems = []
         self._count_problems: List[str] = []
+        # Sources this run had no baseline for, so their count was never checked.
+        self._unchecked: List[str] = []
         crawl = getattr(self.crawler, "last_result", None) or {}
         run = crawl.get("run") or {}
 
@@ -521,12 +523,33 @@ class NewOrchestrator(Orchestrator):
             for label, group in groups.items():
                 prev = (self._last_good(self._history_key(label))
                         or {}).get("row_count")
-                if prev:
-                    problem = self._count_problem(label, prev, len(group))
-                    if problem:
-                        problems.append(problem)
-                        self._count_problems.append(problem)
+                if not prev:
+                    self._unchecked.append(label)
+                    continue
+                problem = self._count_problem(label, prev, len(group))
+                if problem:
+                    problems.append(problem)
+                    self._count_problems.append(problem)
         return (not problems), problems
+
+    def _source_gate(self, groups: Dict[str, List],
+                     problems: List[str]) -> Dict[str, List[str]]:
+        """Which gate problems stop which source, for the per-source history rows.
+
+        The same attribution the withdrawal decision uses, with one addition: a
+        `total` count problem stops only the sources that had no baseline of
+        their own to be checked against. A source checked individually and found
+        within tolerance is already answered; a source with no history was never
+        checked, and letting a short run set its first baseline is what
+        `last_good_run` exists to prevent.
+        """
+        verdicts = crawl_absence.source_verdicts(problems, list(groups))
+        totals = [p for p in getattr(self, "_count_problems", [])
+                  if p.startswith("total:")]
+        unchecked = getattr(self, "_unchecked", [])
+        return {label: [p for p in (verdicts.get(label) or [])
+                        if p not in totals or label in unchecked]
+                for label in groups}
 
     def _withdrawals(self, buckets: Dict[str, List], groups: Dict[str, List],
                      problems: List[str]) -> dict:
@@ -798,16 +821,21 @@ class NewOrchestrator(Orchestrator):
         verdict = "PASS" if trustworthy else "QUARANTINED"
         groups = self._docs_by_source(docs)
         withdrawals = self._withdrawals(buckets, groups, problems)
+        gate = self._source_gate(groups, problems)
         if hasattr(self.repo, "record_run"):
             self.repo.record_run(self.source_name, len(docs), inv, verdict,
                                  "; ".join(problems)[:400])
-            # One row per source too, so the next run has a per-source baseline to
-            # compare against. Each carries only its own problems.
+            # One row per source too, each with the verdict its OWN problems
+            # earn. Stamping the run's verdict here froze a healthy source's
+            # baseline for as long as a sibling was broken, and `last_good_run`
+            # reads PASS only — so it then failed its own count check against a
+            # baseline several runs old.
             if len(groups) > 1:
                 for label, group in groups.items():
-                    own = [p for p in problems if p.startswith(f"{label}:")]
+                    own = gate[label]
                     self.repo.record_run(self._history_key(label), len(group),
-                                         self._inventory_hash(group), verdict,
+                                         self._inventory_hash(group),
+                                         "PASS" if not own else "QUARANTINED",
                                          "; ".join(own)[:400])
 
         self.report = {
@@ -830,6 +858,10 @@ class NewOrchestrator(Orchestrator):
         }
         if len(groups) > 1:
             self.report["by_source"] = {k: len(v) for k, v in groups.items()}
+            self.report["gate_by_source"] = {
+                label: {"verdict": "PASS" if not own else "QUARANTINED",
+                        "problems": own}
+                for label, own in gate.items()}
         if buckets["not_reread"] or self._not_reread_stored:
             # A targeted run. Said out loud, because its `unchanged` count is
             # not the same claim a full crawl's is: most of this source was
