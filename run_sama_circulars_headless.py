@@ -10,12 +10,12 @@ handed off / merged in by hand.
 Runs headful (visible browser) by default -- pass --headless to hide it.
 
 By default it also opens a READ-ONLY connection to the regulations DB (same
-.env MSSQL_* config as the rest of the pipeline) and compares each circular's
-(reference_no, issue date) against what's already stored for
-regulator='SAMA', category='SAMA Circulars'. Circulars that are already in
-the DB with the same issue date are skipped without visiting their detail
-page -- only new circulars and ones whose issue date changed are fetched, so
-this becomes an incremental "just get the updates" run. If the DB is
+.env MSSQL_* config as the rest of the pipeline) and compares against what's
+already stored for regulator='SAMA', category='SAMA Circulars' -- by issue
+date first, title as a tiebreaker for same-day circulars. The circulars table
+lists newest first, so as soon as a row's issue date is older than the latest
+known date, the rest of the table is assumed already stored and the crawl
+stops there -- it does NOT walk every circular on a normal run. If the DB is
 unreachable, it warns and falls back to a full crawl.
 
 Run:
@@ -41,10 +41,10 @@ REGULATOR = "SAMA"
 CATEGORY = "SAMA Circulars"
 
 
-def get_known_circulars() -> dict:
-    """{reference_no: published_date} already stored for SAMA Circulars, read-only.
+def get_known_circulars() -> list:
+    """[{"title", "published_date"}, ...] already stored for SAMA Circulars, read-only.
 
-    Returns {} (and prints a warning) if the DB can't be reached, so the caller
+    Returns [] (and prints a warning) if the DB can't be reached, so the caller
     can fall back to a full crawl instead of failing outright.
     """
     try:
@@ -61,16 +61,16 @@ def get_known_circulars() -> dict:
         conn = pyodbc.connect(conn_str, timeout=30, readonly=True)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT reference_no, published_date FROM regulations "
-            "WHERE regulator = ? AND category = ? AND reference_no IS NOT NULL",
+            "SELECT title, published_date FROM regulations "
+            "WHERE regulator = ? AND category = ? AND published_date IS NOT NULL",
             [REGULATOR, CATEGORY],
         )
-        known = {row[0]: row[1] for row in cursor.fetchall()}
+        known = [{"title": row[0], "published_date": row[1]} for row in cursor.fetchall()]
         conn.close()
         return known
     except Exception as e:
         print(f"Warning: could not read DB baseline ({e}). Falling back to a full crawl.")
-        return {}
+        return []
 
 
 def main():

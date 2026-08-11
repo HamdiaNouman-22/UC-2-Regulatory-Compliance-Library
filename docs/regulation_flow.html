@@ -1,0 +1,501 @@
+<title>Regulation Flow: Intake → Review → SysX2</title>
+<style>
+:root{
+  --bg:#ffffff;
+  --panel:#f6f7f9;
+  --panel-2:#eef0f3;
+  --border:#d7dae0;
+  --text:#1c2128;
+  --muted:#5b6270;
+  --accent:#2f5fd6;
+  --accent-soft:#e8eefc;
+  --accept:#2e7d32;
+  --accept-soft:#e9f7ee;
+  --reject:#9a5b12;
+  --reject-soft:#faf1e3;
+  --ext:#7a7a00;
+  --ext-soft:#fcfbe8;
+  --chip-bg:#ffffff;
+  --code-bg:#eef0f3;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15181e;
+    --panel:#1c2029;
+    --panel-2:#232833;
+    --border:#333947;
+    --text:#e6e8ec;
+    --muted:#9aa2b1;
+    --accent:#6f97f2;
+    --accent-soft:#202a42;
+    --accept:#6fcf7a;
+    --accept-soft:#1c2e1e;
+    --reject:#e0a862;
+    --reject-soft:#332818;
+    --ext:#d6d64a;
+    --ext-soft:#2b2a17;
+    --chip-bg:#1c2029;
+    --code-bg:#232833;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15181e;
+  --panel:#1c2029;
+  --panel-2:#232833;
+  --border:#333947;
+  --text:#e6e8ec;
+  --muted:#9aa2b1;
+  --accent:#6f97f2;
+  --accent-soft:#202a42;
+  --accept:#6fcf7a;
+  --accept-soft:#1c2e1e;
+  --reject:#e0a862;
+  --reject-soft:#332818;
+  --ext:#d6d64a;
+  --ext-soft:#2b2a17;
+  --chip-bg:#1c2029;
+  --code-bg:#232833;
+}
+
+*{box-sizing:border-box;}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  margin:0;
+  padding:32px 20px 60px;
+}
+.wrap{max-width:1180px;margin:0 auto;}
+h1{font-size:1.35rem;margin:0 0 4px;}
+.subtitle{color:var(--muted);font-size:0.92rem;margin:0 0 28px;}
+
+figure{margin:0 0 8px;}
+.diagram-scroll{
+  overflow-x:auto;
+  border:1px solid var(--border);
+  border-radius:12px;
+  background:var(--panel);
+  padding:8px;
+}
+svg{display:block;width:100%;height:auto;min-width:980px;}
+figcaption{
+  color:var(--muted);
+  font-size:0.86rem;
+  margin-top:10px;
+  line-height:1.5;
+}
+
+.callout{
+  margin:28px 0;
+  padding:14px 16px;
+  border:1px solid var(--border);
+  border-left:3px solid var(--reject);
+  background:var(--reject-soft);
+  border-radius:8px;
+  font-size:0.88rem;
+  line-height:1.55;
+}
+.callout.accent{border-left-color:var(--accent);background:var(--accent-soft);}
+.callout.accept{border-left-color:var(--accept);background:var(--accept-soft);}
+.callout strong{display:block;margin-bottom:4px;}
+
+h2{font-size:1.02rem;margin:36px 0 12px;}
+
+table{width:100%;border-collapse:collapse;font-size:0.85rem;}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top;}
+th{color:var(--muted);font-weight:600;font-size:0.78rem;text-transform:uppercase;letter-spacing:0.02em;}
+td code, .callout code{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:4px;
+  padding:1px 6px;
+  font-size:0.82rem;
+  font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+  white-space:nowrap;
+}
+.tag{
+  display:inline-block;
+  font-size:0.72rem;
+  padding:2px 8px;
+  border-radius:999px;
+  border:1px solid var(--border);
+  color:var(--muted);
+  white-space:nowrap;
+}
+.tag.accent{color:var(--accent);border-color:var(--accent);}
+.tag.reject{color:var(--reject);border-color:var(--reject);}
+.tag.accept{color:var(--accept);border-color:var(--accept);}
+.tag.proposed{color:var(--accent);border-color:var(--accent);border-style:dashed;}
+
+.tables-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+  gap:8px;
+  margin:12px 0 4px;
+}
+.tables-grid div{
+  background:var(--panel-2);
+  border:1px solid var(--border);
+  border-radius:6px;
+  padding:8px 10px;
+  font-size:0.82rem;
+  font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+}
+.tables-grid span{
+  display:block;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  color:var(--muted);
+  font-size:0.7rem;
+  margin-top:2px;
+}
+
+.editnote{
+  margin:36px 0 0;
+  padding:12px 14px;
+  border:1px dashed var(--border);
+  border-radius:8px;
+  font-size:0.82rem;
+  color:var(--muted);
+  line-height:1.5;
+}
+</style>
+
+<div class="wrap">
+<h1>Regulation flow: intake → review → SysX2</h1>
+<p class="subtitle">Traced from <code>orchestrator/orchestrator.py</code>, <code>dynamic_crawler/formfill/orch.py</code>, <code>crawler/generic_crawler_wrapper.py</code> and <code>apis/pipeline_api.py</code> — every box and API label is a real class, table or endpoint in the code, except the sync step, which is marked <strong>proposed</strong> because it doesn't exist yet.</p>
+
+<figure>
+<div class="diagram-scroll">
+<svg viewBox="0 0 1650 1620" role="img" aria-label="Flow diagram: a user click or a scheduled job triggers the Orchestrator, which calls either the generic crawler or the formfill crawler; both crawlers make a real HTTP round trip out to external regulator source websites and back in with the fetched content. The orchestrator then classifies each document as new, modified or unchanged: new documents are inserted, modified documents get their old content and analysis archived into version tables before a new version is analysed, and unchanged documents are skipped. Intake and analysis tables are written accordingly, alongside a separate manual-entry path that bypasses the orchestrator and crawler entirely. A reviewer accepts or rejects each regulation via the update-status API. Rejected regulations stay in the my-system database with status rejected. Accepted regulations stay in the my-system database with status accepted and are additionally handed to a proposed sync step that would push a copy across the boundary into the external SysX2 database. A note by the decision diamond explains that a modified regulation re-enters this same review path, so accept/reject is also how an update would reach SysX2, though nothing today resets an already-decided regulation's status to flag it for re-review. A second proposed, dashed box shows that compliance_req, demo_control, demo_kpi and their linkage tables are meant to be seeded from SysX2 as a baseline catalog before matching runs, which is also not implemented in this repo today — the only writer of those tables currently found in the code is the pipeline's own new-suggestion inserts.">
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="arrowAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/>
+    </marker>
+    <marker id="arrowExt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--ext)"/>
+    </marker>
+    <marker id="arrowAccept" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--accept)"/>
+    </marker>
+  </defs>
+
+  <!-- My System boundary -->
+  <rect x="70" y="55" width="1130" height="1415" rx="14" fill="none" stroke="currentColor" stroke-opacity="0.35" stroke-dasharray="6 5"/>
+  <text x="94" y="82" font-size="12" letter-spacing="0.06em" fill="currentColor" opacity="0.6">MY SYSTEM · THIS REPO</text>
+
+  <!-- External regulator sites boundary -->
+  <rect x="1240" y="330" width="360" height="190" rx="14" fill="none" stroke="var(--ext)" stroke-dasharray="6 5"/>
+  <text x="1258" y="352" font-size="11" letter-spacing="0.04em" fill="var(--ext)" opacity="0.9">REGULATOR SOURCE SITES · EXTERNAL</text>
+
+  <!-- SysX2 boundary -->
+  <rect x="740" y="1490" width="400" height="100" rx="14" fill="none" stroke="var(--accent)" stroke-dasharray="6 5"/>
+  <text x="764" y="1512" font-size="12" letter-spacing="0.06em" fill="var(--accent)" opacity="0.85">SYSX2 · EXTERNAL</text>
+
+  <!-- ===== Row 1: how the pipeline gets kicked off ===== -->
+  <rect x="110" y="90" width="330" height="82" rx="10" fill="var(--panel-2)" stroke="currentColor" stroke-opacity="0.5"/>
+  <text x="275" y="114" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">User clicks "Run now"</text>
+  <text x="275" y="134" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">UI button → POST /trigger/&#123;regulator&#125;</text>
+  <text x="275" y="148" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">POST /trigger/full</text>
+
+  <rect x="470" y="90" width="330" height="82" rx="10" fill="var(--panel-2)" stroke="currentColor" stroke-opacity="0.5"/>
+  <text x="635" y="114" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Scheduled trigger</text>
+  <text x="635" y="134" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.7">APScheduler job fires at scheduled_time</text>
+  <text x="635" y="148" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.7">configured via POST /schedule · /update-schedule</text>
+  <text x="635" y="162" text-anchor="middle" font-size="9" fill="currentColor" opacity="0.55">firing itself is internal, not an HTTP call</text>
+
+  <rect x="830" y="90" width="330" height="82" rx="10" fill="var(--panel-2)" stroke="currentColor" stroke-opacity="0.5"/>
+  <text x="995" y="118" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Manual entry</text>
+  <text x="995" y="138" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">Analyst adds / uploads a regulation directly</text>
+  <text x="995" y="154" text-anchor="middle" font-size="9.5" fill="currentColor" opacity="0.55">bypasses the orchestrator + crawler entirely</text>
+
+  <!-- triggers -> orchestrator -->
+  <line x1="275" y1="172" x2="360" y2="210" stroke="currentColor" marker-end="url(#arrow)"/>
+  <line x1="635" y1="172" x2="550" y2="210" stroke="currentColor" marker-end="url(#arrow)"/>
+
+  <!-- manual entry bypass, long arrow straight to DB1 -->
+  <line x1="995" y1="172" x2="900" y2="560" stroke="currentColor" marker-end="url(#arrow)"/>
+  <text x="905" y="270" font-size="10.5" fill="currentColor" opacity="0.75">POST /regulations/add</text>
+  <text x="905" y="284" font-size="10.5" fill="currentColor" opacity="0.75">POST /upload-regulation</text>
+
+  <!-- ===== Orchestrator box ===== -->
+  <rect x="245" y="210" width="420" height="92" rx="10" fill="var(--panel)" stroke="currentColor" stroke-opacity="0.6"/>
+  <text x="455" y="234" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Orchestrator (or NewOrchestrator)</text>
+  <text x="455" y="252" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">orchestrator/orchestrator.py</text>
+  <text x="455" y="266" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">or subclass dynamic_crawler/formfill/orch.py::NewOrchestrator</text>
+  <text x="455" y="282" text-anchor="middle" font-size="9.5" fill="currentColor" opacity="0.55">both write through the same MSSQLRepository — same tables either way</text>
+
+  <!-- orchestrator calls the crawler -->
+  <line x1="360" y1="302" x2="290" y2="340" stroke="currentColor" marker-end="url(#arrow)"/>
+  <line x1="550" y1="302" x2="620" y2="340" stroke="currentColor" marker-end="url(#arrow)"/>
+  <text x="360" y="325" font-size="10" fill="currentColor" opacity="0.75">calls self.crawler.fetch_documents()</text>
+
+  <!-- ===== Crawler row ===== -->
+  <rect x="110" y="340" width="330" height="92" rx="10" fill="var(--panel-2)" stroke="currentColor" stroke-opacity="0.5"/>
+  <text x="275" y="364" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Generic crawler</text>
+  <text x="275" y="384" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">generic_crawler/crawler.py</text>
+  <text x="275" y="398" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">config/sources/*.yml — no per-site code</text>
+  <text x="275" y="414" text-anchor="middle" font-size="9.5" fill="currentColor" opacity="0.55">wrapped by generic_crawler_wrapper.py::GenericSiteCrawler</text>
+
+  <rect x="470" y="340" width="330" height="92" rx="10" fill="var(--panel-2)" stroke="currentColor" stroke-opacity="0.5"/>
+  <text x="635" y="364" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Formfill crawler</text>
+  <text x="635" y="384" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">dynamic_crawler/formfill/runner.py</text>
+  <text x="635" y="398" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">Phase 1 listing (form fields) + Phase 2 detail</text>
+  <text x="635" y="414" text-anchor="middle" font-size="9.5" fill="currentColor" opacity="0.55">same output schema as generic crawler</text>
+
+  <!-- ===== External regulator sites ===== -->
+  <rect x="1260" y="360" width="320" height="150" rx="10" fill="var(--ext-soft)" stroke="var(--ext)"/>
+  <text x="1420" y="384" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">Regulator source websites</text>
+  <text x="1420" y="402" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.75">SAMA · SBP · SECP · CBB · SIMAH · MISA · CMA …</text>
+  <text x="1420" y="418" text-anchor="middle" font-size="9.5" fill="currentColor" opacity="0.55">not our infrastructure — a real HTTP round trip</text>
+
+  <!-- crawler <-> external, the real out-and-back-in -->
+  <line x1="440" y1="368" x2="1258" y2="380" stroke="var(--ext)" marker-end="url(#arrowExt)"/>
+  <text x="700" y="364" font-size="9.5" fill="var(--ext)">HTTP GET — crawl page/listing  (OUT)</text>
+
+  <line x1="1258" y1="402" x2="440" y2="392" stroke="var(--ext)" marker-end="url(#arrowExt)"/>
+  <text x="700" y="416" font-size="9.5" fill="var(--ext)">HTML + PDF links  (IN)</text>
+
+  <line x1="800" y1="418" x2="1258" y2="440" stroke="var(--ext)" marker-end="url(#arrowExt)"/>
+  <text x="880" y="440" font-size="9.5" fill="var(--ext)">HTTP GET — listing form + detail pages  (OUT)</text>
+
+  <line x1="1258" y1="462" x2="800" y2="430" stroke="var(--ext)" marker-end="url(#arrowExt)"/>
+  <text x="880" y="480" font-size="9.5" fill="var(--ext)">HTML + PDF links  (IN)</text>
+
+  <!-- crawler results -> classify &amp; version -->
+  <line x1="275" y1="432" x2="360" y2="452" stroke="currentColor" marker-end="url(#arrow)"/>
+  <line x1="635" y1="432" x2="550" y2="452" stroke="currentColor" marker-end="url(#arrow)"/>
+  <text x="30" y="450" font-size="10.5" fill="currentColor" opacity="0.75">returns List[RegulatoryDocument] to Orchestrator</text>
+
+  <!-- ===== Classify &amp; version ===== -->
+  <rect x="245" y="452" width="420" height="96" rx="10" fill="#FFF8E6" stroke="#B8860B"/>
+  <text x="455" y="472" text-anchor="middle" font-size="12" font-weight="600" fill="#3a2c00">Classify &amp; version (per document, by content_hash + identity)</text>
+  <text x="455" y="490" text-anchor="middle" font-size="9" fill="#3a2c00"><tspan font-weight="600">new</tspan> → insert regulations + first regulation_versions row (active)</text>
+  <text x="455" y="504" text-anchor="middle" font-size="9" fill="#3a2c00"><tspan font-weight="600">modified</tspan> → mark old version inactive, archive compliance_analysis → compliance_analysis_versions, insert new active version, re-analyse</text>
+  <text x="455" y="518" text-anchor="middle" font-size="9" fill="#3a2c00"><tspan font-weight="600">unchanged</tspan> → skip entirely — the cheap common case, most of every run</text>
+  <text x="455" y="534" text-anchor="middle" font-size="9" fill="#3a2c00" opacity="0.8">writes: _insert_regulation() / insert_regulation_version() →</text>
+
+  <line x1="455" y1="548" x2="455" y2="560" stroke="#B8860B" marker-end="url(#arrow)"/>
+
+  <!-- ===== DB box 1: core intake ===== -->
+  <rect x="210" y="560" width="880" height="150" rx="10" fill="var(--panel)" stroke="currentColor" stroke-opacity="0.6"/>
+  <text x="650" y="584" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor" opacity="0.85">My System DB — core intake tables</text>
+
+  <g font-size="11" font-family="ui-monospace,SFMono-Regular,Consolas,monospace">
+    <rect x="234" y="598" width="270" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="369" y="617" text-anchor="middle" fill="currentColor">regulations</text>
+
+    <rect x="516" y="598" width="270" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="651" y="617" text-anchor="middle" fill="currentColor">regulation_versions</text>
+
+    <rect x="798" y="598" width="270" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="933" y="617" text-anchor="middle" fill="currentColor">compliancecategory</text>
+
+    <rect x="234" y="640" width="270" height="42" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="369" y="656" text-anchor="middle" fill="currentColor" font-weight="600">pipeline_status</text>
+    <text x="369" y="670" text-anchor="middle" fill="currentColor" font-size="8" font-family="Arial" opacity="0.7">one row per run — RUNNING → DONE/FAILED</text>
+
+    <rect x="516" y="640" width="270" height="42" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="651" y="656" text-anchor="middle" fill="currentColor" font-weight="600">pipeline_schedule</text>
+    <text x="651" y="670" text-anchor="middle" fill="currentColor" font-size="8" font-family="Arial" opacity="0.7">set by POST /schedule — PENDING → RUNNING → DONE</text>
+
+    <rect x="798" y="640" width="270" height="42" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="933" y="656" text-anchor="middle" fill="currentColor" font-weight="600">processinglogs</text>
+    <text x="933" y="670" text-anchor="middle" fill="currentColor" font-size="8" font-family="Arial" opacity="0.7">per-step audit trail for every stage above</text>
+  </g>
+
+  <!-- arrow to DB box 2 -->
+  <line x1="650" y1="710" x2="650" y2="758" stroke="currentColor" marker-end="url(#arrow)"/>
+  <text x="656" y="724" font-size="9.5" fill="currentColor" opacity="0.75">POST /trigger/staged-analysis/&#123;id&#125; — 4-stage LLM extracts obligations</text>
+  <text x="656" y="737" font-size="9.5" fill="currentColor" opacity="0.75">POST /trigger/requirement-matching/&#123;id&#125; — compares to compliance_req / demo_control / demo_kpi</text>
+  <text x="656" y="750" font-size="9.5" fill="currentColor" opacity="0.75">match_status: fully_matched / partially_matched / new — "new" inserts a suggested req+control+KPI row</text>
+
+  <!-- ===== DB box 2: derived analysis ===== -->
+  <rect x="130" y="760" width="1040" height="182" rx="10" fill="var(--panel)" stroke="currentColor" stroke-opacity="0.6"/>
+  <text x="650" y="784" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor" opacity="0.85">My System DB — analysis &amp; matching tables (written by processing APIs)</text>
+
+  <g font-size="10.5" font-family="ui-monospace,SFMono-Regular,Consolas,monospace">
+    <rect x="154" y="798" width="240" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="274" y="817" text-anchor="middle" fill="currentColor">compliance_analysis</text>
+
+    <rect x="410" y="798" width="240" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="530" y="817" text-anchor="middle" fill="currentColor">compliance_analysis_versions</text>
+
+    <rect x="666" y="798" width="240" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="786" y="817" text-anchor="middle" fill="currentColor">compliance_req</text>
+
+    <rect x="922" y="798" width="222" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="1033" y="817" text-anchor="middle" fill="currentColor">sama_req_mapping</text>
+
+    <rect x="154" y="840" width="240" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="274" y="859" text-anchor="middle" fill="currentColor">demo_control</text>
+
+    <rect x="410" y="840" width="240" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="530" y="859" text-anchor="middle" fill="currentColor">demo_kpi</text>
+
+    <rect x="666" y="840" width="240" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="786" y="859" text-anchor="middle" fill="currentColor">demo_req_control_link</text>
+
+    <rect x="922" y="840" width="222" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="1033" y="859" text-anchor="middle" fill="currentColor">demo_req_kpi_link</text>
+
+    <rect x="154" y="882" width="240" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="274" y="901" text-anchor="middle" fill="currentColor">gap_analysis</text>
+
+    <rect x="410" y="882" width="240" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="530" y="901" text-anchor="middle" fill="currentColor">gap_analysis_session</text>
+
+    <rect x="666" y="882" width="240" height="30" rx="5" fill="var(--chip-bg)" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="786" y="901" text-anchor="middle" fill="currentColor">ar_response_cache</text>
+  </g>
+
+  <!-- ===== SysX2 &#8212; baseline catalog (inbound, proposed) ===== -->
+  <rect x="1260" y="760" width="320" height="182" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-dasharray="5 4"/>
+  <text x="1420" y="782" text-anchor="middle" font-size="12" font-weight="600" fill="var(--accent)">SysX2 — baseline catalog</text>
+  <text x="1420" y="796" text-anchor="middle" font-size="10" fill="var(--accent)" opacity="0.85">(PROPOSED, inbound)</text>
+  <text x="1420" y="818" text-anchor="middle" font-size="9" fill="var(--accent)" opacity="0.85">compliance_req, demo_control, demo_kpi +</text>
+  <text x="1420" y="830" text-anchor="middle" font-size="9" fill="var(--accent)" opacity="0.85">their linkage tables are expected to originate here</text>
+  <text x="1420" y="850" text-anchor="middle" font-size="8.5" fill="var(--accent)" opacity="0.7">no import/sync job found in this repo — matching only sees</text>
+  <text x="1420" y="861" text-anchor="middle" font-size="8.5" fill="var(--accent)" opacity="0.7">what's already sitting in these tables locally</text>
+  <text x="1420" y="880" text-anchor="middle" font-size="8.5" fill="var(--accent)" opacity="0.6">(same external system as SysX2 DB further below)</text>
+
+  <line x1="1258" y1="851" x2="1172" y2="851" stroke="var(--accent)" stroke-dasharray="5 4" marker-end="url(#arrowAccent)"/>
+  <text x="1080" y="845" text-anchor="middle" font-size="8.5" fill="var(--accent)" opacity="0.85">seeds compliance_req /</text>
+  <text x="1080" y="857" text-anchor="middle" font-size="8.5" fill="var(--accent)" opacity="0.85">demo_control / demo_kpi / links</text>
+
+  <!-- arrow to review -->
+  <line x1="650" y1="942" x2="650" y2="986" stroke="currentColor" marker-end="url(#arrow)"/>
+  <text x="656" y="960" font-size="10.5" fill="currentColor" opacity="0.75">GET /regulation/&#123;id&#125;</text>
+  <text x="656" y="974" font-size="10.5" fill="currentColor" opacity="0.75">GET /compliance-analysis/&#123;id&#125;</text>
+
+  <!-- Review box -->
+  <rect x="480" y="988" width="340" height="60" rx="10" fill="var(--panel-2)" stroke="currentColor" stroke-opacity="0.5"/>
+  <text x="650" y="1012" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">Reviewer opens regulation</text>
+  <text x="650" y="1030" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.65">reads extracted requirements + gap analysis</text>
+
+  <!-- arrow to decision -->
+  <line x1="650" y1="1048" x2="650" y2="1082" stroke="currentColor" marker-end="url(#arrow)"/>
+
+  <!-- Decision diamond -->
+  <polygon points="650,1080 745,1145 650,1210 555,1145" fill="var(--panel)" stroke="currentColor" stroke-opacity="0.7"/>
+  <text x="650" y="1140" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Accept</text>
+  <text x="650" y="1157" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">regulation?</text>
+
+  <!-- Versioning re-entry note -->
+  <rect x="90" y="1095" width="440" height="100" rx="10" stroke-dasharray="5 4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+  <text x="310" y="1116" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--accent)">Updates via versioning re-use this same path</text>
+  <text x="310" y="1134" text-anchor="middle" font-size="9" fill="var(--accent)" opacity="0.9">a "modified" doc goes back through Classify &amp; version → DB1 → DB2 → here</text>
+  <text x="310" y="1147" text-anchor="middle" font-size="9" fill="var(--accent)" opacity="0.9">so accept/reject IS how an update would reach SysX2</text>
+  <text x="310" y="1165" text-anchor="middle" font-size="9" fill="var(--accent)" opacity="0.75">Gap: nothing today resets regulations.status when a new</text>
+  <text x="310" y="1178" text-anchor="middle" font-size="9" fill="var(--accent)" opacity="0.75">version lands, so a reviewer has no signal to re-review (PROPOSED fix)</text>
+
+  <!-- Reject branch -->
+  <line x1="580" y1="1175" x2="400" y2="1232" stroke="var(--reject)" marker-end="url(#arrow)"/>
+  <text x="410" y="1195" font-size="11" fill="var(--reject)">reject</text>
+  <text x="290" y="1212" font-size="10" fill="var(--reject)" opacity="0.9">POST /update-status/regulations</text>
+  <text x="330" y="1225" font-size="10" fill="var(--reject)" opacity="0.9">&#123;status:"rejected"&#125;</text>
+
+  <rect x="150" y="1236" width="380" height="82" rx="10" fill="var(--reject-soft)" stroke="var(--reject)"/>
+  <text x="340" y="1262" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--reject)">Stays in My System DB</text>
+  <text x="340" y="1280" text-anchor="middle" font-size="11" fill="var(--reject)" opacity="0.9">regulations.status = 'rejected'</text>
+  <text x="340" y="1296" text-anchor="middle" font-size="10.5" fill="var(--reject)" opacity="0.75">still editable / resubmittable — never leaves this DB</text>
+
+  <!-- Accept branch -->
+  <line x1="720" y1="1175" x2="920" y2="1232" stroke="var(--accept)" marker-end="url(#arrowAccept)"/>
+  <text x="850" y="1195" font-size="11" fill="var(--accept)">accept</text>
+  <text x="800" y="1212" font-size="10" fill="var(--accept)" opacity="0.9">POST /update-status/regulations</text>
+  <text x="820" y="1225" font-size="10" fill="var(--accept)" opacity="0.9">&#123;status:"accepted"&#125;</text>
+
+  <rect x="750" y="1236" width="380" height="82" rx="10" fill="var(--accept-soft)" stroke="var(--accept)"/>
+  <text x="940" y="1260" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--accept)">Accepted — stays in My System DB</text>
+  <text x="940" y="1278" text-anchor="middle" font-size="11" fill="var(--accept)" opacity="0.9">regulations.status = 'accepted'</text>
+  <text x="940" y="1294" text-anchor="middle" font-size="10" fill="var(--accept)" opacity="0.75">kept here AND handed to the sync step below — not moved, copied</text>
+
+  <!-- accepted -> sync -->
+  <line x1="940" y1="1318" x2="940" y2="1364" stroke="var(--accent)" marker-end="url(#arrowAccent)"/>
+  <text x="946" y="1345" font-size="10" fill="var(--accent)" opacity="0.85">also handed to sync step</text>
+
+  <rect x="750" y="1368" width="380" height="82" rx="10" stroke-dasharray="5 4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+  <text x="940" y="1392" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--accent)">Sync / export step — PROPOSED</text>
+  <text x="940" y="1410" text-anchor="middle" font-size="10.5" fill="var(--accent)" opacity="0.9">pushes a copy of the accepted regulation + analysis</text>
+  <text x="940" y="1426" text-anchor="middle" font-size="9.5" fill="var(--accent)" opacity="0.75">POST /sync/regulation/&#123;id&#125; → SysX2 (suggested name, not built)</text>
+
+  <!-- arrow across boundary to SysX2 -->
+  <line x1="940" y1="1450" x2="940" y2="1496" stroke="var(--accent)" stroke-dasharray="5 4" marker-end="url(#arrowAccent)"/>
+
+  <!-- SysX2 DB -->
+  <rect x="760" y="1498" width="360" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+  <text x="940" y="1528" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent)">SysX2 DB</text>
+  <text x="940" y="1546" text-anchor="middle" font-size="10.5" fill="var(--accent)" opacity="0.85">the other system's own database — receives a copy</text>
+
+</svg>
+</div>
+<figcaption>The pipeline starts one of three ways: a user clicks "Run now" (<code>POST /trigger/&#123;regulator&#125;</code>), a scheduled job fires internally (its timing set via <code>POST /schedule</code>, tracked in <code>pipeline_schedule</code>), or an analyst adds a regulation manually (which skips everything below and writes straight to the intake tables). The first two call the <strong>Orchestrator</strong>, which in turn calls the crawler — the crawler is the one component that actually leaves this system's network boundary, making a real HTTP round trip out to the regulator's own website and back in with the page/PDF content. Every run's own progress is logged separately to <code>pipeline_status</code> (RUNNING → DONE/FAILED). Back with the documents, the Orchestrator classifies each one as new, modified or unchanged before writing anything — a modified document gets its old content and analysis archived into <code>regulation_versions</code> / <code>compliance_analysis_versions</code> before the new version is re-analysed. Processing APIs then derive the analysis tables, including requirement matching against the existing <code>compliance_req</code> / <code>demo_control</code> / <code>demo_kpi</code> catalog. A reviewer accepts or rejects through <code>POST /update-status/regulations</code>. Reject keeps the row with <code>status = 'rejected'</code> and nothing leaves. Accept keeps the row with <code>status = 'accepted'</code> <em>and</em> hands a copy to a sync step that would push it across the boundary into SysX2's own database — that sync step is marked proposed because no such push exists in the code today.</figcaption>
+</figure>
+
+<div class="callout accept">
+<strong>What "accept" actually does</strong>
+Accepting a regulation does <em>not</em> remove it from your database. <code>POST /update-status/regulations</code> just flips <code>regulations.status</code> to <code>'accepted'</code> — the row stays exactly where it was, same as a rejected row stays with <code>status = 'rejected'</code>. The difference is that an accepted row should <em>additionally</em> be copied out to SysX2's database. Today nothing in this repo performs that copy — there's no scheduled job, no webhook, no endpoint that reads accepted rows and pushes them anywhere. I've named it <code>POST /sync/regulation/&#123;id&#125;</code> in the diagram as a placeholder for what that endpoint could be called; it isn't real yet.
+</div>
+
+<div class="callout accent">
+<strong>What are extracted requirements actually compared against?</strong>
+<code>compliance_req</code>, <code>demo_control</code>, <code>demo_kpi</code> and their linkage tables (<code>demo_req_control_link</code>, <code>demo_req_kpi_link</code>) aren't generated from scratch by this pipeline — their baseline is meant to come from SysX2, the same external system the accepted regulations get synced to. Today that inbound side doesn't exist in this repo either: <code>get_all_compliance_requirements()</code> just selects whatever rows already happen to be sitting in the local table, with no import job feeding it from SysX2 first. The only thing this repo's code actually writes into those tables is its own output — every requirement/control/KPI that comes back <code>match_status = "new"</code> gets inserted locally (<code>IS_SUGGESTED = 1</code>) via <code>insert_new_suggested_requirement()</code> and friends. So right now the "existing catalog" a new regulation is matched against is really just whatever was manually seeded plus everything this pipeline has suggested on prior runs — not SysX2's real catalog, until that inbound sync is built.
+</div>
+
+<div class="callout accent">
+<strong>Do updates (new versions) also reach SysX2 through accept/reject?</strong>
+Structurally, yes — that's the same path. When the crawler sees a document again and its <code>content_hash</code> differs, <em>Classify &amp; version</em> archives the old content/analysis and produces a fresh version, which flows through <code>DB1 → DB2 → Reviewer → Decision</code> exactly like a brand-new regulation. So accept/reject on that re-analysed row is the mechanism that would (once the sync step exists) push the update to SysX2.
+<br><br>
+The gap: nothing in the code today resets <code>regulations.status</code> when a new version lands. If a regulation was already <code>'accepted'</code> and gets modified at the source, it silently stays <code>'accepted'</code> — there's no <code>'pending_review'</code> state or equivalent to tell a reviewer "this one changed, look again." A reviewer would only catch it by re-opening that regulation on their own. That reset is a second proposed piece, alongside the sync step itself.
+</div>
+
+<h2>APIs used at each stage</h2>
+<table>
+<thead><tr><th>Stage</th><th>Endpoint</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><span class="tag">Kickoff</span></td><td><code>POST /trigger/&#123;regulator&#125;</code></td><td>User-clicked run: crawler + orchestrator for one regulator</td></tr>
+<tr><td><span class="tag">Kickoff</span></td><td><code>POST /trigger/full</code></td><td>User-clicked run: every regulator in one pass</td></tr>
+<tr><td><span class="tag">Kickoff</span></td><td><code>POST /trigger/CBB/monitoring</code></td><td>CBB-specific incremental crawl (new + modified pages)</td></tr>
+<tr><td><span class="tag">Kickoff</span></td><td><code>POST /schedule</code></td><td>Sets the time a regulator's pipeline fires automatically</td></tr>
+<tr><td><span class="tag">Kickoff</span></td><td><code>POST /update-schedule</code></td><td>Changes an existing scheduled time</td></tr>
+<tr><td><span class="tag">Ingestion</span></td><td><code>POST /regulations/add</code></td><td>Manual add of a single regulation by an analyst</td></tr>
+<tr><td><span class="tag">Ingestion</span></td><td><code>POST /upload-regulation</code></td><td>Upload a regulation document directly</td></tr>
+<tr><td><span class="tag accent">Processing</span></td><td><code>POST /trigger/staged-analysis/&#123;id&#125;</code></td><td>4-stage LLM analysis → writes <code>compliance_analysis</code></td></tr>
+<tr><td><span class="tag accent">Processing</span></td><td><code>POST /trigger/full-analysis/&#123;id&#125;</code></td><td>Full pipeline: extraction + analysis for one regulation</td></tr>
+<tr><td><span class="tag accent">Processing</span></td><td><code>POST /trigger/requirement-matching/&#123;id&#125;</code></td><td>Matches extracted requirements to controls/KPIs</td></tr>
+<tr><td>Read</td><td><code>GET /regulation/&#123;id&#125;</code></td><td>Fetch a regulation for review</td></tr>
+<tr><td>Read</td><td><code>GET /compliance-analysis/&#123;id&#125;</code></td><td>Fetch extracted requirements + gap results for review</td></tr>
+<tr><td><span class="tag reject">Decision</span></td><td><code>POST /update-status/regulations</code></td><td>Sets <code>regulations.status</code> to <code>'accepted'</code> or <code>'rejected'</code></td></tr>
+<tr><td><span class="tag proposed">Proposed</span></td><td><code>POST /sync/regulation/&#123;id&#125;</code></td><td><strong>Does not exist.</strong> Suggested endpoint to push an accepted regulation + its analysis to SysX2's database</td></tr>
+</tbody>
+</table>
+<p class="subtitle" style="margin-top:8px;">The crawlers and the <code>Orchestrator</code> / <code>NewOrchestrator</code> classes aren't HTTP APIs — they're the Python layer that <code>/trigger/*</code> calls into internally. The regulator source websites aren't an API either — they're the external HTTP endpoint the crawler visits.</p>
+
+<h2>All tables written along this flow</h2>
+<div class="tables-grid">
+<div>regulations<span>core record + status</span></div>
+<div>regulation_versions<span>content snapshots</span></div>
+<div>compliancecategory<span>folder hierarchy</span></div>
+<div>pipeline_status<span>crawler run state</span></div>
+<div>pipeline_schedule<span>scheduled crawl jobs</span></div>
+<div>processinglogs<span>per-step audit trail</span></div>
+<div>compliance_analysis<span>extracted requirements</span></div>
+<div>compliance_analysis_versions<span>archived analysis</span></div>
+<div>compliance_req<span>internal requirement catalog — should originate from SysX2 (proposed)</span></div>
+<div>sama_req_mapping<span>requirement mappings</span></div>
+<div>demo_control / demo_kpi<span>controls &amp; KPIs — should originate from SysX2 (proposed)</span></div>
+<div>demo_req_control_link<span>requirement↔control links — from SysX2 (proposed)</span></div>
+<div>demo_req_kpi_link<span>requirement↔KPI links — from SysX2 (proposed)</span></div>
+<div>gap_analysis / gap_analysis_session<span>gap-analysis runs</span></div>
+<div>ar_response_cache<span>cached Arabic responses</span></div>
+</div>
+
+<div class="editnote">
+This file lives at <code>docs/regulation_flow.html</code> — plain HTML + inline SVG, no build step. A drag-and-drop editable version of the same diagram lives at <code>docs/regulation_flow.drawio</code> (open at app.diagrams.net). Edit either directly, or tell Claude what to change and it'll update both and republish this link.
+</div>
+
+</div>
