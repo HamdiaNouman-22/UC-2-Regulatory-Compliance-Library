@@ -247,6 +247,17 @@ the cheapest possible early exit and it will be the common case.
   measured against the sum, and a composite logs a failed source and carries on —
   so a small source dying entirely hid inside the 5%. The gate now checks both.
   A single-source run still writes exactly one row.
+- **Each per-source row carries the verdict its OWN problems earn**, by the same
+  attribution the withdrawal decision uses. Stamping the run's verdict on them
+  froze a healthy source's baseline for as long as a sibling was broken — and
+  `last_good_run` returns PASS only, so that source then failed its own count
+  check against a baseline several runs old, and the withdrawal layer read the
+  stale number as its prior. A `total` count problem is the one exception: it
+  stops only the sources that had no baseline of their own to be checked
+  against, because a source already found within tolerance is answered and a
+  source with no history must not have its first baseline set by a short run.
+  The run's own verdict is unchanged, and `gate_by_source` in the report says
+  which source was stopped by what.
 - **The identity keys are `field=value` pairs, not bare values**, because one run
   can carry two sources keyed on different fields entirely.
 - **`source` is `NVARCHAR(200)` and the writer logs its own failures**, so an
