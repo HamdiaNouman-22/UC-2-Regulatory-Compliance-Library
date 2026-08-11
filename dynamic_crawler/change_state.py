@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ROOT = Path("output") / "change_state"
 FORMAT = 1
+#: How many sweeps' observed counts to keep. The withdrawal gate needs the
+#: previous one; the rest are there to read when a gate refusal is disputed.
+RUNS_KEPT = 10
 
 
 def _now() -> str:
@@ -40,6 +43,7 @@ class ChangeStateStore:
         self.path = Path(path)
         self.source = source
         self.records: Dict[str, dict] = {}
+        self.runs: list = []
 
     @classmethod
     def for_source(cls, source: str, root=None) -> "ChangeStateStore":
@@ -57,6 +61,7 @@ class ChangeStateStore:
             raise ValueError(f"{self.path} is not readable change state ({e}) — "
                              f"move it aside deliberately to start over")
         self.records = dict(data.get("records") or {})
+        self.runs = list(data.get("runs") or [])
         self.source = self.source or str(data.get("source") or "")
         return self
 
@@ -80,12 +85,16 @@ class ChangeStateStore:
                     f"{record['fields']}, not {fields}")
         return None
 
-    def record(self, obs, verdict: str) -> None:
+    def record(self, obs, verdict: str, signal: str = "") -> None:
         """Store what this sweep saw of one document."""
         prior = self.records.get(obs.key) or {}
         self.records[obs.key] = {
             "fields": dict(obs.fields),
             "identity_fields": list(obs.identity_fields),
+            # Which signal saw it. Two signals can share one state file, because
+            # this store is per source, and neither may judge the other's
+            # absences.
+            "signal": signal or prior.get("signal", ""),
             "title": obs.title or prior.get("title", ""),
             "url": obs.url or prior.get("url", ""),
             # A probe that failed must not erase the token it failed to re-read:
@@ -103,13 +112,32 @@ class ChangeStateStore:
     def missed(self, key: str) -> int:
         """One more sweep in which this identity was not seen; the streak.
 
-        A withdrawal needs two consecutive trustworthy runs and then a person.
-        Neither of those lives here — this only counts.
+        Both ends are stamped: a rule that counted sweeps alone would be
+        satisfied by running the CLI twice in one second. A withdrawal needs two
+        consecutive trustworthy runs and then a person, and neither of those
+        lives here — this only counts.
         """
         record = self.records.setdefault(key, {"first_seen": _now(), "misses": 0})
         record["misses"] = int(record.get("misses") or 0) + 1
+        record.setdefault("first_missed", _now())
         record["last_missed"] = _now()
         return record["misses"]
+
+    def note_run(self, signal: str, observed: int) -> None:
+        """This sweep's observed count, for the withdrawal gate.
+
+        The crawl's gate compares against run_history; a sweep has to work with
+        no route to the database, so its baseline lives in its own state file.
+        """
+        self.runs = (self.runs or [])[-(RUNS_KEPT - 1):] + [
+            {"at": _now(), "signal": str(signal), "observed": int(observed)}]
+
+    def last_observed(self, signal: str = "") -> Optional[int]:
+        """What the previous sweep saw, or None when there was not one."""
+        for run in reversed(self.runs or []):
+            if not signal or run.get("signal") == signal:
+                return int(run.get("observed") or 0)
+        return None
 
     def save(self) -> Path:
         """Written to a temporary file and moved into place: a half-written
@@ -117,7 +145,8 @@ class ChangeStateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"format": FORMAT, "source": self.source,
-                                   "updated_at": _now(), "records": self.records},
+                                   "updated_at": _now(), "runs": self.runs,
+                                   "records": self.records},
                                   ensure_ascii=False, indent=1, default=str),
                        encoding="utf-8")
         os.replace(tmp, self.path)

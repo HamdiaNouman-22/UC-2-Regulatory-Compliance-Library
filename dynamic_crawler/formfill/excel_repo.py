@@ -222,6 +222,20 @@ class ExcelRepo:
                 and (not regulator or r.get("regulator") == regulator)
                 and (r.get("status") or "") != "withdrawn"]
 
+    def mark_regulation_withdrawn(self, regulation_id: int, reason: str) -> None:
+        """A regulator has withdrawn this document. Nothing calls this yet.
+
+        Mirrors the MSSQL method — status, a marker version, no delete. Added on
+        both sides at once because three bugs so far have been a repo method that
+        existed on one.
+        """
+        if not self.get_regulation_by_id(regulation_id):
+            raise ValueError(f"no regulation {regulation_id} to withdraw")
+        self.mark_all_versions_inactive(regulation_id)
+        self.insert_regulation_version(regulation_id, status="withdrawn",
+                                       change_summary=str(reason or "")[:400])
+        self.update_regulation(regulation_id, status="withdrawn")
+
     def find_by_reference(self, reference_no: str) -> Optional[dict]:
         """The tiebreak: same reference number at a new URL is a new VERSION of an
         existing document, not a new document."""

@@ -737,16 +737,23 @@ class NewOrchestrator(Orchestrator):
             "inventory_hash": inv,
             "run_trustworthy": trustworthy,
             "gate_problems": problems,
-            "disappeared_actioned": bool(trustworthy) and bool(buckets["disappeared"]),
+            # Nothing on this path withdraws anything. This read True on any
+            # trustworthy run with a non-empty bucket, reporting an action that
+            # no code performs.
+            "disappeared_actioned": False,
             "version_tokens_stored": tokens_stored,
             "tables": self.repo.counts() if hasattr(self.repo, "counts") else {},
         }
         if len(groups) > 1:
             self.report["by_source"] = {k: len(v) for k, v in groups.items()}
-        if not trustworthy and buckets["disappeared"]:
+        if buckets["disappeared"]:
             self.report["note"] = (
-                f"{len(buckets['disappeared'])} document(s) were not seen this run, "
-                "but the run is not trustworthy so nothing was marked withdrawn")
+                f"{len(buckets['disappeared'])} document(s) were not seen this run. "
+                + ("The run is not trustworthy, so they are not even candidates."
+                   if not trustworthy else
+                   "The run is trustworthy, so they are candidates — but a "
+                   "withdrawal needs two consecutive runs and then a person, and "
+                   "nothing on this path performs one."))
         return self.report
 
 
