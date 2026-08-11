@@ -199,6 +199,15 @@ class ChangeSignal:
     def sweep(self) -> List[Observation]:
         raise NotImplementedError
 
+    def confirm_required_for(self, obs: Observation) -> bool:
+        """Per observation, because one source can carry two kinds of token.
+
+        GOSI's page date is shared by every instrument on the page, so only a
+        content hash separates an amendment from a republish; the version counter
+        on the documents that page links to is per file and is proof on its own.
+        """
+        return self.confirm_required
+
     def confirm(self, obs: Observation) -> Optional[str]:
         """A content hash for one shortlisted observation, or None when the
         token is proof on its own."""
@@ -222,7 +231,7 @@ def run_sweep(signal: ChangeSignal, store, record: bool = True) -> tuple:
     """
     observations = list(signal.sweep() or [])
     buckets = {NEW: [], MODIFIED: [], UNCHANGED: [], UNKNOWN: [], MISSING: []}
-    by_basis, collisions, seen = {}, [], set()
+    by_basis, collisions, seen, confirmed = {}, [], set(), 0
 
     for obs in observations:
         by_basis[obs.basis] = by_basis.get(obs.basis, 0) + 1
@@ -234,8 +243,9 @@ def run_sweep(signal: ChangeSignal, store, record: bool = True) -> tuple:
         seen.add(obs.key)
         stored = store.get(obs.key)
         verdict, reason = verdict_for(obs, stored)
-        if verdict == MODIFIED and signal.confirm_required:
+        if verdict == MODIFIED and signal.confirm_required_for(obs):
             obs.confirm_hash = _confirm(signal, obs)      # the shortlist only
+            confirmed += 1
             verdict, reason = verdict_for(obs, stored, confirm_required=True)
 
         buckets[verdict].append((obs, reason))
@@ -256,6 +266,7 @@ def run_sweep(signal: ChangeSignal, store, record: bool = True) -> tuple:
         "by_basis": by_basis,
         "without_token": sum(1 for o in observations if not o.token),
         "confirm_required": signal.confirm_required,
+        "confirmed": confirmed,
         "collisions": collisions,
         "state_file": str(store.path),
     }

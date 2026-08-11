@@ -5,12 +5,22 @@ regulator, and the only thing written anywhere is the sweep's own state file und
 output/change_state/ — which is what the NEXT sweep compares against. Nothing
 here touches a regulations row.
 
+Two signals, one entry point, because both answer the same question and keep
+their memory in the same place:
+
+    stored-inventory  re-read the version token of every url we already store.
+                      Detect only — it cannot see a document it never stored.
+    gosi              one JSON request per seed page, which returns the WHOLE
+                      page, so this one can also report a document as absent.
+
 Usage:
     python -m dynamic_crawler.cli.sweep --regulator SDAIA \\
         --source "Laws and Regulations" --workbook output/formfill/run.xlsx
 
     python -m dynamic_crawler.cli.sweep --regulator SDAIA \\
         --source "Laws and Regulations" --with-db --limit 5 --dry-run
+
+    python -m dynamic_crawler.cli.sweep --signal gosi --source SocialInsurance
 
 A first sweep of a source stores a baseline and reports every document as new.
 That is not a change report; the second sweep is.
@@ -24,11 +34,37 @@ from pathlib import Path
 
 from dynamic_crawler import changesignal as cs
 from dynamic_crawler.change_state import ChangeStateStore
+from dynamic_crawler.gosi_signal import SEEDS, GosiJsonSweep
 from dynamic_crawler.inventory_sweep import (StoredInventorySweep,
                                              WorkbookInventory, load_config,
                                              settings_for, skip_hosts)
 
 logger = logging.getLogger(__name__)
+
+
+def _run(signal, source: str, state_root=None, dry_run: bool = False) -> dict:
+    """Run one signal against its own state file and report. Common to both."""
+    store = ChangeStateStore.for_source(source, root=state_root)
+    first = not store.keys()
+    report, buckets = cs.run_sweep(signal, store)
+    report["sweep"] = getattr(signal, "stats", {})
+    if first:
+        report["note"] = ("first sweep for this source: every document is a "
+                          "baseline, not a change")
+    if not dry_run:
+        report["state_file"] = str(store.save())
+    else:
+        report["state_written"] = False
+
+    # The shortlist is the product, so print it rather than only counting it.
+    verdicts = (cs.MODIFIED, cs.UNKNOWN, cs.NEW, cs.MISSING)
+    report["shortlist"] = {
+        verdict: [{"key": o.key if hasattr(o, "key") else o,
+                   "title": getattr(o, "title", "")[:70],
+                   "why": why}
+                  for o, why in buckets[verdict]]
+        for verdict in verdicts if buckets.get(verdict)}
+    return report
 
 
 def sweep(regulator: str, source_system: str, *, repo=None, workbook=None,
@@ -51,28 +87,32 @@ def sweep(regulator: str, source_system: str, *, repo=None, workbook=None,
         limit=limit,
         skip_hosts=skip_hosts(config))
 
-    store = ChangeStateStore.for_source(f"{regulator}/{source_system}",
-                                        root=state_root)
-    first = not store.keys()
-    report, buckets = cs.run_sweep(signal, store)
-    report["sweep"] = signal.stats
-    if first:
-        report["note"] = ("first sweep for this source: every document is a "
-                          "baseline, not a change")
-    if not dry_run:
-        report["state_file"] = str(store.save())
-    else:
-        report["state_written"] = False
+    return _run(signal, f"{regulator}/{source_system}", state_root, dry_run)
 
-    # The shortlist is the product, so print it rather than only counting it.
-    report["shortlist"] = {
-        verdict: [{"key": o.key if hasattr(o, "key") else o,
-                   "title": getattr(o, "title", "")[:70],
-                   "why": why}
-                  for o, why in buckets[verdict]]
-        for verdict in (cs.MODIFIED, cs.UNKNOWN, cs.NEW)
-        if buckets[verdict]}
-    return report
+
+def gosi_sweep(seed: str, *, regulator: str = "GOSI", config_path=None,
+               state_root=None, workers=None, probe_documents: bool = True,
+               dry_run: bool = False) -> dict:
+    """Sweep one GOSI seed page: one JSON request, no browser, no database."""
+    config = load_config(config_path)
+    settings = settings_for(config, regulator, seed)
+
+    signal = GosiJsonSweep(seed,
+                           timeout=float(settings.get("timeout") or 20),
+                           probe_documents=probe_documents,
+                           workers=workers or settings.get("workers"),
+                           skip_hosts=skip_hosts(config))
+
+    return _run(signal, f"{regulator}/{seed}", state_root, dry_run)
+
+
+def _emit(report: dict, json_out=None) -> int:
+    text = json.dumps(report, indent=2, ensure_ascii=False, default=str)
+    print(text)
+    if json_out:
+        Path(json_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(json_out).write_text(text, encoding="utf-8")
+    return 0
 
 
 def main() -> int:
@@ -85,15 +125,24 @@ def main() -> int:
             pass
 
     ap = argparse.ArgumentParser(
-        description="Re-read the version token of every stored document")
-    ap.add_argument("--regulator", required=True,
-                    help="as stored in the regulations row, e.g. SDAIA")
+        description="Ask a regulator which version it holds of what we store")
+    ap.add_argument("--signal", default="stored-inventory",
+                    choices=("stored-inventory", "gosi"),
+                    help="stored-inventory: probe every url we already store. "
+                         "gosi: one JSON request per seed page")
+    ap.add_argument("--regulator", default="GOSI",
+                    help="as stored in the regulations row, e.g. SDAIA. "
+                         "Required for --signal stored-inventory")
     ap.add_argument("--source", required=True, dest="source_system",
-                    help="the source_system as stored, e.g. 'Laws and Regulations'")
+                    help="the source_system as stored, e.g. 'Laws and "
+                         f"Regulations'. For --signal gosi: one of {SEEDS}")
     ap.add_argument("--workbook", help="read the inventory from a formfill "
                                        "workbook instead of the database")
     ap.add_argument("--with-db", action="store_true",
                     help="read the inventory from MSSQL (one SELECT)")
+    ap.add_argument("--no-documents", action="store_true",
+                    help="gosi: read the page only. It then reports no absence "
+                         "at all, because the documents it skipped would be it")
     ap.add_argument("--limit", type=int, help="probe only the first N documents")
     ap.add_argument("--workers", type=int, help="override the configured probes "
                                                 "in flight")
@@ -107,6 +156,17 @@ def main() -> int:
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+
+    if a.signal == "gosi":
+        if a.source_system not in SEEDS:
+            raise SystemExit(f"--source for --signal gosi is one of {SEEDS}, "
+                             f"not {a.source_system!r}")
+        report = gosi_sweep(a.source_system, regulator=a.regulator,
+                            config_path=a.config, state_root=a.state_root,
+                            workers=a.workers,
+                            probe_documents=not a.no_documents,
+                            dry_run=a.dry_run)
+        return _emit(report, a.json_out)
 
     if not a.workbook and not a.with_db:
         raise SystemExit("pass --workbook <xlsx> or --with-db: the sweep reads "
@@ -127,12 +187,7 @@ def main() -> int:
     report = sweep(a.regulator, a.source_system, repo=repo, workbook=a.workbook,
                    config_path=a.config, state_root=a.state_root, limit=a.limit,
                    workers=a.workers, dry_run=a.dry_run)
-    text = json.dumps(report, indent=2, ensure_ascii=False, default=str)
-    print(text)
-    if a.json_out:
-        Path(a.json_out).parent.mkdir(parents=True, exist_ok=True)
-        Path(a.json_out).write_text(text, encoding="utf-8")
-    return 0
+    return _emit(report, a.json_out)
 
 
 if __name__ == "__main__":
