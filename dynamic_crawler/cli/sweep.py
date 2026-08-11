@@ -40,6 +40,10 @@ That is not a change report; the second sweep is.
 Every report carries a `withdrawals` block: which absent documents meet the
 two-consecutive-sweeps rule and which condition stopped the rest. It is a
 proposal for a person — nothing here withdraws anything.
+
+It also carries `targets`: the urls of the documents ruled `modified`, which
+`formfill run --only-urls` re-crawls and nothing else. `--targets <file>` writes
+them for that command to read.
 """
 
 import argparse
@@ -84,13 +88,25 @@ def _run(signal, source: str, state_root=None, dry_run: bool = False) -> dict:
         METHOD, so this raised on the first document any sweep reported absent.
         """
         if isinstance(o, str):
-            return {"key": o, "title": "", "why": why}
-        return {"key": o.key, "title": str(o.title or "")[:70], "why": why}
+            return {"key": o, "title": "", "url": "", "why": why}
+        return {"key": o.key, "title": str(o.title or "")[:70],
+                "url": o.url, "why": why}
 
     verdicts = (cs.MODIFIED, cs.UNKNOWN, cs.NEW, cs.MISSING)
     report["shortlist"] = {
         verdict: [entry(o, why) for o, why in buckets[verdict]]
         for verdict in verdicts if buckets.get(verdict)}
+
+    # What a re-crawl should open, and nothing else. `modified` only: `new` on a
+    # detect-only sweep means "first time this was swept", not a new document,
+    # and re-crawling on it would re-read the whole source on its first run.
+    report["targets"] = sorted({o.url for o, _ in buckets[cs.MODIFIED]
+                                if getattr(o, "url", "")})
+    without = sum(1 for o, _ in buckets[cs.MODIFIED] if not getattr(o, "url", ""))
+    if without:
+        # A shortlisted document with no url cannot be handed to a crawl. Said
+        # out loud rather than silently dropped from the list.
+        report["targets_without_url"] = without
     # Absence counted is not absence acted on. This says which absences meet the
     # rule and which condition stopped the rest; nothing is withdrawn by it.
     report["withdrawals"] = withdrawal.proposals(signal, store, report, buckets)
@@ -193,12 +209,19 @@ def _repo(a):
     return repo
 
 
-def _emit(report: dict, json_out=None) -> int:
+def _emit(report: dict, json_out=None, targets_out=None) -> int:
     text = json.dumps(report, indent=2, ensure_ascii=False, default=str)
     print(text)
     if json_out:
         Path(json_out).parent.mkdir(parents=True, exist_ok=True)
         Path(json_out).write_text(text, encoding="utf-8")
+    if targets_out:
+        # One url per line, written even when empty: an empty file is "nothing
+        # changed", a missing file is "the sweep did not run", and a re-crawl
+        # driven by this must be able to tell them apart.
+        Path(targets_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(targets_out).write_text("\n".join(report.get("targets") or ()),
+                                     encoding="utf-8")
     return 0
 
 
@@ -253,6 +276,11 @@ def main() -> int:
     ap.add_argument("--config", help="default: config/change_signals.yml")
     ap.add_argument("--state-root", help="default: output/change_state")
     ap.add_argument("--json", dest="json_out", help="also write the report here")
+    ap.add_argument("--targets", dest="targets_out",
+                    help="write the modified documents' urls here, one per "
+                         "line, for `formfill run --only-urls`. Modified only: "
+                         "a `new` verdict on a detect-only sweep means the "
+                         "first sweep of a document we already store")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -262,7 +290,7 @@ def main() -> int:
                                 state_root=a.state_root,
                                 snapshot_dir=a.snapshot_dir,
                                 allow_stale=a.allow_stale, dry_run=a.dry_run)
-        return _emit(report, a.json_out)
+        return _emit(report, a.json_out, a.targets_out)
 
     if a.signal == "gosi":
         if a.source_system not in SEEDS:
@@ -273,7 +301,7 @@ def main() -> int:
                             workers=a.workers,
                             probe_documents=not a.no_documents,
                             dry_run=a.dry_run)
-        return _emit(report, a.json_out)
+        return _emit(report, a.json_out, a.targets_out)
 
     if a.signal == "sitemap":
         if not (a.workbook or a.with_db or a.run_workbook):
@@ -285,7 +313,7 @@ def main() -> int:
                                workbook=a.workbook, run_workbook=a.run_workbook,
                                config_path=a.config, state_root=a.state_root,
                                dry_run=a.dry_run)
-        return _emit(report, a.json_out)
+        return _emit(report, a.json_out, a.targets_out)
 
     if not a.workbook and not a.with_db:
         raise SystemExit("pass --workbook <xlsx> or --with-db: the sweep reads "
