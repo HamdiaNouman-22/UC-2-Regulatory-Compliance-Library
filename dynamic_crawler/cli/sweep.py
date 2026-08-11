@@ -15,6 +15,9 @@ their memory in the same place:
     snapshot-articles one hash per article of a page already saved on disk.
                       No request at all, which is what makes it usable against
                       a host we are blocked from.
+    sitemap           one request for a whole source, where the sitemap's
+                      per-url lastmod is a real edit history. It refuses to run
+                      on a sitemap that only carries its own build time.
 
 Usage:
     python -m dynamic_crawler.cli.sweep --regulator SDAIA \\
@@ -27,6 +30,9 @@ Usage:
 
     python -m dynamic_crawler.cli.sweep --signal snapshot-articles \\
         --regulator SIMAH --source simah.rules
+
+    python -m dynamic_crawler.cli.sweep --signal sitemap --regulator MHRSD \\
+        --source mhrsd.regs --run-workbook output/formfill/mhrsd.regs/run/results.xlsx
 
 A first sweep of a source stores a baseline and reports every document as new.
 That is not a change report; the second sweep is.
@@ -43,7 +49,9 @@ from dynamic_crawler.change_state import ChangeStateStore
 from dynamic_crawler.gosi_signal import SEEDS, GosiJsonSweep
 from dynamic_crawler.inventory_sweep import (StoredInventorySweep,
                                              WorkbookInventory, load_config,
-                                             settings_for, skip_hosts)
+                                             run_workbook_urls, settings_for,
+                                             skip_hosts)
+from dynamic_crawler.sitemap_signal import DEFAULT_CUT, SitemapLastmodSweep
 from dynamic_crawler.snapshot_articles import SnapshotArticleSweep
 
 logger = logging.getLogger(__name__)
@@ -109,6 +117,37 @@ def snapshot_sweep(form: str, *, regulator: str = "SIMAH", state_root=None,
     return _run(signal, f"{regulator}/{form}", state_root, dry_run)
 
 
+def _tracked_urls(regulator: str, source_system: str, *, repo=None,
+                  workbook=None, run_workbook=None) -> list:
+    """The urls this source stores, from whichever inventory is available."""
+    if run_workbook:
+        return run_workbook_urls(run_workbook)
+    inventory = repo if repo is not None else WorkbookInventory(workbook)
+    rows = inventory.find_regulations_by_source(source_system,
+                                                regulator=regulator)
+    return [str(r.get("document_url") or "") for r in rows]
+
+
+def sitemap_sweep(source_system: str, *, regulator: str, sitemap_url=None,
+                  repo=None, workbook=None, run_workbook=None, config_path=None,
+                  state_root=None, dry_run: bool = False) -> dict:
+    """Read one sitemap and shortlist the tracked urls whose lastmod moved."""
+    config = load_config(config_path)
+    settings = settings_for(config, regulator, source_system)
+    url = sitemap_url or settings.get("sitemap")
+    if not url:
+        raise SystemExit(f"no sitemap url for {regulator}/{source_system}: pass "
+                         f"--sitemap or add one to config/change_signals.yml")
+
+    signal = SitemapLastmodSweep(
+        url, f"{regulator}/{source_system}",
+        _tracked_urls(regulator, source_system, repo=repo, workbook=workbook,
+                      run_workbook=run_workbook),
+        cut_marker=settings.get("cut_marker") or DEFAULT_CUT,
+        timeout=float(settings.get("timeout") or 30))
+    return _run(signal, f"{regulator}/{source_system}", state_root, dry_run)
+
+
 def gosi_sweep(seed: str, *, regulator: str = "GOSI", config_path=None,
                state_root=None, workers=None, probe_documents: bool = True,
                dry_run: bool = False) -> dict:
@@ -123,6 +162,20 @@ def gosi_sweep(seed: str, *, regulator: str = "GOSI", config_path=None,
                            skip_hosts=skip_hosts(config))
 
     return _run(signal, f"{regulator}/{seed}", state_root, dry_run)
+
+
+def _repo(a):
+    """The read-only connection, or None when the inventory comes off disk."""
+    if not a.with_db:
+        return None
+    # Same connection the rest of the pipeline builds, so the driver and the
+    # credentials come from one place.
+    from dynamic_crawler.formfill.promote import _build_repo
+    repo = _build_repo()
+    # A SELECT that is allowed to raise, first: find_regulations_by_source
+    # raises on failure but a bad login should not look like an empty library.
+    repo.get_folder_id("__connectivity_probe__", None)
+    return repo
 
 
 def _emit(report: dict, json_out=None) -> int:
@@ -146,10 +199,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Ask a regulator which version it holds of what we store")
     ap.add_argument("--signal", default="stored-inventory",
-                    choices=("stored-inventory", "gosi", "snapshot-articles"),
+                    choices=("stored-inventory", "gosi", "snapshot-articles",
+                             "sitemap"),
                     help="stored-inventory: probe every url we already store. "
                          "gosi: one JSON request per seed page. "
-                         "snapshot-articles: a saved page, no request at all")
+                         "snapshot-articles: a saved page, no request at all. "
+                         "sitemap: one request, per-url lastmod")
     ap.add_argument("--regulator", default="GOSI",
                     help="as stored in the regulations row, e.g. SDAIA. "
                          "Required for --signal stored-inventory")
@@ -168,6 +223,11 @@ def main() -> int:
                          "period anyway. It reports what the page said when it "
                          "was captured, not what it says now")
     ap.add_argument("--snapshot-dir", help="default: output/snapshots")
+    ap.add_argument("--run-workbook",
+                    help="read the tracked urls from a formfill RUN workbook's "
+                         "inventory sheet — the only inventory a form with no "
+                         "promoted rows has")
+    ap.add_argument("--sitemap", help="sitemap url, when the config has none")
     ap.add_argument("--limit", type=int, help="probe only the first N documents")
     ap.add_argument("--workers", type=int, help="override the configured probes "
                                                 "in flight")
@@ -200,23 +260,26 @@ def main() -> int:
                             dry_run=a.dry_run)
         return _emit(report, a.json_out)
 
+    if a.signal == "sitemap":
+        if not (a.workbook or a.with_db or a.run_workbook):
+            raise SystemExit("pass --run-workbook, --workbook or --with-db: the "
+                             "guard measures the sitemap against the urls this "
+                             "source stores, and cannot run without them")
+        report = sitemap_sweep(a.source_system, regulator=a.regulator,
+                               sitemap_url=a.sitemap, repo=_repo(a),
+                               workbook=a.workbook, run_workbook=a.run_workbook,
+                               config_path=a.config, state_root=a.state_root,
+                               dry_run=a.dry_run)
+        return _emit(report, a.json_out)
+
     if not a.workbook and not a.with_db:
         raise SystemExit("pass --workbook <xlsx> or --with-db: the sweep reads "
                          "the urls it probes out of the stored inventory")
     if a.workbook and not Path(a.workbook).exists():
         raise SystemExit(f"no such workbook: {a.workbook}")
 
-    repo = None
-    if a.with_db:
-        # Same connection the rest of the pipeline builds, so the driver and the
-        # credentials come from one place.
-        from dynamic_crawler.formfill.promote import _build_repo
-        repo = _build_repo()
-        # A SELECT that is allowed to raise, first: find_regulations_by_source
-        # raises on failure but a bad login should not look like an empty library.
-        repo.get_folder_id("__connectivity_probe__", None)
-
-    report = sweep(a.regulator, a.source_system, repo=repo, workbook=a.workbook,
+    report = sweep(a.regulator, a.source_system,
+                   repo=_repo(a), workbook=a.workbook,
                    config_path=a.config, state_root=a.state_root, limit=a.limit,
                    workers=a.workers, dry_run=a.dry_run)
     return _emit(report, a.json_out)

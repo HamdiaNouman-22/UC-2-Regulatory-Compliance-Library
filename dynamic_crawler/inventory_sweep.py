@@ -212,5 +212,23 @@ class WorkbookInventory:
                 and str(r.get("status") or "") != "withdrawn"]
 
 
+def run_workbook_urls(path) -> List[str]:
+    """The `document_url` column of a formfill RUN workbook's inventory sheet.
+
+    Not scoped by regulator or source_system, because the sheet carries neither
+    — the file is one form's own run, so the scope is which file was named. It
+    is the only inventory that exists for a form with no promoted rows yet.
+    """
+    import pandas as pd
+
+    df = pd.read_excel(Path(path), sheet_name="inventory")
+    if "document_url" not in df.columns:
+        raise ValueError(f"{path}: the inventory sheet has no document_url "
+                         f"column ({list(df.columns)[:8]})")
+    return [str(u).strip() for u in df["document_url"].tolist()
+            if str(u).strip() and str(u).strip().lower() != "nan"]
+
+
 __all__ = ["StoredInventorySweep", "WorkbookInventory", "MAX_CONFIRM_BYTES",
-           "DEFAULT_CONFIG", "load_config", "settings_for", "skip_hosts"]
+           "DEFAULT_CONFIG", "load_config", "settings_for", "skip_hosts",
+           "run_workbook_urls"]

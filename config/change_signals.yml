@@ -71,6 +71,29 @@ sources:
     workers: 4
     timeout: 20
 
+  # MHRSD is read by --signal sitemap. The form declares no regulator or
+  # source_system either, so the source is named for the form; reconcile it with
+  # whatever a library: block later stores, or the sweep and the ingest path
+  # will keep separate memories of the same 63 documents.
+  - regulator: "MHRSD"
+    source_system: "mhrsd.regs"
+    # Measured 2026-08-10 on sitemap.xml?page=7: 1000 urls, 62 of the 63 we
+    # track. Over those 62 -- 37 distinct lastmod, and 26 still sharing
+    # 2025-05-14, one CMS operation rather than 26 amendments. So the date
+    # shortlists and the page hash decides; `confirm` is structural on this path
+    # and is not read from this file.
+    #
+    # The 63rd document is stored at a /en/ node-id url that 308-redirects to an
+    # /en/ Arabic slug returning 404. It is not withdrawn -- the same slug
+    # WITHOUT /en/ is live and is in the sitemap. Our stored url is dead, which
+    # is a library problem, not a sweep one: the sweep reports it and stops.
+    sitemap: "https://www.hrsd.gov.sa/sitemap.xml?page=7"
+    timeout: 30
+    # 68-92% of a detail page's text is an eight-card "related regulations"
+    # view, so a whole-page hash moves whenever the ministry publishes anything.
+    # The confirm hash stops here.
+    cut_marker: "block-views-block-regulations-and-procedures-related"
+
   - regulator: "GOSI"
     source_system: "Saned"
     # 2 instruments, 51 sections, and no document links at all: the page text is
