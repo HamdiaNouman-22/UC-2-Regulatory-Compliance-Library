@@ -6,6 +6,7 @@ import threading
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
+from processor.llm_client import LLMClient
 from typing import Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,25 @@ LANGUAGE_NAMES = {
 # every worker thread, so document-level parallelism cannot stampede into 429s.
 _LLM_MAX_CONCURRENCY = int(os.getenv("LLM_MAX_CONCURRENCY", "8"))
 _LLM_SEMAPHORE = threading.Semaphore(_LLM_MAX_CONCURRENCY)
+
+# ---------------------------------------------------------------------- #
+#  Reproducibility                                                        #
+#                                                                         #
+#  OpenRouter serves deepseek-v3.2 from 14 different providers at         #
+#  different quantizations (fp4, fp8, unknown) and picks one per call by  #
+#  price/latency/load. A single analysis could therefore be produced by   #
+#  two different inference engines -- an observed run had stages 1-2 on   #
+#  AtlasCloud and stage 3 on StreamLake. Pinning the provider and         #
+#  quantization removes the largest source of run-to-run drift.           #
+#                                                                         #
+#  See docs/determinism.md.                                               #
+# ---------------------------------------------------------------------- #
+
+_LLM_DETERMINISTIC   = os.getenv("LLM_DETERMINISTIC", "1") not in ("0", "false", "False")
+_LLM_PROVIDER        = os.getenv("LLM_PROVIDER", "AtlasCloud")
+_LLM_QUANTIZATION    = os.getenv("LLM_QUANTIZATION", "fp8")
+_LLM_ALLOW_FALLBACKS = os.getenv("LLM_ALLOW_FALLBACKS", "0") not in ("0", "false", "False")
+_LLM_SEED            = int(os.getenv("LLM_SEED", "20250101"))
 
 # ---------------------------------------------------------------------- #
 #  Controlled vocabularies. The prompts state these; nothing used to      #
@@ -74,9 +94,19 @@ class StagedLLMAnalyzer:
     into the full structure here, so no downstream consumer changes.
     """
 
-    def __init__(self, model: str = "deepseek/deepseek-v3.2", max_workers: int = 4):
+    def __init__(self, model: str = "deepseek/deepseek-v3.2", max_workers: int = 4,
+                 deterministic: Optional[bool] = None,
+                 provider: Optional[str] = None,
+                 quantization: Optional[str] = None):
         self.model = model
         self.max_workers = max_workers
+        # Deterministic mode: temperature 0, fixed seed, pinned provider and
+        # quantization. On by default -- a compliance library needs the same
+        # document to analyse the same way twice. Set LLM_DETERMINISTIC=0 to
+        # restore free routing and the per-stage temperatures.
+        self.deterministic = _LLM_DETERMINISTIC if deterministic is None else deterministic
+        self.provider = provider or _LLM_PROVIDER
+        self.quantization = quantization or _LLM_QUANTIZATION
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         if not self.api_key:
             raise ValueError("Missing OPENROUTER_API_KEY")
@@ -169,7 +199,13 @@ class StagedLLMAnalyzer:
             results = list(pool.map(
                 lambda grp: self._stage3_shard(grp, language), ongoing))
 
-        return {"requirements": [r for r in results if r]}
+        data={"requirements":[r for r in results if r]}
+        expected=sum(len(g["obligations"]) for g in ongoing)
+        produced=sum(1 for r in data["requirements"] for ob in r["obligations"] if ob.get("control"))
+        if produced<expected:
+            logger.warning(f"Stage 3 produced {produced} control(s) for {expected} ongoing "
+            f"obligation(s) -- {expected-produced} missing")
+        return data    
 
     def _stage3_shard(self, group: dict, language: str, depth: int = 0) -> Optional[dict]:
         """One requirement group. On truncation, split in half and retry --
@@ -255,9 +291,10 @@ class StagedLLMAnalyzer:
     def _dedupe_exact(self, s1_data: dict) -> int:
         """Drop obligations whose text is identical after whitespace/case
         normalization. Pure string equality -- see docs/staged_analyzer_optimization.md §3a."""
-        seen, removed = set(), 0
+        removed=0
         for req in s1_data.get("requirements", []):
-            kept = []
+            seen=set()
+            kept=[]
             for ob in req.get("obligations", []):
                 key = self._norm(ob.get("obligation_text", ""))
                 if not key or key in seen:
@@ -685,7 +722,7 @@ Schema:
             s2_req  = s2_by_id.get(req_id, {})
             s3_req  = s3_by_id.get(req_id, {})
 
-            obligations = s2_req.get("normalized_obligations", req.get("obligations", []))
+            obligations = s2_req.get("normalized_obligations") or req.get("obligations", [])
 
             criticality        = self._dominant(
                 [ob.get("criticality") for ob in obligations],
@@ -780,7 +817,9 @@ Schema:
         }
         payload = {
             "model": self.model,
-            "temperature": temperature,
+            # Sampling at temperature > 0 is itself a source of run-to-run
+            # variance; in deterministic mode we take the greedy path.
+            "temperature": 0 if self.deterministic else temperature,
             "max_tokens": max_tokens,
             "messages": [
                 {
@@ -796,6 +835,18 @@ Schema:
         }
         if expect_json:
             payload["response_format"] = {"type": "json_object"}
+
+        if self.deterministic:
+            payload["top_p"] = 1
+            payload["seed"] = _LLM_SEED
+            # Pin the upstream engine. allow_fallbacks=False means a call fails
+            # loudly rather than silently coming back from a different provider
+            # (and possibly a different quantization) than every other call.
+            payload["provider"] = {
+                "order":          [self.provider],
+                "allow_fallbacks": _LLM_ALLOW_FALLBACKS,
+                "quantizations":  [self.quantization],
+            }
 
         last_exc = None
         for attempt in range(attempts):

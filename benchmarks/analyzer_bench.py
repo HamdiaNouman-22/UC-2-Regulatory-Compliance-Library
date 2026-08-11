@@ -300,12 +300,35 @@ def label_for_prompt(prompt: str, index: int) -> str:
     return STAGE_NAMES.get(index, f"call_{index}")
 
 
-def run(regulation_id: int, label: str):
+def load_text_file(path: str, title: str, regulation_id: int):
+    """Replay a previously captured input_clean_text.txt.
+
+    Keeps a comparison valid even if the source row is edited, re-imported or
+    re-numbered in the database -- which has happened at least once here.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    return {
+        "regulation_id": regulation_id,
+        "title":         title,
+        "regulator":     "SAMA",
+        "reference_no":  "",
+        "published_date": "",
+        "category":      "(replayed from file)",
+        "content_type":  "pre-normalized",
+        "clean_text":    text,
+    }
+
+
+def run(regulation_id: int, label: str, text_file: str = None, title: str = None):
     out_dir = RUNS_DIR / label
     (out_dir / "calls").mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading regulation {regulation_id} ...")
-    doc = load_document(regulation_id)
+    if text_file:
+        print(f"Replaying text from {text_file} ...")
+        doc = load_text_file(text_file, title or "Replayed document", regulation_id)
+    else:
+        print(f"Loading regulation {regulation_id} ...")
+        doc = load_document(regulation_id)
     print(f"  title      : {doc['title'][:70]}")
     print(f"  clean_text : {len(doc['clean_text'])} chars ({doc['content_type']})")
 
@@ -646,6 +669,9 @@ def main():
     p.add_argument("--compare", nargs=2, metavar=("A", "B"), help="compare two existing runs")
     p.add_argument("--recompute", type=str, metavar="LABEL",
                    help="re-derive labels and cost for a finished run; makes no LLM calls")
+    p.add_argument("--text-file", type=str,
+                   help="replay a saved input_clean_text.txt instead of reading the DB")
+    p.add_argument("--title", type=str, help="document title when using --text-file")
     args = p.parse_args()
 
     if args.recompute:
@@ -654,9 +680,9 @@ def main():
     if args.compare:
         compare(*args.compare)
         return
-    if not args.regulation_id or not args.label:
-        p.error("--regulation-id and --label are required (or use --compare A B)")
-    run(args.regulation_id, args.label)
+    if not args.label or (not args.regulation_id and not args.text_file):
+        p.error("need --label plus --regulation-id or --text-file (or use --compare A B)")
+    run(args.regulation_id or 0, args.label, args.text_file, args.title)
 
 
 if __name__ == "__main__":
