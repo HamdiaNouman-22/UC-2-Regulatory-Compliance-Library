@@ -1,4 +1,5 @@
 import os
+import hashlib
 import logging
 import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -303,14 +304,28 @@ class Orchestrator:
                 self.repo.flag_partially_matched_requirements(partially_matched_ids)
 
             new_req_mappings = [m for m in requirement_mappings if m["match_status"] == "new"]
-            for i, mapping in enumerate(new_req_mappings):
+            for mapping in new_req_mappings:
                 try:
                     req_text = mapping["extracted_requirement_text"]
                     title    = req_text[:100].strip() + ("..." if len(req_text) > 100 else "")
+                    # The key is derived from the TEXT, not from the loop index.
+                    #
+                    # It used to be AUTO-<regulation_id>-<i>, and `i` is a position
+                    # in a list the LLM produced. Re-analyse the same regulation and
+                    # the model may emit a different number of new requirements in a
+                    # different order, so AUTO-42-0 could name different regulatory
+                    # text on every run. That made the row un-upsertable: the only
+                    # options were to duplicate forever, or to overwrite one
+                    # requirement with another's text.
+                    #
+                    # Hashing the text gives a stable identity — same obligation,
+                    # same key, every run — which is what lets
+                    # insert_new_suggested_requirement reuse the existing row.
+                    digest = hashlib.md5(req_text.strip().encode("utf-8")).hexdigest()[:8]
                     new_req_id = self.repo.insert_new_suggested_requirement({
                         "title":       title,
                         "description": req_text,
-                        "ref_key":     f"AUTO-{regulation_id}-{i}",
+                        "ref_key":     f"AUTO-{regulation_id}-{digest}",
                         "ref_no":      f"REG-{regulation_id}"
                     })
                     for ctrl in new_controls_to_insert:

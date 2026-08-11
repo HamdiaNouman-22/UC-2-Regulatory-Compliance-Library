@@ -1,6 +1,8 @@
 # Monitoring — how we detect updates, per regulator
 
 **Written:** 2026-08-02
+**Revised:** 2026-08-10 — both decisions are made and built. §2, §4 and §6 now
+describe what the code does rather than what to decide.
 **Status:** design + the two decisions that must be made before anyone codes.
 **Audience:** the three of us. Read `dynamic_crawler/HANDOFF.md` first.
 
@@ -33,11 +35,32 @@ The two repo methods are named `*_cbb_*` but their SQL is regulator-agnostic
 
 ---
 
-## 2. DECISION 1 — the identity key
+## 2. DECISION 1 — the identity key — DECIDED, and it is per SOURCE
 
-**This blocks everything else and it is the lead's call.** "Is this document the
-same one we saw last week?" has to have exactly one answer per regulator, or
-change detection produces nonsense.
+**Ruled and built 2026-08-10: one answer per SOURCE, not per regulator**, with the
+regulator's value as the default when a source names none. `(document_url,
+doc_path)` is still that default, and no config overrides it today, so this changed
+no behaviour on any existing run.
+
+**Why it moved.** A regulator's config is a LIST of sources. SAMA's holds a
+DataTables grid whose documents have a `Circular No.` and two rulebook walks whose
+articles have none — one key for the file has no right answer. `[reference_no]`
+gives all 28 articles the identity `("",)` and they overwrite each other; the
+default leaves a re-issued circular at a new url reading as one new document plus
+one disappearance. Per source, each gets the key that fits it. The same is true of
+`version_key`, which drives a lookup across the *whole* store, so a reference
+number unique only within one source must not be allowed to drive it.
+
+Each source stamps its own choice onto the documents it produced
+(`crawler/generic_crawler_wrapper.py` — the composite's fetch loop is the only
+place that knows which source a document came from), and it is read back per
+document in `formfill/orch.py::_identity_for`. The change store reads the same
+stamp, so the sweep and the ingest path cannot disagree about what "the same
+document" means.
+
+**Not yet possible on the formfill path:** a hint file cannot declare an identity
+(`formfill/api.py`, and it is not in `formfill/schema.py`'s `KNOWN_KEYS`), so
+form-backed regulators are stuck on the default however their site is shaped.
 
 What the code does *today*, inconsistently (`filter_new_documents`):
 
@@ -104,7 +127,22 @@ costs a fraction of a full crawl. So:
 The saving is the whole point: SBP's phase 2 is 4,160 page loads. Running it only
 for new rows turns a multi-hour nightly job into a 32-minute one.
 
-`formfill run --no-details` is exactly step 1.
+`formfill run --no-details` is exactly step 1, and `formfill run --only-urls
+<file>` is step 3 — phase 1 still walks the whole listing, so the inventory stays
+complete and only the named rows are opened. `sweep --targets <file>` writes that
+list from the documents a sweep ruled `modified`.
+
+The rows it walks past are recorded as `detail_skipped`, and the orchestrator
+puts them in a `not_reread` bucket: not compared, not written, and not counted
+absent. A row dropped from a targeted run instead of recorded is a row §4's gate
+reports as disappeared.
+
+Where a source's token moves in bulk, a second tier fetches the document's own
+text and only a moved hash makes it `modified`. A sweep that could not read that
+text reports the document `unknown` and **leaves the stored token where it was**,
+so the next sweep still sees the move and tries again. Reading `unknown` as a
+transient is wrong: it is a document whose change nobody has judged yet, and it
+stays in the shortlist until one does.
 
 ### Tree sites (SAMA sandbox, rulebooks) — no cheap listing exists
 
@@ -156,6 +194,49 @@ Even when a run is trustworthy, I would not delete. Mark
 `status = 'withdrawn'` with the date, and let a person confirm. Regulators do
 withdraw documents, but rarely, and it is worth a human glance.
 
+**Built 2026-08-10** — `dynamic_crawler/withdrawal.py` for the change sweeps,
+`dynamic_crawler/crawl_absence.py` for the crawl.
+Every sweep report carries a `withdrawals` block: `withdrawal-proposed` needs the
+document absent from two consecutive sweeps **spanning 20 hours**, attributed to
+the signal that is judging it; anything else is `watching` or `not-judged` and
+says which condition stopped it. Four things learned building it:
+
+- **A signal may only judge absences it recorded.** The state file is per source,
+  not per signal, so two signals can share one — and each would otherwise report
+  the other's documents as withdrawal candidates.
+- **Counting sweeps is not measuring time.** Nothing stops two runs of the CLI a
+  second apart, and a regulator halfway through republishing is not a withdrawal.
+- **The count allowance is one document OR 5%, whichever is larger.** Most sources
+  here hold 12–17 documents, where one document is 6–8%: a flat 5% blocks every
+  real single withdrawal and the whole layer never proposes anything.
+- **A signal that cannot see the whole inventory proposes nothing at all**, which
+  is what keeps the sweep over stored urls and the sitemap out of this entirely.
+
+`mark_regulation_withdrawn` exists on both repos and **is called by nothing** —
+it sets the status and inserts a marker version rather than deleting, so the row
+leaves the gate and every sweep while staying readable.
+
+**The crawl path reaches the same three verdicts through `crawl_absence.py`**, and
+`withdrawal.decide` is shared unchanged. Three things are its own:
+
+- **Its streak memory is a directory of its own**, `output/change_state/crawl/`.
+  A sweep counts an absence for every key in the file it opens and `missed()`
+  never asks who owns the record, so a shared file would let a daily sweep build
+  the crawl's streak — and its 20-hour span — on the crawl's behalf.
+- **The verdict is per source, not per run.** A gate problem naming one source
+  stops that source; a bot-protection page or a cap stops all of them. A stored
+  row that cannot be charged to a source — a composite writing one
+  `source_system` from two sources — is `not-judged` rather than charged to a
+  guess.
+- **It re-asks the count question with the one-document allowance.** The gate's
+  flat 5% quarantines a source of 17 that lost one document, which would have
+  shipped this inert on every source under 20. The gate's own tolerance is
+  untouched; there are simply two count rules, each named where it is used.
+
+A run that walked past pages without opening them proposes nothing, the same rule
+as a sweep's `--no-documents`. Being seen clears a streak whatever the gate said;
+only a source that passed it advances one.
+
 ### Store three numbers per run per source
 
 That is all the history you need:
@@ -166,6 +247,54 @@ run_at | source | row_count | inventory_hash   (md5 of the sorted identity keys)
 
 `inventory_hash` unchanged = nothing at all changed, skip everything else. It is
 the cheapest possible early exit and it will be the common case.
+
+**Built 2026-08-10, with three corrections worth knowing:**
+
+- **One row per source AND one for the regulator's total.** The tolerance was
+  measured against the sum, and a composite logs a failed source and carries on —
+  so a small source dying entirely hid inside the 5%. The gate now checks both.
+  A single-source run still writes exactly one row.
+- **Each per-source row carries the verdict its OWN problems earn**, by the same
+  attribution the withdrawal decision uses. Stamping the run's verdict on them
+  froze a healthy source's baseline for as long as a sibling was broken — and
+  `last_good_run` returns PASS only, so that source then failed its own count
+  check against a baseline several runs old, and the withdrawal layer read the
+  stale number as its prior. A `total` count problem is the one exception: it
+  stops only the sources that had no baseline of their own to be checked
+  against, because a source already found within tolerance is answered and a
+  source with no history must not have its first baseline set by a short run.
+  The run's own verdict is unchanged, and `gate_by_source` in the report says
+  which source was stopped by what.
+- **The recorded verdict answers "may this count be the baseline?", which is not
+  "may this run act on absences?".** Sharing one answer deadlocked the gate: a run
+  distrusted for a count was also a run that refused to remember what it saw, so
+  the same step change was re-detected for ever and no source that grew ever got
+  a new baseline. **A count that ROSE is remembered; a count that FELL is not.** A
+  prior that is too high only makes the withdrawal gate stricter, while a prior
+  that is too low is what opens it on the documents a truncated crawl lost. The
+  report carries both answers — `run_trustworthy` and `baseline_verdict` — and a
+  rise does not excuse a problem of any other kind. A source with no baseline at
+  all takes its first one only from a run with nothing against it: raising a
+  prior is not the same as inventing one.
+
+**What this leaves, and it must be built with the withdrawal write:** a count that
+FELL for a real reason still waits for a person, by design — and confirming those
+withdrawals is not enough on its own. `mark_regulation_withdrawn` removes the rows
+from the library, but the crawl's count stays below a baseline nobody lowered, so
+the gate goes on quarantining the source for the shrink it just approved. **Whatever
+wires up the status write has to bring the baseline down in the same step.** Nothing
+does today, because nothing withdraws.
+- **The identity keys are `field=value` pairs, not bare values**, because one run
+  can carry two sources keyed on different fields entirely.
+- **`source` is `NVARCHAR(200)` and the writer logs its own failures**, so an
+  over-long key costs the gate its baseline and says nothing. Truncate at the call
+  site.
+
+**Looking up what a source already stored needs BOTH the regulator and the
+source_system.** They are not the same thing and `source_system` is not unique:
+AML and SIMAH both publish under `Rules and Regulations`, SDAIA and MISA both under
+`Laws and Regulations`. Scoped on the string alone, one regulator's run reads
+another's library and offers it up as disappeared.
 
 ---
 

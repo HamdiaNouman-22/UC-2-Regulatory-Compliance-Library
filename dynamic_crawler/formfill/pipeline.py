@@ -53,6 +53,7 @@ except ImportError as _e:                      # pragma: no cover - environment 
         "which is not present in this checkout. Pull the branch that adds it. "
         "The formfill CLI does not depend on it and works without.") from _e
 
+from dynamic_crawler import fingerprint
 from dynamic_crawler.formfill.runner import _doc_title, _ext_type, content_key
 from dynamic_crawler.formfill.schema import approval_state, load_hints
 
@@ -357,6 +358,17 @@ def _fetch_documents_formfill(self, limit=None):
             dropped += 1                      # a page already carries this file
             continue
         _add(self._doc_from_document_row(d, shape))
+
+    # Both paths above end here, so one pass covers exploded attachments and
+    # standalone files alike. Off unless the form asks for it: it costs one
+    # request per document.
+    probe = None
+    if self.hints.get("version_probe"):
+        probe = fingerprint.annotate(
+            out, workers=self.hints.get("version_probe_workers"))
+        logger.info("FormfillCrawler[%s] version probe: %s",
+                    self.source_system, probe)
+    self.last_version_probe = probe
 
     logger.info(
         "FormfillCrawler[%s/%s] shape=%s -> %d documents "

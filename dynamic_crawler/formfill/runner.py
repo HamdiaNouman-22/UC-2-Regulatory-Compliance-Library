@@ -777,16 +777,62 @@ def _load(page, url: str, wait_ms: int, tries: int = 3, snap: str | None = None)
     return False
 
 
+def _url_key(url: str) -> str:
+    """A row's href against a targeted url. Trailing slash only: a fragment is
+    part of the identity, since SDAIA files four documents at #page=N of one
+    PDF."""
+    return (url or "").strip().rstrip("/")
+
+
+def _split_targets(rows: list, targeted: set | None, is_tree: bool) -> tuple:
+    """(open, walk past, warnings). Pure, because the rule deciding what a
+    targeted run does NOT read is the one that can empty a library."""
+    if targeted is None:
+        return list(rows), [], []
+    if is_tree:
+        # Same reason as --max-details: on a tree phase 2 IS the walk that
+        # discovers deeper nodes, so targeting it stops the discovery.
+        return list(rows), [], [
+            "--only-urls is ignored for shape: tree (phase 2 is the walk that "
+            "discovers deeper nodes) — the whole tree was crawled"]
+    targets = [r for r in rows if _url_key(r.get("href")) in targeted]
+    skipped = [r for r in rows if _url_key(r.get("href")) not in targeted]
+    # An EMPTY target list is "nothing changed", the normal answer and not a
+    # mismatch. Urls that match no row are.
+    warns = ([f"--only-urls matched NO row of {len(rows)}: phase 2 did not run "
+              "at all. Check the urls came from this source"]
+             if targeted and not targets else [])
+    return targets, skipped, warns
+
+
+def _stamp_hashes(records: list) -> None:
+    """The record hash, in place.
+
+    An unopened row has no detail text and the row_text fallback would hash the
+    LISTING — a different hash from the one a full crawl stored, which reads as
+    an edit. Left empty instead.
+    """
+    for rec in records:
+        rec["content_hash"] = ("" if rec.get("detail_skipped")
+                               else content_key(rec.get("text")
+                                                or rec.get("row_text") or ""))
+
+
 def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 1200,
         fetch_details: bool | None = None, max_details: int | None = None,
         max_pages: int | None = None, write_excel: bool = True,
-        snapshot: str | Path | None = None) -> dict:
+        snapshot: str | Path | None = None, only_urls=None) -> dict:
     """Crawl `hints['seed_url']` exactly as the form says. Returns a run summary.
 
     `snapshot` is a saved copy of the seed page. Given one, the run makes NO
     network requests: the same form, the same extraction, replayed against the
     saved HTML. The summary records `source: snapshot` so a replay can never be
     mistaken for a crawl of the live site.
+
+    `only_urls` narrows PHASE 2 to those urls. Phase 1 still walks the whole
+    listing, so the inventory stays complete; the rows that were not opened are
+    recorded as `detail_skipped` rather than dropped, because a row missing from
+    a run is a row the completeness gate reports as disappeared.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -802,6 +848,7 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                   for t, r in (hints.get("fields") or {}).items() if r.get("from") == "css"]
     rx_fields = compile_field_regexes(hints)
     do_details = hints.get("fetch_details", True) if fetch_details is None else fetch_details
+    targeted = {_url_key(u) for u in only_urls} if only_urls is not None else None
 
     strip_sels = list((hints.get("content") or {}).get("strip") or [])
     lib = hints.get("library") or {}
@@ -1191,6 +1238,12 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
         # NOTE: for a tree this is the SAME list object as `rows`, not a copy —
         # that is what lets the walk below discover new nodes while iterating.
         targets = rows if do_details else []
+        skipped: list[dict] = []
+        if targets and targeted is not None:
+            targets, skipped, warns = _split_targets(rows, targeted, is_tree)
+            warnings.extend(warns)
+            emit({"event": "targeted", "asked": len(targeted),
+                  "matched": len(targets), "skipped": len(skipped)})
         if max_details and not is_tree:
             targets = targets[:max_details]
         elif max_details and is_tree:
@@ -1395,10 +1448,19 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                                   " > ".join(r.get("section_trail") or []) or section,
                                   declared=True)
 
+        # A targeted run still has to account for every row it walked past. The
+        # record says the detail page was not opened, so nothing downstream reads
+        # an unopened page as an emptied one.
+        for r in skipped:
+            records.append(_record(r, section, seed, {"detail_skipped": True}))
+            if r["href"] and _is_doc(r["href"]):
+                _add_document(documents, r["href"], r["title"], seed,
+                              " > ".join(r.get("section_trail") or []) or section,
+                              declared=True)
+
         browser.close()
 
-    for rec in records:
-        rec["content_hash"] = content_key(rec.get("text") or rec.get("row_text") or "")
+    _stamp_hashes(records)
     docs = list(documents.values())
     # A title shared by several different documents is not a title: GOSI files
     # four occupational-hazard policies under one "Insurance coverage document"
@@ -1429,6 +1491,11 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
         "documents": len(docs),
         "titles_disambiguated": retitled,
         "phase2_ran": bool(targets),
+        # Provenance, for the same reason as `source` below: a targeted run
+        # re-read some detail pages and not others, so its records are not a
+        # full crawl and nothing downstream may treat them as one.
+        "targeted": targeted is not None,
+        "detail_skipped": len(skipped),
         "fill_rates": _fill_rates(rows, hints),
         "blocked_pages": blocked,
         # Provenance. A replay produces the same rows as a crawl, which is what
