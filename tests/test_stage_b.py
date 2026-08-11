@@ -23,6 +23,7 @@ What is verified here:
 from __future__ import annotations
 
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -168,6 +169,12 @@ class FakeCrawler:
         return list(self.docs)
 
 
+#: The crawl's miss-streak files, kept out of output/ so a test run leaves the
+#: real state alone. One directory per build() call, so tests do not share memory.
+_STATE = Path(tempfile.mkdtemp(prefix="crawl-state-"))
+_BUILT = [0]
+
+
 def build(repo, crawler=None, **kw):
     """A NewOrchestrator with the parent's __init__ bypassed."""
     o = NewOrchestrator.__new__(NewOrchestrator)
@@ -178,6 +185,8 @@ def build(repo, crawler=None, **kw):
     o.version_key = kw.pop("version_key", None)
     o.analyse = False
     o.limit = None
+    _BUILT[0] += 1
+    o.change_root = kw.pop("change_root", _STATE / str(_BUILT[0]))
     o.report = {}
     return o
 
@@ -377,6 +386,112 @@ def test_pending_work_overrides_an_unchanged_hash():
     report = o.run_for_regulator("REG")
     assert processed, "one new document is pending; the run must not skip"
     assert report["processed"] == 1
+
+
+# --------------------------------------------------------------------------- #
+#  the withdrawal decision on the crawl path                                    #
+# --------------------------------------------------------------------------- #
+
+def _absent_run(**kw):
+    """A trustworthy run whose stored row is not in the listing."""
+    stored = [{"id": 1, "document_url": "gone", "doc_path": [],
+               "content_hash": "h1", "source_system": "SRC", "title": "Gone"},
+              {"id": 2, "document_url": "here", "doc_path": [],
+               "content_hash": "h1", "source_system": "SRC"}]
+    repo = FakeRepo(rows=stored)
+    # Explicitly None: the fake's __getattr__ fabricates a recorder for any
+    # attribute it does not hold, so a `getattr(..., None)` default never fires.
+    repo._last_run = None
+    docs = [Doc(document_url="here", doc_path=[], content_hash="h1")]
+    o = build(repo, FakeCrawler(docs, source_system="SRC"), **kw)
+    o.check_run_trustworthy = lambda d: (True, [])
+    o._process_docs = lambda todo, name: None
+    return o
+
+
+def test_the_report_carries_a_withdrawals_block():
+    report = _absent_run().run_for_regulator("REG")
+    assert report["classified"]["disappeared"] == 1
+    block = report["withdrawals"]
+    assert block["counts"]["withdrawal-proposed"] == 0, \
+        "a first run has no history, so it cannot claim two absences"
+    assert block["counts"]["not-judged"] == 1
+    assert report["disappeared_actioned"] is False
+
+
+def _seed_streak(root):
+    """One prior run, then its streak backdated rather than sleeping 20 hours."""
+    _absent_run(change_root=root).run_for_regulator("REG")
+    from dynamic_crawler import crawl_absence as ca
+    st = ca.store_for("src", root=root)
+    st.records["document_url=gone|doc_path="].update(
+        {"signal": ca.SIGNAL, "misses": 1,
+         "first_missed": "2020-01-01T00:00:00Z",
+         "last_missed": "2020-01-01T00:00:00Z"})
+    st.save()
+
+
+def test_a_second_run_a_day_later_proposes_the_absence():
+    root = _STATE / "streak"
+    _seed_streak(root)
+    block = _absent_run(change_root=root).run_for_regulator("REG")["withdrawals"]
+    assert block["counts"]["withdrawal-proposed"] == 1
+    assert block["withdrawal-proposed"][0]["url"] == "gone"
+    assert block["confirmed"] is False
+
+
+def test_a_targeted_run_refuses_what_a_full_run_would_propose():
+    """A run that walked past pages is not entitled to call anything absent."""
+    root = _STATE / "targeted"
+    _seed_streak(root)
+    o = _absent_run(change_root=root)
+    o.crawler.docs.append(Doc(document_url="skipped", doc_path=[],
+                              content_hash="", extra_meta={"detail_skipped": True}))
+    report = o.run_for_regulator("REG")
+    block = report["withdrawals"]
+    assert report["targeted_run"]["documents_not_reread"] == 1
+    assert block["counts"]["withdrawal-proposed"] == 0
+    assert "walked past" in block["watching"][0]["why"]
+
+
+def test_the_early_exit_still_writes_the_streak_memory():
+    """A run that recorded nothing leaves every document unattributed, and an
+    unattributed absence can never be judged."""
+    root = _STATE / "earlyexit"
+    stored = [{"id": 1, "document_url": "a", "doc_path": ["X"],
+               "content_hash": "h1", "source_system": "SRC"}]
+    repo = FakeRepo(rows=stored)
+    docs = [Doc(document_url="a", doc_path=["X"], content_hash="h1")]
+    o = build(repo, FakeCrawler(docs, source_system="SRC"), change_root=root)
+    o.check_run_trustworthy = lambda d: (True, [])
+    o._inventory_hash = lambda d: "INV"
+    repo._last_run = {"inventory_hash": "INV"}
+    o._process_docs = lambda todo, name: None
+
+    report = o.run_for_regulator("REG")
+    assert "skipped" in report
+    from dynamic_crawler import crawl_absence as ca
+    st = ca.store_for("src", root=root)
+    assert st.records["document_url=a|doc_path=X"]["signal"] == ca.SIGNAL
+
+
+def test_the_default_streak_memory_is_the_crawls_own_directory():
+    """Not a file a sweep also writes: run_sweep counts an absence for every key
+    in the file it opens, and missed() never asks who owns the record."""
+    from dynamic_crawler import crawl_absence as ca
+    from dynamic_crawler.change_state import DEFAULT_ROOT
+    o = _absent_run(change_root=None)
+    store = ca.store_for(o.source_name, root=getattr(o, "change_root", None))
+    assert store.path.parent == ca.CRAWL_ROOT
+    assert store.path.parent != DEFAULT_ROOT
+
+
+def test_nothing_on_this_path_writes_a_withdrawn_status():
+    """`mark_regulation_withdrawn` exists on both repos and is called by nothing."""
+    o = _absent_run(change_root=_STATE / "nowrite")
+    o.run_for_regulator("REG")
+    assert o.repo.named("mark_regulation_withdrawn") == []
+    assert o.repo.named("mark_regulation_deleted") == []
 
 
 # --------------------------------------------------------------------------- #
