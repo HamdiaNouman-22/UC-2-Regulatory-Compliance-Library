@@ -412,12 +412,14 @@ def test_a_sitemap_that_restamps_every_document_at_once_is_refused(tmp_path):
 
 
 def test_the_first_bulk_republish_shortlists_everything(tmp_path, monkeypatch):
-    """Unavoidable here, and it is the cost of the one-request design.
+    """Accepted, not unavoidable: a one-shot that pre-hashed every page was
+    weighed and refused.
 
     The confirm hash is taken only for documents already ruled modified, so it
     is never stored at baseline -- and unlike GOSI the text does not arrive with
-    the date, so storing one would mean fetching every page on every sweep. The
-    first time the dates move there is nothing to compare against.
+    the date, so storing one would mean fetching every page on every sweep. This
+    event is what lays the hashes down, and it costs fewer fetches than pre-
+    hashing the source would. A missing hash reads `modified`, never `unchanged`.
     """
     _serve(monkeypatch, {})
     store = ChangeStateStore(tmp_path / "s.json", source="MHRSD/mhrsd.regs")

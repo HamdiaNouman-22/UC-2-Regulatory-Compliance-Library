@@ -333,6 +333,35 @@ def test_a_confirm_that_raises_is_unknown_not_a_crash(tmp_path):
     assert list(verdicts(buckets)) == [cs.UNKNOWN]
 
 
+def test_a_failed_confirm_does_not_consume_the_change(tmp_path):
+    """The token it moved TO must not be stored by a sweep that never judged it.
+
+    Otherwise the next sweep compares new against new and reads `unchanged` for
+    good — a document that really was amended goes quiet after one bad fetch.
+    """
+    store = store_at(tmp_path)
+    swept(store, [seen(token="4")])
+
+    signal = FakeSignal([seen(token="5")], confirm_required=True, raises=True)
+    _report, buckets = cs.run_sweep(signal, store)
+    assert list(verdicts(buckets)) == [cs.UNKNOWN]
+    assert store.get("document_url=https://x/1")["token"] == "4"
+
+    # The next sweep still sees a moved token, so the confirm is retried.
+    retry = FakeSignal([seen(token="5")], confirm_required=True, confirm_hash="H")
+    _report, buckets = cs.run_sweep(retry, store)
+    assert list(verdicts(buckets)) == [cs.MODIFIED]
+    assert retry.confirmed == ["document_url=https://x/1"]
+
+
+def test_a_confirm_that_returns_nothing_does_not_consume_it_either(tmp_path):
+    """The same rule for the other way a confirm produces no hash."""
+    store = store_at(tmp_path)
+    swept(store, [seen(token="4")])
+    swept(store, [seen(token="5")], confirm_required=True, confirm_hash="")
+    assert store.get("document_url=https://x/1")["token"] == "4"
+
+
 # --------------------------------------------------------------------------- #
 #  absence, and who is allowed to observe it                                   #
 # --------------------------------------------------------------------------- #
