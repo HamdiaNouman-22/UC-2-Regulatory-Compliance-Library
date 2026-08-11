@@ -187,7 +187,8 @@ Even when a run is trustworthy, I would not delete. Mark
 `status = 'withdrawn'` with the date, and let a person confirm. Regulators do
 withdraw documents, but rarely, and it is worth a human glance.
 
-**Built 2026-08-10 for the change sweeps only** — `dynamic_crawler/withdrawal.py`.
+**Built 2026-08-10** — `dynamic_crawler/withdrawal.py` for the change sweeps,
+`dynamic_crawler/crawl_absence.py` for the crawl.
 Every sweep report carries a `withdrawals` block: `withdrawal-proposed` needs the
 document absent from two consecutive sweeps **spanning 20 hours**, attributed to
 the signal that is judging it; anything else is `watching` or `not-judged` and
@@ -206,8 +207,28 @@ says which condition stopped it. Four things learned building it:
 
 `mark_regulation_withdrawn` exists on both repos and **is called by nothing** —
 it sets the status and inserts a marker version rather than deleting, so the row
-leaves the gate and every sweep while staying readable. The crawl path's own
-`disappeared` bucket is still reported and never actioned.
+leaves the gate and every sweep while staying readable.
+
+**The crawl path reaches the same three verdicts through `crawl_absence.py`**, and
+`withdrawal.decide` is shared unchanged. Three things are its own:
+
+- **Its streak memory is a directory of its own**, `output/change_state/crawl/`.
+  A sweep counts an absence for every key in the file it opens and `missed()`
+  never asks who owns the record, so a shared file would let a daily sweep build
+  the crawl's streak — and its 20-hour span — on the crawl's behalf.
+- **The verdict is per source, not per run.** A gate problem naming one source
+  stops that source; a bot-protection page or a cap stops all of them. A stored
+  row that cannot be charged to a source — a composite writing one
+  `source_system` from two sources — is `not-judged` rather than charged to a
+  guess.
+- **It re-asks the count question with the one-document allowance.** The gate's
+  flat 5% quarantines a source of 17 that lost one document, which would have
+  shipped this inert on every source under 20. The gate's own tolerance is
+  untouched; there are simply two count rules, each named where it is used.
+
+A run that walked past pages without opening them proposes nothing, the same rule
+as a sweep's `--no-documents`. Being seen clears a streak whatever the gate said;
+only a source that passed it advances one.
 
 ### Store three numbers per run per source
 
