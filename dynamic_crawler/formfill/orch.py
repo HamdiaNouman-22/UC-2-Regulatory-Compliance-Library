@@ -196,19 +196,43 @@ class NewOrchestrator(Orchestrator):
         doc.status = monitoring_status
 
     def classify_documents(self, docs: List) -> Dict[str, List]:
-        """new / modified / unchanged / disappeared.
+        """new / modified / unchanged / disappeared / not_reread.
 
         `modified` is decided on content_hash: same identity, different hash. When
         the hash matches we do nothing at all — that is the cheap common case and
         the reason a nightly run is minutes rather than hours.
+
+        `not_reread` is only ever filled by a targeted run: the documents it
+        chose not to open, neither compared nor counted as absent. Stored rows
+        held back from `disappeared` for the same reason are counted in
+        `_not_reread_stored` rather than mixed into a bucket of documents.
         """
-        buckets = {"new": [], "modified": [], "unchanged": [], "disappeared": []}
+        buckets = {"new": [], "modified": [], "unchanged": [], "disappeared": [],
+                   "not_reread": []}
         seen_ids = set()
+        # Pages a targeted run walked past without opening. Their stored
+        # attachments are not produced by such a run either, so both halves are
+        # kept out of `disappeared` below.
+        not_reread_pages = set()
+        self._not_reread_stored = 0
         self._token_backfill = []
         self._check_identities(docs)
 
         for doc in docs:
             existing = self._find_existing(doc)
+
+            # A row this run did not open has no content to compare, and its
+            # hash would be of the LISTING. Comparing it reads as an edit and
+            # B2's refresh then writes the empty page over the stored one.
+            if (getattr(doc, "extra_meta", None) or {}).get("detail_skipped"):
+                for u in (getattr(doc, "document_url", ""),
+                          getattr(doc, "source_page_url", "")):
+                    if u:
+                        not_reread_pages.add(str(u).strip().rstrip("/"))
+                if existing is not None:
+                    seen_ids.add(existing.get("id"))
+                buckets["not_reread"].append(doc)
+                continue
 
             # Tiebreak: a regulator that republishes at a NEW url would otherwise
             # look like one new document plus one disappearance. Same reference
@@ -256,10 +280,19 @@ class NewOrchestrator(Orchestrator):
                 self._set_status(doc, "modified")
                 buckets["modified"].append(doc)
 
-        # Anything in the store for this source that this run did not see.
+        # Anything in the store for this source that this run did not see —
+        # except what it deliberately did not look at. A document hanging off a
+        # page a targeted run skipped is absent from the run because nothing
+        # opened that page, which is not the same as gone from the site.
         for r in self._stored_for_source(docs):
-            if r.get("id") not in seen_ids:
-                buckets["disappeared"].append(r)
+            if r.get("id") in seen_ids:
+                continue
+            if not_reread_pages and any(
+                    str(r.get(k) or "").strip().rstrip("/") in not_reread_pages
+                    for k in ("source_page_url", "document_url")):
+                self._not_reread_stored += 1
+                continue
+            buckets["disappeared"].append(r)
 
         return buckets
 
@@ -746,6 +779,14 @@ class NewOrchestrator(Orchestrator):
         }
         if len(groups) > 1:
             self.report["by_source"] = {k: len(v) for k, v in groups.items()}
+        if buckets["not_reread"] or self._not_reread_stored:
+            # A targeted run. Said out loud, because its `unchanged` count is
+            # not the same claim a full crawl's is: most of this source was
+            # never looked at.
+            self.report["targeted_run"] = {
+                "documents_not_reread": len(buckets["not_reread"]),
+                "stored_rows_not_reread": self._not_reread_stored,
+            }
         if buckets["disappeared"]:
             self.report["note"] = (
                 f"{len(buckets['disappeared'])} document(s) were not seen this run. "

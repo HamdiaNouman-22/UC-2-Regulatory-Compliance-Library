@@ -263,6 +263,10 @@ class GenericSiteCrawler:
         # every short article on a rulebook site.
         pdf = (r.get("pdf_links") or "").split(" | ")[0].strip()
         extra_pdf = {"org_pdf_link": pdf} if pdf.startswith("http") else {}
+        # A targeted run walked past this row without opening it. Carried so the
+        # classifier can tell "not re-read" from "read and now empty"; absent on
+        # every ordinary run rather than stamped False on every document.
+        extra_skip = {"detail_skipped": True} if r.get("detail_skipped") else {}
         # The listing row is the only place the reference number and issue date
         # appear on most list sites — the detail page rarely repeats them.
         row_text = r.get("row_text") or ""
@@ -292,6 +296,7 @@ class GenericSiteCrawler:
                 "parent_page_url": r.get("parent_page_url", ""),
                 "row_text": row_text,
                 **extra_pdf,
+                **extra_skip,
             },
         )
 

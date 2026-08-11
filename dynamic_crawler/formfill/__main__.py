@@ -45,6 +45,21 @@ def _resolve_snapshot(value: str | None, name: str) -> Path | None:
     return Path(value)
 
 
+def _read_urls(path: str | None) -> list | None:
+    """The urls to re-read, or None for an ordinary full crawl.
+
+    An EMPTY file is not the same as no file: the sweep found nothing modified,
+    so the right answer is to open no detail page, not to open all of them.
+    """
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"no such url list: {path}")
+    return [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.startswith("#")]
+
+
 def _paths(name: str) -> dict:
     return {
         "hints": HINTS_DIR / f"{name}.yml",
@@ -101,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("hints")
     p.add_argument("--no-details", action="store_true", help="phase 1 only (the inventory)")
     p.add_argument("--max-details", type=int)
+    p.add_argument("--only-urls",
+                   help="a file of urls, one per line — usually `sweep --targets`. "
+                        "Phase 1 still walks the whole listing; only the detail "
+                        "pages of these urls are opened")
     p.add_argument("--max-pages", type=int)
     p.add_argument("--snapshot", nargs="?", const="auto",
                    help="replay the saved page instead of crawling — no network at "
@@ -225,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         runner.run(h, out, headless=headless,
                    fetch_details=False if a.no_details else None,
                    max_details=a.max_details, max_pages=a.max_pages,
-                   snapshot=snap)
+                   snapshot=snap, only_urls=_read_urls(a.only_urls))
         return 0
 
     if a.cmd == "verify":

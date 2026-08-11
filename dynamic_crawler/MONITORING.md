@@ -127,7 +127,15 @@ costs a fraction of a full crawl. So:
 The saving is the whole point: SBP's phase 2 is 4,160 page loads. Running it only
 for new rows turns a multi-hour nightly job into a 32-minute one.
 
-`formfill run --no-details` is exactly step 1.
+`formfill run --no-details` is exactly step 1, and `formfill run --only-urls
+<file>` is step 3 — phase 1 still walks the whole listing, so the inventory stays
+complete and only the named rows are opened. `sweep --targets <file>` writes that
+list from the documents a sweep ruled `modified`.
+
+The rows it walks past are recorded as `detail_skipped`, and the orchestrator
+puts them in a `not_reread` bucket: not compared, not written, and not counted
+absent. A row dropped from a targeted run instead of recorded is a row §4's gate
+reports as disappeared.
 
 ### Tree sites (SAMA sandbox, rulebooks) — no cheap listing exists
 
