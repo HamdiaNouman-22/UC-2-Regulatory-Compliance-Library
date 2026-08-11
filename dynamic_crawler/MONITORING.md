@@ -1,6 +1,8 @@
 # Monitoring — how we detect updates, per regulator
 
 **Written:** 2026-08-02
+**Revised:** 2026-08-10 — both decisions are made and built. §2, §4 and §6 now
+describe what the code does rather than what to decide.
 **Status:** design + the two decisions that must be made before anyone codes.
 **Audience:** the three of us. Read `dynamic_crawler/HANDOFF.md` first.
 
@@ -33,11 +35,32 @@ The two repo methods are named `*_cbb_*` but their SQL is regulator-agnostic
 
 ---
 
-## 2. DECISION 1 — the identity key
+## 2. DECISION 1 — the identity key — DECIDED, and it is per SOURCE
 
-**This blocks everything else and it is the lead's call.** "Is this document the
-same one we saw last week?" has to have exactly one answer per regulator, or
-change detection produces nonsense.
+**Ruled and built 2026-08-10: one answer per SOURCE, not per regulator**, with the
+regulator's value as the default when a source names none. `(document_url,
+doc_path)` is still that default, and no config overrides it today, so this changed
+no behaviour on any existing run.
+
+**Why it moved.** A regulator's config is a LIST of sources. SAMA's holds a
+DataTables grid whose documents have a `Circular No.` and two rulebook walks whose
+articles have none — one key for the file has no right answer. `[reference_no]`
+gives all 28 articles the identity `("",)` and they overwrite each other; the
+default leaves a re-issued circular at a new url reading as one new document plus
+one disappearance. Per source, each gets the key that fits it. The same is true of
+`version_key`, which drives a lookup across the *whole* store, so a reference
+number unique only within one source must not be allowed to drive it.
+
+Each source stamps its own choice onto the documents it produced
+(`crawler/generic_crawler_wrapper.py` — the composite's fetch loop is the only
+place that knows which source a document came from), and it is read back per
+document in `formfill/orch.py::_identity_for`. The change store reads the same
+stamp, so the sweep and the ingest path cannot disagree about what "the same
+document" means.
+
+**Not yet possible on the formfill path:** a hint file cannot declare an identity
+(`formfill/api.py`, and it is not in `formfill/schema.py`'s `KNOWN_KEYS`), so
+form-backed regulators are stuck on the default however their site is shaped.
 
 What the code does *today*, inconsistently (`filter_new_documents`):
 
@@ -166,6 +189,24 @@ run_at | source | row_count | inventory_hash   (md5 of the sorted identity keys)
 
 `inventory_hash` unchanged = nothing at all changed, skip everything else. It is
 the cheapest possible early exit and it will be the common case.
+
+**Built 2026-08-10, with three corrections worth knowing:**
+
+- **One row per source AND one for the regulator's total.** The tolerance was
+  measured against the sum, and a composite logs a failed source and carries on —
+  so a small source dying entirely hid inside the 5%. The gate now checks both.
+  A single-source run still writes exactly one row.
+- **The identity keys are `field=value` pairs, not bare values**, because one run
+  can carry two sources keyed on different fields entirely.
+- **`source` is `NVARCHAR(200)` and the writer logs its own failures**, so an
+  over-long key costs the gate its baseline and says nothing. Truncate at the call
+  site.
+
+**Looking up what a source already stored needs BOTH the regulator and the
+source_system.** They are not the same thing and `source_system` is not unique:
+AML and SIMAH both publish under `Rules and Regulations`, SDAIA and MISA both under
+`Laws and Regulations`. Scoped on the string alone, one regulator's run reads
+another's library and offers it up as disappeared.
 
 ---
 

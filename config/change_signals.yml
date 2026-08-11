@@ -54,11 +54,33 @@ sources:
     # browser crawl.
     confirm: false
 
+  # GOSI is read by --signal gosi, not by the stored-inventory sweep: its CMS
+  # returns the whole page, so the source is the SEED PAGE and `source_system`
+  # here is GOSI's own `siteUrl`. `confirm` is structural on that path and is not
+  # read from this file -- one page date is shared by every instrument on the
+  # page, so a content hash always decides.
+  #
+  # The two GOSI forms declare no regulator or source_system yet. When they do,
+  # reconcile the name they store with these two, or the sweep and the ingest
+  # path will keep separate memories of the same page.
+  - regulator: "GOSI"
+    source_system: "SocialInsurance"
+    # 6 instruments, 45 sections, 6 PDFs on cmsgosi.gosi.gov.sa whose ETag
+    # counters read 22, 12, 3, 3, 3, 3 -- a real per-document history, unlike the
+    # single page date all six instruments share.
+    workers: 4
+    timeout: 20
+
+  - regulator: "GOSI"
+    source_system: "Saned"
+    # 2 instruments, 51 sections, and no document links at all: the page text is
+    # the whole of it, so here the page date is the only signal there is.
+    workers: 4
+    timeout: 20
+
 # Not listed, deliberately:
 #   CMA     its counters (2-5 across four distinct months) earn confirm: false,
 #           but it runs through site_runners/cma_laws.py and its stored
 #           source_system is unverified from here. It takes `defaults` until
 #           someone reads the real value off the library.
 #   MOH x2  same shape as MOE; both forms are still approved=false.
-#   GOSI    its documents live on a SharePoint host the forms never emit, so its
-#           urls are not in the library yet.
