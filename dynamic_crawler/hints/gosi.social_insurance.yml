@@ -36,6 +36,12 @@ section_path:
 
 fetch_details: true
 notes: "Six instruments in fragment-addressed tab panels; each panel's text is the document."
+# Names this source stores under. MUST match config/change_signals.yml,
+# or the change sweep and the ingest path keep separate memories of the
+# same documents.
+library:
+  regulator: "GOSI"
+  source_system: "SocialInsurance"
 meta:
   approved: true
   approved_by: Mohammad Fakih

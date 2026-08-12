@@ -183,6 +183,12 @@ class HintsError(ValueError):
 KNOWN_KEYS = {
     # identity and shape
     "version", "name", "seed_url", "shape", "scope", "requires_headed",
+    # How long to let the seed page settle before anything is queried. Callers
+    # that build a run programmatically (pipeline.FormfillCrawler) do not pass
+    # wait_ms, so every form took the 1200ms default -- and MOE renders its tab
+    # strip ~12s in, so the run walked 0 tabs and blamed the selectors. A slow
+    # site declares its own settle time here. Read by runner.run().
+    "wait_ms",
     # list walking
     "row_selector", "detail_link_selector", "pagination", "page_size",
     "row_count_check", "expand_selector", "tabs",

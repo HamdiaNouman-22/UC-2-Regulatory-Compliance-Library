@@ -43,6 +43,12 @@ notes: >
   turn changed the row set. The walk stops on 'no-control' at page 5.
   published_date comes from span.gregorian-date (the Gregorian half of the
   dual Hijri date); reference numbers appear on only 3 of 63, so none is declared.
+# Names this source stores under. MUST match config/change_signals.yml,
+# or the change sweep and the ingest path keep separate memories of the
+# same documents.
+library:
+  regulator: "MHRSD"
+  source_system: "mhrsd.regs"
 meta:
   approved: true
   approved_by: Mohammad Fakih

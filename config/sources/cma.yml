@@ -1,0 +1,37 @@
+# CMA — Capital Market Authority — Laws & Regulations
+#
+# Wired 2026-08-11. CUSTOM, not generic, and deliberately so.
+#
+# CMA publishes nine tabs in six different page shapes — a chapter-structured
+# law, single pages, card grids, grouped cards, an iframe, sub-tabbed paginated
+# lists with detail pages, and a paginated FAQ. site_runners/cma_laws.py has a
+# handler per shape. A generic link walk collects the easy ones and silently
+# under-collects the rest, and a partial crawl that looks successful is worse
+# than none: the completeness gate would take that undercount as its baseline
+# and never report the gap.
+#
+# crawler/cma_crawler_wrapper.py adapts that runner to the interface
+# `build_regulator_crawler(mode: custom)` expects. It adds no crawling logic —
+# if a tab is wrong, fix it in site_runners/cma_laws.py.
+#
+# NOT YET CALIBRATED against a real run. Do what the MISA entry did: run it,
+# read the workbook, record the count and the tab breakdown here.
+#
+# Media Center announcements (3,297 over 550 pages) are NOT included. That tab
+# is the one shape whose list is not held in the DOM, so it pages the site
+# hundreds of times. Add "announcements" to init_kwargs.tabs if it is wanted.
+
+regulator: "CMA"
+owner: lead
+
+sources:
+  - name: "CMA Laws and Regulations (9 tabs)"
+    mode: custom
+    crawler_class: "crawler.cma_crawler_wrapper.CMACrawler"
+    init_kwargs:
+      headless: true
+      source_system: "CMA-RULES"
+      # CMA throttles. The runner's own measurement: 600-1000ms between detail
+      # fetches finishes SOONER than 0, because backing off avoids the throttle
+      # it would otherwise trip.
+      delay_ms: 600

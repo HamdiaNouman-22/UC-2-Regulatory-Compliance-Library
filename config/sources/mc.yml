@@ -1,0 +1,32 @@
+# Ministry of Commerce — Laws & Regulations
+#
+# Wired 2026-08-11 to make the regulator reachable from the new orchestrator.
+# A Playwright crawler for this site already existed
+# (generic_crawler/crawler_MISA_MC_ZATCA.py) but it is a standalone script with
+# only a main(), so it cannot be named by `mode: custom`, which needs an
+# importable class. `mode: generic` runs the same Playwright engine
+# (generic_crawler/crawler.py) driven by this file instead.
+#
+# NOT YET CALIBRATED. Compare with the MISA entry, whose comment records
+# "Measured 2026-08-01: 94 documents ... across 17 folder paths" — that number
+# came from a first run being read by a person. Do the same here before trusting
+# the output: run it, read the workbook, then write what you found in this
+# comment and adjust scope / max_pages / max_depth.
+#
+# The standalone crawler's own notes are worth reading first
+# (generic_crawler/crawler_MISA_MC_ZATCA.py): MC has an inline CAPTCHA form
+# that had to be stripped, and the site links OUT to other regulators'
+# portals, which is why scope matters here.
+
+regulator: "Ministry of Commerce"
+owner: lead
+
+sources:
+  - name: "Laws and Regulations"
+    mode: generic
+    seed_url: "https://mc.gov.sa/en/Regulations/pages/default.aspx"
+    scope: prefix
+    source_system: "MC-REGULATIONS"
+    category: "Laws and Regulations"
+    max_pages: 150
+    max_depth: 8

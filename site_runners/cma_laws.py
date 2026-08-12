@@ -846,11 +846,24 @@ def crawl_regs(page, tab, trail_root, limit=None):
         title = c["data"].get("title") or c["title"]
         files = list(c["files"])
         text = html = published = last_mod = ""
+        # mk_record(body_source=...) is passed further down but was never
+        # assigned here, so the whole Implementing Regulations tab died with
+        # `NameError: name 'body_source' is not defined` — 0 documents from a
+        # tab that otherwise works. crawl_paged() sets it before use; this
+        # function did not.
+        #
+        # "" rather than "card": merge_prior ranks with
+        # {"detail_page": 2, "card_summary": 1, "": 0, None: 0}, and an unknown
+        # value makes rank.get() return None, which then raises on the >=
+        # comparison. Nothing was fetched when the detail page does not load, so
+        # "" — "anything beats nothing" — is also the honest value.
+        body_source = ""
         url = c["detail"] or (files[0]["href"] if files else tab["url"])
 
         if c["detail"] and load(page, c["detail"], wait_ms=2500):
             d = page.evaluate(JS_REG_DETAIL)
             n_detail += 1
+            body_source = "detail_page"
             text, html = d["text"], d["html"]
             published, last_mod = d["published"], d["last_modified"]
             # Same rule as the consultations: data-title is the site's own clean

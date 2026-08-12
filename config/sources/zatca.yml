@@ -1,0 +1,31 @@
+# ZATCA — Zakat, Tax and Customs Authority — Laws & Regulations
+#
+# Wired 2026-08-11. Same situation as mc.yml: a Playwright crawler for this site
+# already existed (generic_crawler/crawler_MISA_MC_ZATCA.py) but it is a script
+# with only a main(), so `mode: custom` cannot name it. `mode: generic` runs the
+# same engine driven by this file.
+#
+# NOT YET CALIBRATED — run it, read the workbook, record the count here.
+#
+# Two things the standalone crawler learned about this site, both worth knowing
+# if the first run looks wrong:
+#
+#   * JS_BREADCRUMB finds nothing on ZATCA's category pages, so `scope:
+#     breadcrumb` is the wrong choice here — hence prefix.
+#   * The page carries a cookie-consent banner, a government-verification header
+#     and a "Comments and Suggestions" widget, all of which the standalone
+#     crawler strips explicitly. The generic engine may pull them in as content.
+#     If titles or text look polluted, that is why.
+
+regulator: "ZATCA"
+owner: lead
+
+sources:
+  - name: "Laws and Regulations"
+    mode: generic
+    seed_url: "https://zatca.gov.sa/en/RulesRegulations/Pages/rules.aspx"
+    scope: prefix
+    source_system: "ZATCA-RULES"
+    category: "Laws and Regulations"
+    max_pages: 150
+    max_depth: 8
