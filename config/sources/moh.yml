@@ -1,0 +1,37 @@
+# MOH — Ministry of Health — Regulations
+#
+# Wired 2026-08-11. CUSTOM, but not because the site is hard: because it is
+# EASIER than a crawl.
+#
+# The listing page renders with JavaScript, so the formfill hints
+# (moh.rules_recent / moh.rules_archived) were never finished and the obvious
+# conclusion was "this needs a browser". It does not. The page's own JavaScript
+# calls a SharePoint list API that returns every document as JSON in one
+# request. crawler/moh_crawler.py calls that endpoint directly.
+#
+#   Measured 2026-08-11: 83 documents in one call, no browser, ~2 seconds.
+#   By year: 2019 (34), 2021 (24), 2024 (9), 2025 (5), 2023 (5), 2022 (4),
+#            2026 (1), 2020 (1).
+#
+# TWO THINGS THAT WILL BREAK IT IF EDITED CARELESSLY — see the module docstring:
+#   * the path is case-sensitive: /en/Ministry/Rules/_api/... works,
+#     lowercase 302s, and the site root /_api/... is refused by the WAF
+#   * the API needs the listing page's session cookies
+#
+# AND ONE TRAP: the WAF refuses with HTTP 200 and an HTML error page, not a 4xx.
+# The crawler checks the content type rather than the status code, because the
+# status code says success.
+#
+# Each row carries `Modified`, the CMS's own last-changed stamp. So this single
+# call is both the inventory AND the change signal — no ETag probe needed here.
+
+regulator: "Ministry of Health"
+owner: lead
+
+sources:
+  - name: "Regulations"
+    mode: custom
+    crawler_class: "crawler.moh_crawler.MOHCrawler"
+    init_kwargs:
+      source_system: "MOH-RULES"
+      category: "Regulations"

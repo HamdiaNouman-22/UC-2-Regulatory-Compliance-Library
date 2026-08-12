@@ -837,6 +837,13 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    # A slow site can declare its own settle time. Callers that construct a run
+    # programmatically (pipeline.FormfillCrawler) do not pass wait_ms, so every
+    # form used the 1200ms default -- and MOE renders its tab strip after ~12s,
+    # so `_walk_tabs` queried the selector before the tabs existed, walked 0 tabs
+    # and harvested nothing. The site was fine; the run simply looked too early.
+    wait_ms = int(hints.get("wait_ms") or wait_ms)
+
     started = time.time()
     pagination = dict(hints.get("pagination") or {"mode": "none"})
     if max_pages:

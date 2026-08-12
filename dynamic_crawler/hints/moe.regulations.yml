@@ -28,6 +28,11 @@ seed_url: "https://www.moe.gov.sa/en/aboutus/aboutministry/pages/rpr.aspx"
 shape: list
 scope: prefix
 
+# The tab strip renders ~12s after DOMContentLoaded. The default 1200ms
+# settle queried `tabs.selector` before the tabs existed, so the run walked
+# 0 tabs and harvested 0 rows against a site that was working perfectly.
+wait_ms: 14000
+
 tabs:
   selector: "div.PhotoLibraryCategoriesItem"
   skip_labels: ["All"]
