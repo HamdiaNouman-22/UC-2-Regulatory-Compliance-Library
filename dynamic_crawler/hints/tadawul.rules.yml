@@ -99,10 +99,48 @@ fields:
 # FIRST level of doc_path, so it becomes the top-level folder in the library and
 # has to match whatever the regulator is called everywhere else — two spellings
 # would create two sibling trees holding the same regulator's documents.
+# MOVED to the library: block below, 2026-08-12. These two crumbs ARE the
+# regulator and the source system, and declaring them only as a prefix meant they
+# were never STORED — so config/change_signals.yml had no (regulator,
+# source_system) pair to look this source up by, and a sweep could not find its
+# documents. Naming them in both places would repeat each as a second folder
+# (see moe.regulations.yml, which hit exactly that). The h3 level stays here: it
+# is the only crumb this PAGE contributes.
 section_path:
-  prefix: ["Saudi Exchange", "Exchange Rules And Procedures"]
+  prefix: []
   levels:
     - {preceding: "h3"}
 
 # Every row is already a PDF link, so there is no detail page worth opening.
 fetch_details: false
+
+# Names this source stores under, leading the folder trail:
+#   Saudi Exchange | Exchange Rules And Procedures | Rules or Procedures | <title>
+#
+# "Saudi Exchange", NOT "Tadawul" — this is the top-level folder in the library
+# and has to match whatever the regulator is called everywhere else. Two
+# spellings would build two sibling trees holding one regulator's documents.
+# "Tadawul" survives only in this form's filename and output folder.
+library:
+  regulator: "Saudi Exchange"
+  source_system: "Exchange Rules And Procedures"
+meta:
+  approved: true
+  approved_by: lead
+  approved_at: '2026-08-12T15:34:18+00:00'
+  form_hash: cca53c363a5a
+  verify:
+    verdict: PASS
+    counts:
+    - 19
+    - 19
+    - 19
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+      arabic_url: 100.0
+      last_updated_date: 100.0
+    verified_at: '2026-08-12T15:33:59+00:00'
+    source: live
+    forced: false

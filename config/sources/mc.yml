@@ -1,32 +1,89 @@
 # Ministry of Commerce — Laws & Regulations
 #
-# Wired 2026-08-11 to make the regulator reachable from the new orchestrator.
-# A Playwright crawler for this site already existed
-# (generic_crawler/crawler_MISA_MC_ZATCA.py) but it is a standalone script with
-# only a main(), so it cannot be named by `mode: custom`, which needs an
-# importable class. `mode: generic` runs the same Playwright engine
-# (generic_crawler/crawler.py) driven by this file instead.
+# RE-ENABLED 2026-08-13. It was disabled earlier the same day on a WRONG
+# ANALYSIS, corrected here so nobody repeats it.
 #
-# NOT YET CALIBRATED. Compare with the MISA entry, whose comment records
-# "Measured 2026-08-01: 94 documents ... across 17 folder paths" — that number
-# came from a first run being read by a person. Do the same here before trusting
-# the output: run it, read the workbook, then write what you found in this
-# comment and adjust scope / max_pages / max_depth.
+# THE MISTAKE
 #
-# The standalone crawler's own notes are worth reading first
-# (generic_crawler/crawler_MISA_MC_ZATCA.py): MC has an inline CAPTCHA form
-# that had to be stripped, and the site links OUT to other regulators'
-# portals, which is why scope matters here.
+# Every row's document_url looked like this:
+#
+#     /regapis?siteURL=https%3A%2F%2Fregulations.mc.gov.sa%2F&op=Download
+#             &attId=c73b3ead-ab48-4204-8428-a83f00dc3620&lng=en&isInline=false
+#
+# I decoded only `siteURL`, found the same value on all 70 rows, and concluded
+# they were 70 copies of one link to another site's homepage — a site that does
+# not resolve from here. On that basis the source was disabled.
+#
+# `siteURL` is a BACKEND PARAMETER telling the proxy which system to fetch from.
+# The document is identified by `attId`, and all 70 attIds are distinct. So the
+# 70 rows are 70 distinct DOWNLOAD ENDPOINTS, served by mc.gov.sa — which is
+# reachable — and regulations.mc.gov.sa never has to resolve for us at all.
+#
+# WHAT IS ACTUALLY WRONG WITH THE OUTPUT
+#
+# Not the urls. The TITLES and the HIERARCHY:
+#
+#   * titles came from anchor text, which on this site is "2", "Regapis", or a
+#     zero-width-space "click here" — the real name is on the row/card, not the
+#     link
+#   * all 72 rows shared one doc_path, so there is no hierarchy at all
+#   * one row is a genuine Bureau of Experts cross-reference (laws.boe.gov.sa),
+#     correctly typed EXTERNAL
+#
+# That is the same shape of problem ZATCA had, and it wants the same answer: a
+# FORM that reads the row for its title and section, not a generic link walk.
+# Until that form exists this source stays `mode: generic` and its output should
+# be treated as urls-only — do not approve it for the titles.
+#
+# NOTE ON CONNECTIVITY: mc.gov.sa answered HTTP 200 to curl and
+# ERR_CONNECTION_RESET to Playwright minutes apart on 2026-08-13. Intermittent
+# failures here are the network, not the site — re-test before concluding
+# anything about availability.
 
 regulator: "Ministry of Commerce"
 owner: lead
 
+# RESOLVED 2026-08-14 — this is no longer urls-only.
+#
+# The "wants a FORM" conclusion above was half right: it wanted a reader that
+# knows the page shape, but a formfill form was the wrong vehicle. MC serves each
+# law as ONE page holding three collapsible sections (the law, its implementing
+# regulation, its attachments), and the manual library models those as three
+# separate entries — which no list-and-detail form expresses.
+#
+# generic_crawler/crawler_MISA_MC_ZATCA_v2.py already split them correctly and
+# had done all along; what was missing was the last step, turning its part
+# records into RegulatoryDocument objects. crawler/mc_crawler_wrapper.py is that
+# step, so MC now goes through the same NewOrchestrator -> ExcelRepo -> promote
+# path as every other regulator and can be approved without re-crawling.
+#
+# Measured 2026-08-14: 16 laws -> 42 documents (16 law, 10 implementing
+# regulation, 16 attachments), no duplicate identities, all 42 with html. Titles
+# now come from the law card, not from anchor text, and doc_path carries a real
+# hierarchy whose last crumb is the part.
+#
+# (The connectivity note above still stands. Separately: a run through Git Bash
+# mangles `--prefix-root /en/Regulations/` into a Windows path and returns ZERO
+# pages, looking exactly like a site failure — the wrapper calls the crawler
+# without a shell so that cannot happen here.)
 sources:
   - name: "Laws and Regulations"
-    mode: generic
-    seed_url: "https://mc.gov.sa/en/Regulations/pages/default.aspx"
-    scope: prefix
-    source_system: "MC-REGULATIONS"
-    category: "Laws and Regulations"
-    max_pages: 150
-    max_depth: 8
+    mode: custom
+    crawler_class: "crawler.mc_crawler_wrapper.MCLawsCrawler"
+    init_kwargs:
+      regulator: "Ministry of Commerce"
+      source_system: "Regulations and Laws"
+      category: "Laws and Regulations"
+      headless: true
+      # MUST BE FALSE. `reuse: true` replays the crawl already on disk, which was
+      # right while iterating on folder names — the fix was in the mapping, not
+      # in the walk, so re-walking the site would have been waste.
+      #
+      # It is WRONG now that MC is monitored by crawling. MC cannot be probed at
+      # all (its host refuses plain HTTP clients), so `signal: crawl` in
+      # config/change_signals.yml makes the crawl the only thing that can detect
+      # a change — and a replay of yesterday's files detects nothing, for ever,
+      # while reporting success. Measured 2026-08-16: the monitoring run
+      # "crawled" MC in 1.7s and promoted 0 changes, which is what reading the
+      # disk looks like.
+      reuse: false

@@ -33,5 +33,5 @@ sources:
     mode: custom
     crawler_class: "crawler.moh_crawler.MOHCrawler"
     init_kwargs:
-      source_system: "MOH-RULES"
+      source_system: "Rules and Regulations"
       category: "Regulations"

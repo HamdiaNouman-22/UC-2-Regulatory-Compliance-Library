@@ -128,6 +128,50 @@ def first_seg(path: str) -> str:
     return segs[0] if segs else ""
 
 
+def scope_prefix(path: str) -> str:
+    """The path that `scope: prefix` means by "under the seed".
+
+    Naively this was `path.rstrip("/")`, which is right only when the seed URL is
+    a DIRECTORY. Point it at a page and the page's own filename lands in the
+    prefix, so nothing on the site can ever start with it:
+
+        seed    /en/RulesRegulations/Pages/rules.aspx
+        prefix  /en/RulesRegulations/Pages/rules.aspx      <- a leaf
+        test    /en/RulesRegulations/Agreements  -> False  <- the real content
+
+    Every sibling is rejected, including the documents the seed exists to reach.
+    Measured on ZATCA and Ministry of Commerce: 38 and 47 rows of site chrome
+    (Contact Us, Careers, News, Brand Identity) and zero regulations.
+
+    TWO SEGMENTS COME OFF, IN ORDER:
+
+    1. A trailing FILENAME — a last segment containing a dot. `/a/b/rules.aspx`
+       is the page, `/a/b` is the section it lives in.
+
+    2. A trailing `/pages` — SharePoint keeps every page of a section in a
+       `Pages/` folder, so `/en/RulesRegulations/Pages` names a storage folder,
+       not a subject area. Sibling sections live at `/en/RulesRegulations/Taxes`
+       and `/en/RulesRegulations/Agreements`, which are under the SECTION but
+       not under `Pages`. Both KSA sites we crawl this way are SharePoint.
+
+        /en/RulesRegulations/Pages/rules.aspx   -> /en/RulesRegulations
+        /en/Regulations/pages/default.aspx      -> /en/Regulations
+        /activities/laws                        -> /activities/laws  (unchanged)
+
+    A directory seed is returned untouched, so hosts that already worked are
+    unaffected. Never returns "" — an empty prefix matches every path on the
+    host, silently turning `prefix` into `host`; the last real segment is kept
+    instead.
+    """
+    p = (path or "").rstrip("/")
+    segs = [s for s in p.split("/") if s]
+    if segs and "." in segs[-1]:            # a file, not a directory
+        segs.pop()
+    if len(segs) > 1 and segs[-1].lower() == "pages":   # SharePoint page store
+        segs.pop()
+    return "/" + "/".join(segs) if segs else ""
+
+
 def content_key(text: str) -> str:
     """Hash of whitespace-normalized text, to detect same-content duplicate URLs."""
     norm = re.sub(r"\s+", " ", (text or "")).strip().lower()
@@ -179,14 +223,36 @@ EXTERNAL_LAW_PORTALS = {
 }
 
 
-def is_external_law_portal(url: str) -> bool:
+def is_external_law_portal(url: str, seed_host: str = "") -> bool:
     """True if the URL's host is a known legal portal that serves law text itself,
-    rather than something we can recognise from the path or extension."""
+    rather than something we can recognise from the path or extension.
+
+    IT MUST NOT FIRE FOR LINKS THAT STAY ON THE SITE WE ARE CRAWLING.
+
+    EXTERNAL_LAW_PORTALS answers "some OTHER regulator's site links OUT to
+    zatca.gov.sa as a cross-reference — that link is a law, not a page to crawl".
+    The word doing the work is EXTERNAL. When the seed IS zatca.gov.sa, every
+    ordinary navigation link on the site matches the host and is misread as a
+    terminal document.
+
+    Measured on ZATCA 2026-08-12: the seed page alone produced n_pages=1 and
+    n_documents=38, and those 38 were Contact Us, Careers, News, Magazine and
+    Brand Identity. Documents are collected regardless of scope, so no scope
+    setting can filter them out — the crawl also never went deeper, because
+    every link it could have followed had been marked terminal.
+
+    The standalone crawler (generic_crawler/crawler_MISA_MC_ZATCA.py) already
+    carried this seed_host guard and the warning above; this shared engine had
+    the copy without it. MC has the same exposure — mc.gov.sa is also listed.
+    """
     host = urlparse(url).netloc.lower()
+    if seed_host and (host == seed_host or seed_host.endswith("." + host)
+                      or host.endswith("." + seed_host)):
+        return False
     return any(host == d or host.endswith("." + d) for d in EXTERNAL_LAW_PORTALS)
 
 
-def is_document_link(url: str) -> bool:
+def is_document_link(url: str, seed_host: str = "") -> bool:
     """True if a link points to a downloadable document — not just plain .pdf/.docx,
     but also download-manager links (WordPress Download Manager `wpdmdl=`, /document/,
     /download/ endpoints) that serve a file without a file extension in the URL,
@@ -201,26 +267,53 @@ def is_document_link(url: str) -> bool:
     segs = [s for s in p.path.lower().split("/") if s]
     if any(s in ("document", "documents", "download", "downloads") for s in segs):
         return True
-    if is_external_law_portal(url):
+    if is_external_law_portal(url, seed_host):
         return True
     return False
 
 
-def doc_type_of(url: str) -> str:
+def doc_type_of(url: str, seed_host: str = "") -> str:
+    """The file_type stored for a document link.
+
+    `seed_host` matters here for the same reason it does in is_document_link:
+    without it, EXTERNAL_LAW_PORTALS matches the site we are CURRENTLY crawling
+    and every one of its own pages is stamped EXTERNAL. Measured on Ministry of
+    Commerce 2026-08-12 — mc.gov.sa is in that set, so mc.gov.sa's own pages came
+    back as EXTERNAL. The guard was threaded through is_document_link and missed
+    here.
+    """
     e = ext_of(url).lstrip(".").upper()
-    # A real file extension always wins.
-    if e and ("." + e.lower()) in DOC_EXTS:
+    if e:
         return e
-    # An external law portal serves HTML, not a file — even when the URL ends in
-    # .aspx (mc.gov.sa). Marking it EXTERNAL rather than DOC/ASPX tells the
-    # pipeline to read the page instead of trying to download and OCR it.
-    if is_external_law_portal(url):
+    if is_external_law_portal(url, seed_host=seed_host):
         return "EXTERNAL"
-    return e if e else "DOC"
+    return "DOC"
 
 
 GENERIC_LINK_TEXT = {"", "download", "pdf", "download pdf", "view", "view details",
-                     "click here", "read more", "open", "details", "more"}
+                     "click here", "read more", "open", "details", "more",
+                     # Action words that had been missing. "press here" reached
+                     # the library as a document TITLE via the formfill side; the
+                     # same words arrive here through anchor text.
+                     "press here", "press", "click", "tap here", "here",
+                     "download here", "download file", "download document",
+                     "see more", "show more", "view more", "read", "detail",
+                     "link", "attachment", "file", "document",
+                     "اضغط هنا", "تحميل", "المزيد"}
+
+
+def _norm_link_text(s: str) -> str:
+    """Lowercased, with the invisible characters gov sites embed removed.
+
+    GENERIC_LINK_TEXT is matched EXACTLY, so a single zero-width space defeats
+    it. Ministry of Commerce stored a document titled `click here​` for
+    exactly that reason — visually "click here", not equal to it.
+    """
+    s = (s or "").strip().lower()
+    s = s.replace("​", "").replace("‌", "").replace("‎", "")
+    s = s.replace("‏", "").replace("﻿", "").replace(" ", " ")
+    s = re.sub(r"[\s.:،…]+", " ", s).strip()
+    return s
 
 
 PAGE_EXTS = {".aspx", ".asp", ".html", ".htm", ".php", ".jsp"}
@@ -374,7 +467,7 @@ def best_doc_title(link: dict, url: str) -> str:
       4. the URL slug               — last resort
     """
     t = (link.get("text") or "").strip()
-    if t.lower() not in GENERIC_LINK_TEXT and len(t) > 3:
+    if _norm_link_text(t) not in GENERIC_LINK_TEXT and len(t) > 3:
         return t[:200]
     ta = (link.get("title_attr") or "").strip()
     if len(ta) > 3:
@@ -1178,7 +1271,10 @@ def detect_scope(breadcrumb, links, seed_url, seed_host):
         p = urlparse(href)
         if p.scheme not in ("http", "https") or p.netloc.lower() != seed_host:
             continue                                    # off-site / mailto:
-        if is_document_link(href):
+        # seed_host matters here too: without it every same-host link on a
+        # portal host counts as a document, and this function's docs-vs-pages
+        # ratio is exactly what chooses the scope.
+        if is_document_link(href, seed_host):
             docs += 1                                   # a file, not a page
             continue
         if ext_of(href) in SKIP_EXTS:
@@ -1283,9 +1379,11 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
     seed_norm = normalize_url(seed_url)
     seed_host = urlparse(seed_norm).netloc.lower()
     # Per-host fixes. Hosts with no profile behave exactly as they did before.
+    # (scope_prefix is defined at module level — see its docstring for why the
+    #  seed's own filename must not end up in the prefix.)
     prof = profile_for(seed_norm)
     group_headings = group_headings or prof["group_headings"]
-    seed_prefix = urlparse(seed_norm).path.rstrip("/")  # "under the seed path" for prefix scope
+    seed_prefix = scope_prefix(urlparse(seed_norm).path)  # "under the seed path" for prefix scope
     # If the seed sits under a 2-3 letter language segment (/en/...), lock the crawl
     # to that language so we don't load every page's /ar/ mirror just to reject it.
     _seg0 = first_seg(urlparse(seed_norm).path)
@@ -1570,12 +1668,12 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
             page_docs = []
             for l in links:
                 href = l["href"]
-                if urlparse(href).scheme in ("http", "https") and is_document_link(href):
+                if urlparse(href).scheme in ("http", "https") and is_document_link(href, seed_host):
                     dn = normalize_url(href)
                     rec_doc = {
                         "title": best_doc_title(l, dn),   # real title/date, not "Download"
                         "doc_url": dn,
-                        "type": doc_type_of(href),
+                        "type": doc_type_of(href, seed_host),
                         "found_on": url,
                         "section_path": doc_section_path(
                             breadcrumb,
@@ -1663,7 +1761,7 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                 if pu.netloc.lower() != seed_host:      # same-host rule
                     continue
                 e = ext_of(nh)
-                if e in SKIP_EXTS or is_document_link(nh):  # assets ignored; docs recorded above
+                if e in SKIP_EXTS or is_document_link(nh, seed_host):  # assets ignored; docs recorded above
                     continue
                 if is_aggregator(nh, l.get("text", "")):  # never crawl entire-section/print pages
                     continue

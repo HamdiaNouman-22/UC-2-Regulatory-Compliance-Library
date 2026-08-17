@@ -83,8 +83,35 @@ fields:
     from: regex
     pattern: 'File Date:\s*(\d{4}-\d{2}-\d{2})'
 
+# No prefix. The folder trail is  regulator > source_system > <here> > title,
+# and `library` below already supplies the first two crumbs (same convention
+# as aml.rules.yml / misa.laws.yml) -- repeating them here duplicated the
+# crumb, and adding "Archived" as a THIRD folder level filed every document
+# somewhere the existing 83 MOH regulations (flat under "Rules and
+# Regulations", no Recent/Archived split) do not live. Both together broke
+# identity matching outright: doc_path is part of the exact-match identity
+# tuple AND the fallback matches require the SAME folder, so the direct-write
+# test run on 2026-08-16 reinserted all 7 archived documents as duplicates
+# and classified all 83 originals `disappeared`. The Recent/Archived
+# distinction is not preserved anywhere now -- it was never part of the
+# original library structure, and correctness here matters more than keeping
+# it. See docs/session_summary_2026-08-16.md §9.
 section_path:
-  prefix: ["Ministry of Health", "Rules and Regulations", "Archived"]
+  prefix: []
 
 # The card links directly to a PDF — there is no detail page to open.
 fetch_details: false
+
+# Who this source belongs to. Without this block, `_crawl_into_db` (see
+# jobs/monitor_jobs.py) falls back to the FORM's own name ("moh_rules_archived")
+# as the regulator, which would file every document under a regulator distinct
+# from the "Ministry of Health" the existing MOH regulations already use —
+# find_existing would never match them, and every direct-write run would insert
+# duplicates instead of updating. `_form_for` (also monitor_jobs.py) needs the
+# same fields to route monitor_cheap_probes's ("Ministry of Health", "Rules and
+# Regulations") entry to a form at all; without them it silently reported
+# "no crawler mapped" on every sweep. Found while testing the direct-write path,
+# 2026-08-16 — see docs/session_summary_2026-08-16.md §9.
+library:
+  regulator: "Ministry of Health"
+  source_system: "Rules and Regulations"

@@ -11,6 +11,13 @@ version: 1
 name: gosi.saned
 seed_url: "https://www.gosi.gov.sa/en/SystemsAndRegulations/Saned"
 shape: list
+
+# The page is an Angular app (_ngcontent-* attributes on every node). Phase 2
+# RELOADS the seed to re-stamp the panels, and at the default settle only the
+# first panel had rendered — so panels 1..5 were "not found again" and five of
+# six instruments stored NO html at all. Everything else that broke on this
+# project today was a settle time; give it room.
+wait_ms: 8000
 scope: prefix
 
 panels:
@@ -22,9 +29,7 @@ pagination:
   max_pages: 1
 
 section_path:
-  from_breadcrumb: "ul.cmBreadcrumb a"
-  drop_first: 1
-  prefix: ["GOSI", "Systems and Regulations"]
+  prefix: ["Saned"]
 
 fetch_details: true
 notes: "Two instruments in fragment-addressed tab panels; each panel's text is the document."
@@ -32,15 +37,15 @@ notes: "Two instruments in fragment-addressed tab panels; each panel's text is t
 # or the change sweep and the ingest path keep separate memories of the
 # same documents.
 library:
-  regulator: "GOSI"
-  source_system: "Saned"
+  regulator: "General Organization for Social Insurance (GOSI)"
+  source_system: "Laws and Regulations"
 meta:
   approved: true
-  approved_by: Mohammad Fakih
-  approved_at: '2026-08-06T03:20:34+00:00'
-  form_hash: 2239e87e2b95
+  approved_by: lead
+  approved_at: '2026-08-12T14:23:57+00:00'
+  form_hash: adee626c7715
   verify:
-    verdict: PASS
+    verdict: WARN
     counts:
     - 2
     - 2
@@ -49,6 +54,6 @@ meta:
     fill_rates:
       title: 100.0
       document_url: 100.0
-    verified_at: '2026-08-06T03:04:02+00:00'
+    verified_at: '2026-08-12T14:23:57+00:00'
     source: live
     forced: false

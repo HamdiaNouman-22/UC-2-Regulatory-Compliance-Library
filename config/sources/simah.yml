@@ -40,31 +40,39 @@ owner: ai.team
 # met — an empty `sources:` list on its own cannot say any of this.
 # Plain ASCII on purpose: this string is raised and logged, and a console on
 # cp1252 has killed a run over a non-ASCII character before.
-disabled: >-
-  simah.com is Cloudflare-blocked (1020-class) and the form has never been
-  approved against a real capture. Review 2026-09-04; nothing unblocks itself
-  on a date.
-
-sources: []
-
-# - name: "Rules and Regulations"
-#   mode: custom
-#   crawler_class: "crawler.simah_wrapper.SimahCrawler"
-#   init_kwargs:
-#     regulator: "SIMAH"
-#     source_system: "SIMAH-RULES"
-#     category: "Rules and Regulations"
-#     # The form cannot be approved from a snapshot (three runs against one saved
-#     # page agree by construction), and it cannot be verified live while access is
-#     # this fragile — so running it at all needs this. It bypasses the GATE only:
-#     # it does not cause a request. Whether the network is touched is decided by
-#     # the snapshot clock below, never by this flag.
-#     require_approved: false
-#     # Refresh the snapshot after this many days; refuse to publish past grace.
-#     max_age_days: 30
-#     grace_days: 90
-#     # allow_live: false makes the crawler provably incapable of generating
-#     # traffic, whatever the clock says — use it while the block is active, or any
-#     # time you want a guaranteed-offline run.
-#     allow_live: true
-#     headed: true
+# ENABLED 2026-08-13. The two gates the previous note asked for are now met:
+# the form is approved (forced, on snapshot evidence — see the hints file), and
+# the snapshot is present and verified byte-for-byte against its manifest
+# (sha256 f1efcac3..., captured 2026-08-05).
+#
+# THE BLOCK IS STILL ACTIVE. simah.com remains Cloudflare 1020-blocked and is in
+# change_signals.yml skip_hosts until 2026-09-04. `allow_live: false` below is
+# what keeps this source incapable of generating traffic; do not flip it without
+# a decision about the block.
+sources:
+  - name: "Rules and Regulations"
+    mode: custom
+    crawler_class: "crawler.simah_wrapper.SimahCrawler"
+    init_kwargs:
+      # Full name then acronym — house style. This is doc_path[0] and the
+      # root folder of SIMAH's tree, so it must match the form's
+      # library: block. Changed 2026-08-14.
+      regulator: "Saudi Credit Bureau (SIMAH)"
+      source_system: "Rules and Regulations"
+      category: "Rules and Regulations"
+      # TRUE now, unlike the draft below it replaced: the form carries a real
+      # approval stamp, so the gate is meaningful again rather than something to
+      # bypass.
+      require_approved: true
+      # Refresh the snapshot after this many days; refuse to publish past grace.
+      max_age_days: 30
+      grace_days: 90
+      # FALSE, and this is the important line. It makes the crawler provably
+      # incapable of generating traffic whatever the snapshot clock says. The
+      # draft had `true`; leaving it that way would have let a routine run reach
+      # a host we are blocked from and earn a longer block.
+      #
+      # Flip it only when someone has decided the block is over — that is the
+      # 2026-09-04 review, not a code change.
+      allow_live: false
+      headed: true

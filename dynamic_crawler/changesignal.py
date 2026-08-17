@@ -63,17 +63,238 @@ def declared_fields(obj, default=()) -> tuple:
     return clean_fields(_meta_of(obj).get("identity_fields")) or clean_fields(default)
 
 
+def resolve_field(obj, name):
+    """One identity field's value, supporting `extra_meta.<key>`.
+
+    A dotted name reads a key INSIDE extra_meta. That exists for the
+    multi-attachment case: a card holding seven PDFs has no single
+    `document_url` to be identified by — the identity is its folder plus the set
+    of files it carries, and the files live in
+    `extra_meta["attachment_links"]`.
+
+    Only extra_meta is reachable this way, and only one level deep. Identity has
+    to be comparable by both repos, and extra_meta is the one column that both
+    already parse back into a dict.
+    """
+    if "." in name:
+        head, key = name.split(".", 1)
+        container = (obj.get(head) if isinstance(obj, dict)
+                     else getattr(obj, head, None))
+        if isinstance(container, str) and container.strip():
+            try:
+                container = json.loads(container)
+            except Exception:
+                container = {}
+        return (container or {}).get(key) if isinstance(container, dict) else None
+    return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+
 def fields_of(obj, fields) -> dict:
     """The identity of one document or stored row, as {field: value}."""
     out = {}
     for name in fields:
-        value = (obj.get(name) if isinstance(obj, dict)
-                 else getattr(obj, name, None))
+        value = resolve_field(obj, name)
         if isinstance(value, (list, tuple)):
             value = " > ".join(str(v) for v in value)
         out[name] = str(value).strip() if value is not None else ""
     return out
 
+
+
+#: The identity every source uses unless it declares otherwise.
+#
+# TITLE IS PART OF IT, by the lead's decision 2026-08-16.
+#
+# Measured before the change, over 8,713 stored rows:
+#   (document_url, doc_path) was ALREADY unique  -> 0 true duplicates
+#   doc_path ends with the title on 96.1% of rows -> title is largely implied
+#   33.4% of rows share a title with another row -> title alone identifies nothing
+#
+# So it adds no discriminating power, and it adds a failure mode: identity
+# fields are ANDed, so an edited title makes a document a false `new` AND a
+# false `disappeared`, and `disappeared` feeds the withdrawal gate. Renaming
+# every Ministry of Commerce title on 2026-08-14 would, under this identity,
+# have orphaned all 48 MC rows.
+#
+# Recorded here so the trade is visible: it is a deliberate choice to treat a
+# changed title as a different document, not an oversight. If titles are ever
+# edited in bulk again, expect phantom new/disappeared pairs and check the
+# withdrawal gate before acting on them.
+DEFAULT_IDENTITY = ("document_url", "doc_path", "title")
+
+
+def identity_for(obj, default=DEFAULT_IDENTITY) -> tuple:
+    """The identity FIELDS for one document or stored row.
+
+    A source declares its own in `extra_meta["identity_fields"]` — the
+    multi-attachment case does, because a row holding seven PDFs has no single
+    document_url to be identified by. Everything else uses the default.
+    """
+    declared = resolve_field(obj, "extra_meta.identity_fields")
+    if declared:
+        return clean_fields(declared) or tuple(default)
+    return tuple(default)
+
+
+
+def files_of(obj) -> set:
+    """Every file this document carries, from WHICHEVER column holds them.
+
+    `document_url` and `attachment_links` are two spellings of one thing — the
+    document's files — and which one is used depends only on how many there are:
+
+        exactly one file   -> document_url,      attachment_links empty
+        more than one      -> attachment_links,  document_url empty
+
+    Read together, so an empty column simply contributes nothing and the other
+    one carries the answer.
+    """
+    out = set()
+    one = str(resolve_field(obj, "document_url") or "").strip()
+    if one:
+        out.add(one)
+    many = str(resolve_field(obj, "extra_meta.attachment_links") or "").strip()
+    for part in many.split("|"):
+        part = part.strip()
+        if part:
+            out.add(part)
+    return out
+
+
+def _same_document(obj, row) -> bool:
+    """Do these two carry any file in common?
+
+    OVERLAP, not equality — because a document that gains or loses an attachment
+    CROSSES BETWEEN THE TWO SPELLINGS above and would never match itself:
+
+        stored, 1 file    document_url = fileA        attachment_links = -
+        crawled, 2 files  document_url = -            attachment_links = fileA | fileB
+
+    Exact comparison fails there and the crawl inserts a SECOND row for the same
+    instrument — a phantom duplicate whose cause looks nothing like its symptom.
+    On overlap it matches on fileA, which is the truth: the same document now has
+    an extra annex, so it is a new VERSION and not a new document.
+
+    Only ever applied within one `doc_path`, whose last crumb already separates
+    `Laws` / `Regulation` / `Attachments`, so two genuinely different documents
+    cannot be merged by a shared file.
+    """
+    mine, theirs = files_of(obj), files_of(row)
+    return bool(mine and theirs and (mine & theirs))
+
+
+
+def _by_folder_and_title(repo, finder, obj, doc_path: str):
+    """The row in the same folder with the same TITLE — a document that moved url.
+
+    MEASURED 2026-08-16 on MHRSD. The ministry serves ONE instrument at TWO urls,
+    an English filename and an Arabic slug, and BOTH answer 200:
+
+        .../Procedural%20Manual%20for%20the%20Saudization%20Decree...pdf
+        .../%D9%86-%D9%85%D9%87%D9%86%D8%A9-%D8%A7%D9%84%D8%B5%D9%8A%D8%AF...
+
+    An earlier crawl stored the first; a later listing linked the second. Same
+    title, same date, same document — but identity is (document_url, doc_path,
+    title), so the differing url produced one false `new` AND one false
+    `disappeared`, and `disappeared` feeds the withdrawal gate. Left alone, a
+    site that alternates between two urls would insert and un-insert the same
+    document for ever.
+
+    `version_key: reference_no` exists for exactly this new-url case and could
+    not help here: neither row has a reference number.
+
+    A FALLBACK, never an identity field. It runs only after every exact lookup
+    has missed, so it can only find matches that would otherwise be lost — it
+    cannot orphan anything, which is what makes it safe.
+    """
+    if not doc_path or not callable(finder):
+        return None
+    title = str(resolve_field(obj, "title") or "").strip()
+    if not title:
+        return None
+    try:
+        return finder({"doc_path": doc_path, "title": title})
+    except (ValueError, NotImplementedError):
+        return None
+
+
+def _by_files(repo, finder, obj, doc_path: str):
+    """The row in the SAME folder that shares a file with this document.
+
+    The gained-or-lost-an-attachment case (see `_same_document`). The exact
+    lookups are the fast path and cover every document whose file list has not
+    moved; this catches the one that has, in either direction, and without it
+    that document is inserted a second time.
+    """
+    if not doc_path or not callable(finder):
+        return None
+    candidate = finder({"doc_path": doc_path})
+    if candidate and _same_document(obj, candidate):
+        return candidate
+    return None
+
+
+def find_existing(repo, obj, default=DEFAULT_IDENTITY):
+    """The stored row matching this document's configured identity, or None.
+
+    THE ONE IMPLEMENTATION. It used to exist twice — once in
+    `NewOrchestrator._find_existing` and once in `promote._find_existing` — and
+    the copies did not agree. Every promote bug found on 2026-08-15 was a rule
+    the orchestrator already had and promote did not:
+
+      * a row with an EMPTY document_url skipped the check entirely and was
+        re-inserted on every run (MHRSD duplicated 3, MC would have duplicated 16)
+      * versions stacked because nothing compared content_hash
+      * no version superseded its predecessor
+
+    Two implementations of "is this the same document?" will always drift, and
+    the drift is invisible until the library has duplicates in it. So both
+    callers come here.
+
+    The default identity keeps using `find_by_identity`, which is the tested path
+    every existing source runs on. Anything else needs the generic lookup, and a
+    repo that cannot offer one cannot honour the config — say so rather than
+    silently classifying everything as new.
+    """
+    fields = fields_of(obj, identity_for(obj, default))
+    finder = getattr(repo, "find_by_identity_fields", None)
+    # `find_by_identity` is the two-column shortcut and cannot express a third
+    # field, so it is only usable when the identity is exactly those two.
+    if tuple(fields) == ("document_url", "doc_path"):
+        hit = repo.find_by_identity(fields.get("document_url"),
+                                    fields.get("doc_path"))
+        # THE SAME FILE-OVERLAP FALLBACK AS BELOW, and it has to be here too.
+        #
+        # A document that drops from several files to ONE moves from the
+        # attachment_links spelling back to document_url, so it arrives on THIS
+        # branch while its stored row is on the other. Without this it is a
+        # phantom duplicate in the direction nobody tests, because the exact
+        # lookup on this path succeeds for every document that has not changed.
+        _p = fields.get("doc_path", "")
+        return (hit or _by_files(repo, finder, obj, _p)
+                or _by_folder_and_title(repo, finder, obj, _p))
+    if not callable(finder):
+        # Say what is actually wrong. This used to read "it only supports
+        # {default}", which since `title` joined the default prints the SAME
+        # list on both sides — "cannot look up on [a,b,c]; it only supports
+        # [a,b,c]". The repo's capability was never the default identity; it is
+        # whether it implements the generic finder at all.
+        raise NotImplementedError(
+            f"{type(repo).__name__} has no find_by_identity_fields, so it can "
+            f"only match on the two-column shortcut (document_url, doc_path). "
+            f"This identity is {list(fields)}.")
+    try:
+        hit = finder(fields)
+    except ValueError:
+        # The source named a column the repo will not match on. Falling back to
+        # doc_path alone is still far better than inserting a duplicate.
+        return finder({"doc_path": fields.get("doc_path", "")})
+    # NOTHING MATCHED EXACTLY — so try the same folder and compare FILES.
+    # Same folder: first by the FILES the document carries, then by its TITLE
+    # (a document that changed url).
+    _p = fields.get("doc_path", "")
+    return (hit or _by_files(repo, finder, obj, _p)
+            or _by_folder_and_title(repo, finder, obj, _p))
 
 def identity_key(fields: dict) -> str:
     """`field=value|field=value`, in the order the source declared the fields.

@@ -38,12 +38,23 @@ class MSSQLRepository(DocumentRepository):
     # ================================================================== #
 
     def _get_conn(self, retries: int = 4, delay: float = 8.0):
+        # WINDOWS AUTH WHEN NO USERNAME IS SET.
+        #
+        # This used to interpolate UID/PWD unconditionally. With a local
+        # SQLEXPRESS-style setup — where .env carries no MSSQL_USERNAME because
+        # the connection is a Windows one — that produced the literal string
+        # "UID=None;PWD=None;" and the driver rejected the login. The failure
+        # names the user "None", which reads like a missing env var rather than
+        # the wrong authentication mode.
+        user = self.conn_params.get("username")
+        pwd = self.conn_params.get("password")
+        auth = (f"UID={user};PWD={pwd};" if user
+                else "Trusted_Connection=yes;")
         conn_str = (
     f"DRIVER={self.conn_params['driver']};"
     f"SERVER={self.conn_params['server']};"
     f"DATABASE={self.conn_params['database']};"
-    f"UID={self.conn_params['username']};"
-    f"PWD={self.conn_params['password']};"
+    f"{auth}"
     f"TrustServerCertificate=yes;"
     f"ConnectRetryCount=3;ConnectRetryInterval=5;"
 )
@@ -279,7 +290,16 @@ class MSSQLRepository(DocumentRepository):
 
         # type defaults to "R" for regulations; callers can override via document.type
         doc_type   = getattr(document, "type",   "R") or "R"
-        doc_status = getattr(document, "status", "active") or "active"
+        # `status` is the HUMAN review decision (active / reject) and it governs
+        # whether a row is promoted into the main system, so an EMPTY status must
+        # survive as empty — it means "nobody has reviewed this yet".
+        #
+        # `or "active"` used to coerce "" straight back to "active", which marked
+        # every freshly crawled row as though a person had already approved it.
+        # A crawler that sets no status at all still defaults to "active", which
+        # is the pre-existing behaviour for every non-formfill path.
+        doc_status = getattr(document, "status", None)
+        doc_status = "active" if doc_status is None else doc_status
 
         sql = """
             INSERT INTO regulations (
@@ -538,13 +558,20 @@ class MSSQLRepository(DocumentRepository):
         fields = {k: v for k, v in (fields or {}).items() if v not in (None, "")}
         if not fields:
             return None
-        bad = set(fields) - self.IDENTITY_COLUMNS
+        # `extra_meta.<key>` is compared in PYTHON, exactly like doc_path, so it
+        # never reaches the WHERE clause and does not need to be a column. The
+        # multi-attachment identity uses it: a card with seven PDFs has no single
+        # document_url, so its identity is doc_path plus the files it carries.
+        meta_fields = {k: v for k, v in fields.items() if k.startswith("extra_meta.")}
+        bad = set(fields) - self.IDENTITY_COLUMNS - set(meta_fields)
         if bad:
             raise ValueError(
                 f"identity column(s) not allowed: {sorted(bad)}. "
-                f"Allowed: {sorted(self.IDENTITY_COLUMNS)}")
+                f"Allowed: {sorted(self.IDENTITY_COLUMNS)}, "
+                f"or extra_meta.<key> (compared in python)")
 
-        sql_fields = {k: v for k, v in fields.items() if k != "doc_path"}
+        sql_fields = {k: v for k, v in fields.items()
+                      if k != "doc_path" and k not in meta_fields}
         where = " AND ".join(f"{k} = ?" for k in sql_fields) or "1 = 1"
         want = self._norm_doc_path(fields["doc_path"]) if "doc_path" in fields else None
         try:
@@ -556,10 +583,19 @@ class MSSQLRepository(DocumentRepository):
                     "CAST(extra_meta AS NVARCHAR(MAX)) as extra_meta "
                     f"FROM regulations WHERE {where}", list(sql_fields.values()))
                 cols = [c[0] for c in cursor.description]
+                from dynamic_crawler.changesignal import resolve_field
                 for row in cursor.fetchall():
                     r = dict(zip(cols, row))
-                    if want is None or self._norm_doc_path(r.get("doc_path")) == want:
-                        return self._with_extra_meta(r)
+                    if want is not None and self._norm_doc_path(r.get("doc_path")) != want:
+                        continue
+                    # The extra_meta fields still have to match, or a
+                    # doc_path-only match would return a SIBLING card — every
+                    # multi-attachment row in a folder shares its doc_path, and
+                    # the attachment set is the only thing separating them.
+                    r = self._with_extra_meta(r)
+                    if all(str(resolve_field(r, k) or "") == str(v)
+                           for k, v in meta_fields.items()):
+                        return r
             return None
         except ValueError:
             raise
@@ -927,14 +963,37 @@ class MSSQLRepository(DocumentRepository):
     def insert_regulation_version(
         self,
         regulation_id: int,
-        regulator: str,
-        content_html: str,
-        content_text: str,
-        content_hash: str,
-        updated_date,
-        change_summary: str,
+        regulator: str = "",
+        content_html: str = "",
+        content_text: str = "",
+        content_hash: str = "",
+        updated_date=None,
+        change_summary: str = "",
         status: str = "active",
+        **kw,
     ) -> int:
+        """
+        DEFAULTS MATCH ExcelRepo's, DELIBERATELY.
+
+        These two repos are meant to be interchangeable — that is the whole
+        reason a run can write a workbook and `promote` can replay it into the
+        database. They were not: every argument here was REQUIRED while
+        ExcelRepo's had defaults and a **kw that silently swallowed extras.
+
+        So the orchestrator's own versioning worked perfectly against a workbook
+        and failed against MSSQL with
+
+            insert_regulation_version() missing 1 required positional argument:
+            'regulator'
+
+        on every document. Measured 2026-08-16 on AML: 11 of 11 failed, and the
+        run still reported PASS because each failure was caught per-document.
+        Nobody had noticed because until that day every row reached the database
+        through `promote`, never through the orchestrator writing directly.
+
+        `**kw` is here for the same reason ExcelRepo has it: a caller written
+        against one repo must not crash against the other.
+        """
         """
         Insert a new version snapshot into regulation_versions.
         Returns the new version_id.
@@ -1560,10 +1619,13 @@ class MSSQLRepository(DocumentRepository):
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, (
-                    requirement.get("title", "")[:500],
-                    requirement.get("description", ""),
+                    # `or ""` throughout: the model emits JSON null for a field
+                    # it cannot fill, and dict.get only substitutes its default
+                    # for an ABSENT key, not a present-but-null one.
+                    (requirement.get("title") or "")[:500],
+                    requirement.get("description") or "",
                     ref_key,
-                    requirement.get("ref_no", "")
+                    requirement.get("ref_no") or ""
                 ))
                 new_id = cursor.fetchone()[0]
                 conn.commit()
@@ -1748,9 +1810,10 @@ class MSSQLRepository(DocumentRepository):
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, (
-                    control.get("title", "")[:500],
-                    control.get("description", ""),
-                    control.get("control_key", f"SAMA-AUTO-CTRL-{control.get('title', '')[:20]}")
+                    (control.get("title") or "")[:500],
+                    control.get("description") or "",
+                    control.get("control_key")
+                        or f"SAMA-AUTO-CTRL-{(control.get('title') or '')[:20]}"
                 ))
                 new_id = cursor.fetchone()[0]
                 conn.commit()
@@ -1770,10 +1833,11 @@ class MSSQLRepository(DocumentRepository):
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, (
-                    kpi.get("title", "")[:500],
-                    kpi.get("description", ""),
-                    kpi.get("kisetup_key", f"SAMA-AUTO-KPI-{kpi.get('title', '')[:20]}"),
-                    kpi.get("formula", "")
+                    (kpi.get("title") or "")[:500],
+                    kpi.get("description") or "",
+                    kpi.get("kisetup_key")
+                        or f"SAMA-AUTO-KPI-{(kpi.get('title') or '')[:20]}",
+                    kpi.get("formula") or ""
                 ))
                 new_id = cursor.fetchone()[0]
                 conn.commit()

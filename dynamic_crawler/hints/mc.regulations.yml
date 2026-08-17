@@ -1,0 +1,116 @@
+# Ministry of Commerce — Laws and Regulations
+#
+# WHY A FORM AND NOT `mode: generic`
+#
+# The generic walk got the URLs right and everything else wrong. Measured
+# 2026-08-13: 146 rows, 144 distinct download endpoints — real documents — but
+#
+#   * every title came from anchor text: "2", "Regapis", and a zero-width-space
+#     "click here". The real name is on the CARD, not on the link.
+#   * all 146 rows shared one doc_path, so there was no hierarchy at all
+#   * the 146 flat rows are really 20 LAWS with 8-15 attachments each
+#
+# THE SHAPE, MEASURED 2026-08-13
+#
+#   listing   div.rules-reg-card x20, and the pager says
+#             "Showing 1 To 20 From Total 20" — one page, no pagination
+#   title     a.rule-clickable-part  ->  "Commercial Register Law",
+#                                        "Law of Tradenames", "Companies Law"
+#   detail    /en/Regulations/pages/details.aspx?lawId=<GUID>
+#   files     the detail page holds the download endpoints:
+#             /regapis?siteURL=...&op=Download&attId=<GUID>&lng=en
+#
+# ONE ROW PER LAW, NOT PER FILE
+#
+# `attachment_is_document: combined` keeps the instrument whole: 20 rows, each
+# carrying its own files in extra_meta["attachment_links"]. The alternative —
+# one row per PDF — is what the generic walk produced, and it turned 20
+# recognisable laws into 144 rows named "2" and "Regapis".
+#
+# THE URL THAT LOOKS WRONG AND IS NOT
+#
+# A download endpoint reads:
+#
+#     /regapis?siteURL=https%3A%2F%2Fregulations.mc.gov.sa%2F&op=Download
+#             &attId=c73b3ead-...&lng=en&isInline=false
+#
+# `siteURL` is a BACKEND PARAMETER naming which system the proxy fetches from,
+# and it is identical on every row. The document is identified by `attId`, and
+# every attId is distinct. Decoding only siteURL once led to the conclusion that
+# these were 70 copies of one dead link, and the source was disabled on that
+# basis. They are 70 distinct files served by mc.gov.sa, which is reachable;
+# regulations.mc.gov.sa never has to resolve for us.
+#
+# SHARE ICONS SHARE THE CARD
+#
+# Each card also carries twitter / facebook / linkedin / mail / whatsapp links
+# and an .icon-attach toggle. `a.rule-clickable-part` names the law link
+# specifically, so none of them can be mistaken for the document.
+
+version: 1
+name: mc.regulations
+seed_url: "https://mc.gov.sa/en/Regulations/pages/default.aspx"
+shape: list
+scope: prefix
+
+# SharePoint, and the cards render late. mc.gov.sa has also answered HTTP 200 to
+# curl and ERR_CONNECTION_RESET to Playwright minutes apart, so this is generous
+# on purpose — an under-wait here reads as "no cards" rather than as a slow site.
+wait_ms: 16000
+
+row_selector: "div.rules-reg-card"
+detail_link_selector: "a.rule-clickable-part"
+
+pagination:
+  # "Showing 1 To 20 From Total 20" — the whole inventory is on one page.
+  # If MC ever exceeds 20 the count drops against this run's history and the
+  # completeness gate flags it.
+  mode: none
+  max_pages: 1
+
+fields:
+  title:
+    from: css
+    selector: "a.rule-clickable-part"
+    attr: text
+  document_url:
+    from: css
+    selector: "a.rule-clickable-part"
+    attr: href
+
+# Open each law. The attachments are on the detail page, not on the card.
+fetch_details: true
+
+# One row per law, with every attached file on it.
+attachment_is_document: "combined"
+
+# Ministry of Commerce | Regulations and Laws | <law title>
+#
+# No prefix: both crumbs come from the library: block, and naming either here
+# would repeat it as a second folder. The site's listing is flat — 20 laws, no
+# sub-sections — so there is no third level to read.
+section_path:
+  prefix: []
+  levels: []
+
+library:
+  regulator: "Ministry of Commerce"
+  source_system: "Regulations and Laws"
+meta:
+  approved: true
+  approved_by: lead
+  approved_at: '2026-08-13T06:17:51+00:00'
+  form_hash: 51592f7c9638
+  verify:
+    verdict: PASS
+    counts:
+    - 20
+    - 20
+    - 20
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-13T06:17:22+00:00'
+    source: live
+    forced: false

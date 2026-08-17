@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urlsplit
@@ -79,6 +80,21 @@ def skip_hosts(config: dict) -> List[str]:
 # --------------------------------------------------------------------------- #
 #  the sweep                                                                   #
 # --------------------------------------------------------------------------- #
+
+
+#: Everything a server re-generates per request, discounted before hashing an
+#: HTML page: scripts, styles, and the hidden inputs ASP.NET/SharePoint fill with
+#: __VIEWSTATE and request digests. What is left is what a reader would call the
+#: document. See `StoredInventorySweep.confirm` for the measurement.
+_VOLATILE = re.compile(
+    r"(?is)<script.*?</script>|<style.*?</style>|<input[^>]*>|<!--.*?-->")
+
+
+def _visible_text(html: str) -> str:
+    """The page's readable text, with markup and per-request noise removed."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ",
+                                      _VOLATILE.sub("", html))).strip()
+
 
 class StoredInventorySweep(ChangeSignal):
     # It reads only urls we already store, so an absence is not something it can
@@ -155,20 +171,49 @@ class StoredInventorySweep(ChangeSignal):
         return observations
 
     def confirm(self, obs: Observation) -> Optional[str]:
-        """The document's own bytes, for a source whose counters move in bulk."""
+        """The document's own bytes, for a source whose counters move in bulk.
+
+        AN HTML PAGE IS HASHED ON ITS VISIBLE TEXT, NOT ITS BYTES.
+
+        A file's bytes are the document. A server-rendered page's bytes are not:
+        they carry per-request tokens that change on every fetch while the
+        regulation does not. Measured on CMA 2026-08-15, the same article
+        fetched twice one second apart:
+
+            raw bytes        differ   (request digests: 'c75f4956', '389a54d85')
+            visible text     IDENTICAL, 4,299 characters both times
+
+        So a raw hash would confirm a change that never happened, which is worse
+        than no confirmation at all — it turns "the counter is unreliable" into
+        "the content really did change". CMA's own token is already noise (its
+        Last-Modified is the CURRENT TIME and Content-Length wobbles by a few
+        bytes), which is what made 1,134 of its 1,979 documents report modified
+        in one sweep.
+
+        Binary documents — PDF, DOCX — keep the byte hash. There is no markup to
+        discount and their bytes are stable.
+        """
         if not self.confirm_required or not obs.url.startswith("http"):
             return None
         r = requests.get(obs.url, timeout=self.timeout * 3, stream=True,
                          headers={"User-Agent": fingerprint.USER_AGENT})
         r.raise_for_status()
-        digest, read = hashlib.sha256(), 0
+        is_html = "html" in (r.headers.get("Content-Type") or "").lower()
+        digest, read, body = hashlib.sha256(), 0, []
         for chunk in r.iter_content(65536):
             read += len(chunk)
             if read > MAX_CONFIRM_BYTES:
                 raise ValueError(f"{obs.url[:80]} is over {MAX_CONFIRM_BYTES} "
                                  f"bytes — refusing to confirm on a partial read")
-            digest.update(chunk)
-        return digest.hexdigest()
+            if is_html:
+                body.append(chunk)
+            else:
+                digest.update(chunk)
+        if not is_html:
+            return digest.hexdigest()
+        text = _visible_text(b"".join(body).decode(r.encoding or "utf-8",
+                                                   errors="replace"))
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # --------------------------------------------------------------------------- #

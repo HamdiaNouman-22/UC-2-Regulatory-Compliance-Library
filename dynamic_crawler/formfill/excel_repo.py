@@ -60,17 +60,70 @@ def _as_dict(obj) -> dict:
     return out
 
 
+#: Excel's hard limit is 32,767 characters per cell. Anything longer is cut, and
+#: the cut is what a reader sees AND what `promote.py` would copy into the
+#: database — so a long document's HTML silently lost its tail on the way in.
+_CELL_LIMIT = 32000
+
+#: Every value that overflowed a cell, keyed by the marker written in its place.
+#: A module-level store because `_flat` is called from seven places without a
+#: repo instance; `ExcelRepo.save()` writes it out beside the workbook.
+_OVERFLOW: Dict[str, str] = {}
+
+#: Marker written into the cell. `promote.py` and `_load_workbook_into` look for
+#: this prefix and rehydrate from the sidecar.
+OVERFLOW_PREFIX = "@@ff-overflow:"
+
+
+def _stash_overflow(v: str) -> str:
+    """Park an oversized value in the sidecar and return its marker + a preview.
+
+    The cell stays READABLE — the preview is the first 32k, as before — but it is
+    no longer the only copy. GOSI made the cost visible: a 92,995-character
+    instrument was stored as 32,028 characters, so the HTML stopped at Article 26
+    and nothing said the rest had been dropped except a suffix in the middle of
+    the text.
+    """
+    import hashlib
+    key = hashlib.md5(v.encode("utf-8")).hexdigest()[:16]
+    _OVERFLOW[key] = v
+    return (v[:_CELL_LIMIT]
+            + f"  …[truncated for Excel, {len(v):,} chars — full value in "
+              f"the .fulltext.json sidecar] {OVERFLOW_PREFIX}{key}")
+
+
 def _flat(v: Any) -> Any:
-    """Excel cannot hold a list or a dict, and it truncates at 32,767 chars."""
+    """Excel cannot hold a list or a dict, and it truncates at 32,767 chars.
+
+    Oversized strings are preserved in a sidecar rather than thrown away — see
+    `_stash_overflow`. Lists become " | " joins, which is how doc_path and
+    extra_meta's attachment_links read in a workbook.
+    """
     if isinstance(v, (list, tuple)):
         return " | ".join(str(x) for x in v)
     if isinstance(v, dict):
-        return json.dumps(v, ensure_ascii=False)[:32000]
+        s = json.dumps(v, ensure_ascii=False)
+        return _stash_overflow(s) if len(s) > _CELL_LIMIT else s
     if isinstance(v, (datetime, date)):
         return v.isoformat()
-    if isinstance(v, str) and len(v) > 32000:
-        return v[:32000] + f"  …[truncated, {len(v):,} chars]"
+    if isinstance(v, str) and len(v) > _CELL_LIMIT:
+        return _stash_overflow(v)
     return v
+
+
+def resolve_overflow(value: Any, sidecar: Dict[str, str] | None) -> Any:
+    """The full value behind a cell, or the cell unchanged.
+
+    Anything reading a workbook back — `promote.py` on its way to MSSQL, or the
+    API's `_load_workbook_into` — must call this, or it copies the preview into
+    the database and the truncation becomes permanent.
+    """
+    if not isinstance(value, str) or OVERFLOW_PREFIX not in value:
+        return value
+    key = value.rsplit(OVERFLOW_PREFIX, 1)[-1].strip()
+    if sidecar and key in sidecar:
+        return sidecar[key]
+    return value
 
 
 class ExcelRepo:
@@ -201,14 +254,20 @@ class ExcelRepo:
         fields = {k: v for k, v in (fields or {}).items() if v not in (None, "")}
         if not fields:
             return None
+        from dynamic_crawler.changesignal import resolve_field
         for r in self.t["regulations"]:
+            row = self._with_extra_meta(dict(r))
             for k, v in fields.items():
-                stored = self._norm_path(r.get(k)) if k == "doc_path" else r.get(k)
-                want = self._norm_path(v) if k == "doc_path" else v
-                if stored != want:
+                # A dotted name reads inside extra_meta — used by the
+                # multi-attachment identity (doc_path + the files it carries),
+                # which has no single document_url to compare.
+                stored = resolve_field(row, k) if "." in k else row.get(k)
+                if k == "doc_path":
+                    stored, v = self._norm_path(stored), self._norm_path(v)
+                if (str(stored) if stored is not None else "") != str(v):
                     break
             else:
-                return self._with_extra_meta(dict(r))
+                return row
         return None
 
     def find_regulations_by_source(self, source_system: str,
@@ -399,6 +458,10 @@ class ExcelRepo:
 
     # ---------------- write it out ---------------------------------------- #
 
+    def sidecar_path(self) -> Path:
+        """Where the untruncated values live, beside the workbook."""
+        return self.out_path.with_suffix(".fulltext.json")
+
     def save(self) -> Path:
         import pandas as pd
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -406,6 +469,13 @@ class ExcelRepo:
             for name, rows in self.t.items():
                 df = pd.DataFrame(rows or [{"(empty)": ""}])
                 df.to_excel(xl, sheet_name=name[:31], index=False)
+        # Anything too long for a cell, in full. Written only when something
+        # actually overflowed, so most runs produce no sidecar at all.
+        if _OVERFLOW:
+            sc = self.sidecar_path()
+            sc.write_text(json.dumps(_OVERFLOW, ensure_ascii=False), encoding="utf-8")
+            logger.info("ExcelRepo wrote %s (%d oversized value(s) preserved)",
+                        sc, len(_OVERFLOW))
         logger.info("ExcelRepo wrote %s", self.out_path)
         return self.out_path
 

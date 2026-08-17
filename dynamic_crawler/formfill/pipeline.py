@@ -67,7 +67,8 @@ class FormfillCrawler(GenericSiteCrawler):
     def __init__(self, hints_path: str | Path, regulator: str, source_system: str,
                  category: Optional[str] = None, out_dir: Optional[str] = None,
                  require_approved: bool = True, fetch_details: Optional[bool] = None,
-                 in_process: bool = False, timeout: int = 14400):
+                 in_process: bool = False, timeout: int = 14400,
+                 only_urls: Optional[list] = None):
         self.hints_path = str(hints_path)
         self.hints = load_hints(self.hints_path)
         ok, why = approval_state(self.hints)
@@ -91,6 +92,16 @@ class FormfillCrawler(GenericSiteCrawler):
             timeout=timeout,
         )
         self.fetch_details = fetch_details
+        # THE MONITORING PATH. A sweep names the urls that actually changed;
+        # this narrows PHASE 2 to those, so a re-crawl opens the documents that
+        # moved instead of all of them. Phase 1 still walks the listing — that is
+        # what finds documents the sweep cannot see, because a stored-inventory
+        # probe only knows about rows we already hold.
+        #
+        # `formfill run --only-urls` already existed; it stopped at the runner
+        # and never reached the orchestrator, so a targeted crawl produced no
+        # versioned rows and nothing was stored. This carries it through.
+        self.only_urls = list(only_urls) if only_urls else None
 
     def _run_crawl(self) -> dict:
         """Run the form instead of the generic engine. Everything downstream —
@@ -102,7 +113,8 @@ class FormfillCrawler(GenericSiteCrawler):
 
         if self.in_process:
             from dynamic_crawler.formfill import runner
-            runner.run(self.hints, out, fetch_details=self.fetch_details)
+            runner.run(self.hints, out, fetch_details=self.fetch_details,
+                       only_urls=self.only_urls)
         else:
             # Same reason as the parent class: Playwright's sync API refuses to
             # start inside the asyncio/twisted reactor the scheduler installs.
@@ -110,6 +122,14 @@ class FormfillCrawler(GenericSiteCrawler):
                    self.hints_path, "--out", str(out)]
             if self.fetch_details is False:
                 cmd.append("--no-details")
+            if self.only_urls:
+                # --only-urls takes a FILE of urls, one per line. Written beside
+                # the run's output so a failed run can be re-read to see exactly
+                # which documents were targeted.
+                tf = out / "_only_urls.txt"
+                out.mkdir(parents=True, exist_ok=True)
+                tf.write_text("\n".join(self.only_urls), encoding="utf-8")
+                cmd += ["--only-urls", str(tf)]
             proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(REPO_ROOT),
                                   encoding="utf-8", errors="replace", timeout=self.timeout)
             if proc.returncode != 0:
@@ -163,7 +183,66 @@ class FormfillCrawler(GenericSiteCrawler):
         if not files:
             return [base]                      # the page IS the document
 
-        if not self.hints.get("attachment_is_document", False):
+        mode = self.hints.get("attachment_is_document", False)
+
+        if mode == "combined":
+            # SDAIA-style: the ROW is one instrument and the files ARE it.
+            #
+            # "Personal Data Protection Law and The implementing Regulation"
+            # attaches three PDFs — the law, its implementing regulation, and the
+            # transfer regulation. The existing manual library shows that as ONE
+            # entry with three attachments, and this has to match.
+            #
+            # Distinct from `false`: there the page IS the regulation and the
+            # files are annexures that must NOT be analysed (one SBP circular has
+            # 40). Here the files are the regulation, so every one is analysed —
+            # preprocessing concatenates the text of the whole list.
+            #
+            # document_url IS LEFT EMPTY. The files are the content and they live
+            # in extra_meta["attachment_links"]; no single one of them names the
+            # row. An earlier revision put the FIRST file here, which made the
+            # row's identity depend on the order the site happened to list them.
+            hrefs = [f["href"] for f in files]
+            # ONLY a row with SEVERAL files leaves document_url empty. With one
+            # attachment there is exactly one url that names the row, so it goes
+            # where it belongs and the row keeps the ordinary
+            # (document_url, doc_path) identity.
+            #
+            # Measured 2026-08-12: without this, 54 of MHRSD's 57 attachment rows
+            # carried ONE file each and were still emptied — putting 54 rows on
+            # the declared-identity path for no reason, and leaving the column a
+            # reader would look in blank.
+            base.document_url = "" if len(hrefs) > 1 else hrefs[0]
+            base.file_type = _ext_type(hrefs[0])
+            base.source_page_url = (r.get("url") or "").strip()
+            # Every file, so a change to ANY of them changes the row's hash.
+            base.content_hash = content_key("|".join(hrefs))
+            base.extra_meta["record_kind"] = "combined_attachments"
+            base.extra_meta["n_files"] = len(hrefs)
+            base.extra_meta["file_titles"] = " | ".join(
+                (f.get("text") or "").strip() for f in files)
+            # Also in extra_meta, which is ALREADY persisted as JSON on the
+            # regulations row. So a multi-file instrument survives into the
+            # database today, before any schema change — and the API's analyse
+            # path can read the whole list back rather than only document_url.
+            base.extra_meta["attachment_links"] = " | ".join(hrefs)
+
+            # IDENTITY, since document_url is empty and the default
+            # (document_url, doc_path) would make every card in this folder share
+            # ("", doc_path). The folder plus the set of files it carries.
+            # `_identity_for` in formfill/orch.py reads this per document, so
+            # single- and multi-file sources coexist in one run.
+            #
+            # Trade: a card gaining or losing a PDF changes its identity, so it
+            # reads as one `new` plus one `disappeared` rather than `modified`.
+            # Declared only when document_url is actually empty. A single-file
+            # row has a perfectly good default identity and must keep it.
+            if not base.document_url:
+                base.extra_meta["identity_fields"] = [
+                    "doc_path", "extra_meta.attachment_links", "title"]
+            return [base]
+
+        if not mode:
             # SBP-style: the page is the regulation and these are annexures.
             # Recorded, not promoted — one 2022 circular has 40 of them.
             base.extra_meta["annexures"] = " | ".join(f["href"] for f in files[:40])
@@ -182,7 +261,7 @@ class FormfillCrawler(GenericSiteCrawler):
             # The file's own label when it says something; otherwise the page
             # title, suffixed only when one page contributes several files, so two
             # rows never collide on (title, folder).
-            label = _doc_title(f.get("text"), page_title)
+            label = _doc_title(f.get("text"), page_title, f.get("href") or "")
             if label in used_titles:
                 label = f"{page_title} — {f['href'].rsplit('/', 1)[-1]}"
             used_titles.add(label)
@@ -278,9 +357,10 @@ class FormfillCrawler(GenericSiteCrawler):
         if raw_date:
             doc.published_date = _parse_row_date(raw_date) or doc.published_date or raw_date
         doc.doc_path = self._folder_trail(r.get("section_path") or "", doc.title)
-        doc.extra_meta["crawler"] = "formfill"
-        doc.extra_meta["hints"] = self.hints_path
-        doc.extra_meta["form_approved_by"] = (self.hints.get("meta") or {}).get("approved_by")
+        # `crawler`, `hints` and `form_approved_by` removed: none had a reader,
+        # and `hints` wrote an absolute developer path onto every stored row.
+        # extra_meta is what a person reads about the DOCUMENT, not a log of how
+        # it was fetched.
         return doc
 
     def _doc_from_document_row(self, d: dict, shape: str):
@@ -288,8 +368,6 @@ class FormfillCrawler(GenericSiteCrawler):
         if doc is None:
             return None
         doc.doc_path = self._folder_trail(d.get("section_path") or "", doc.title)
-        doc.extra_meta["crawler"] = "formfill"
-        doc.extra_meta["hints"] = self.hints_path
         # A file linked from many pages is still ONE document; keep the evidence
         # of where else it appeared rather than dropping it.
         if d.get("times_linked", 1) > 1:
@@ -347,9 +425,57 @@ def _fetch_documents_formfill(self, limit=None):
             out.append(doc)
 
     claimed = set()
+    combined = self.hints.get("attachment_is_document") == "combined"
     for r in pages:
         for doc in self._explode_page(r, shape):
+            # A PAGE ROW can also be a duplicate of something already attached.
+            #
+            # `claimed` below suppresses files that a page already carries, but a
+            # row produced by row_selector arrives here as a PAGE, not a file, so
+            # nothing checked it. SIMAH: the seed page carries the Implementing
+            # Regulations PDF as its attachment, AND the download block that
+            # points at that PDF is itself a row — so the same instrument came
+            # out twice, once with the law's text and once as an empty shell with
+            # the identical url.
+            #
+            # Only under `combined`, where the whole point is one row per
+            # instrument. Elsewhere two rows sharing a url are legitimately two
+            # placements and the de-dupe on (url, doc_path) already handles them.
+            #
+            # AND ONLY WHEN THE ROW BRINGS NOTHING OF ITS OWN. The SIMAH row this
+            # was written for was an EMPTY SHELL — the download block repeating a
+            # url the seed page already attached, with no text behind it. A row
+            # that carries its own page is a different instrument that merely
+            # shares a file, and suppressing it deletes a regulation.
+            #
+            # Measured on ZATCA 2026-08-14: 8 regulations (Bonded Zones, Income
+            # Tax, Customs Brokers, ...) had the footer Glossary as their only
+            # attachment, so `combined` put that one shared url in document_url
+            # for all 8. Without this test the guard dropped 8 of 34 rows, each
+            # with ~11,000 characters of its own html. The footer link is fixed
+            # at source (runner.JS_DETAIL now honours `strip` when harvesting
+            # links); this keeps the guard from ever making that trade again.
+            if (combined and doc.document_url
+                    and doc.document_url in claimed
+                    and not (doc.document_html or "").strip()):
+                continue
             claimed.add(doc.document_url)
+            # A `combined` row carries its files in extra_meta and leaves
+            # document_url EMPTY, so claiming only document_url claims nothing
+            # and every attachment is then emitted AGAIN as its own row.
+            #
+            # Measured on Ministry of Commerce 2026-08-13: 20 laws plus 150
+            # attachment rows = 170, where the whole point of `combined` is 20.
+            # The rows were titled from link text — "Board03en", "Glossary",
+            # "here." — because a file has no name of its own.
+            #
+            # This worked before `document_urls` was removed only by accident:
+            # document_url then held the FIRST file, so exactly one attachment
+            # per row was claimed and the rest already leaked.
+            for u in str((doc.extra_meta or {}).get("attachment_links") or "").split("|"):
+                u = u.strip()
+                if u:
+                    claimed.add(u)
             _add(doc)
 
     dropped = 0

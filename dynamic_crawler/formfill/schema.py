@@ -331,9 +331,22 @@ def validate_hints(h: dict) -> list[str]:
     #           with forty annexure fragments. They are kept in
     #           extra_meta["annexures"] instead.
     #
+    #   "combined" — SDAIA. The ROW is one instrument and the files ARE it, so
+    #           they become ONE document with document_url left EMPTY and every
+    #           file in extra_meta["attachment_links"], and preprocessing
+    #           concatenates every file's text. Such a row declares its own
+    #           identity — doc_path + attachment_links — because the default
+    #           (document_url, doc_path) collapses when document_url is empty.
+    #           Distinct from
+    #           `false`, where the files are supporting material that must not be
+    #           analysed. Use it when the regulator's own page groups several
+    #           PDFs under one heading and the library should show one entry with
+    #           several attachments.
+    #
     # Defaults to false because that is the option that never invents documents.
-    if not isinstance(h.get("attachment_is_document", False), bool):
-        errs.append("attachment_is_document must be true or false")
+    _aid = h.get("attachment_is_document", False)
+    if not (isinstance(_aid, bool) or _aid == "combined"):
+        errs.append('attachment_is_document must be true, false, or "combined"')
     if not isinstance(h.get("version_probe", False), bool):
         errs.append("version_probe must be true or false")
     workers = h.get("version_probe_workers")
@@ -419,6 +432,51 @@ def _check_content(c: dict) -> list[str]:
     errs = []
     for i, sel in enumerate(strip):
         errs += _check_selector(sel, f"content.strip[{i}]", required=True)
+
+    # content.extract: {extra_meta key: selector}. Same removal as `strip`, but
+    # the block is KEPT, filed in extra_meta under its key. Use it when a block
+    # is not part of the instrument but is still worth storing — MHRSD's
+    # "related regulations" view is 68-92% of a detail page's text.
+    extract = c.get("extract", {})
+    if not isinstance(extract, dict):
+        return errs + ['content.extract must be a mapping of '
+                       '{extra_meta key: css selector}']
+    if len(extract) > 20:
+        errs.append("content.extract: at most 20 entries")
+    for key, sel in extract.items():
+        if not isinstance(key, str) or not key.strip():
+            errs.append(f"content.extract key {key!r} must be a non-empty string")
+            continue
+        if not key.replace("_", "").isalnum():
+            errs.append(f"content.extract key {key!r}: letters, digits and "
+                        f"underscores only — it becomes an extra_meta key")
+        # Two forms:
+        #   key: "css"                      keep the block's markup
+        #   key: {selector: "css",          read it as label/value DATA, which is
+        #         pairs: {label: "css",     what a labelled sidebar actually is
+        #                 value: "css"}}
+        if isinstance(sel, dict):
+            errs += _check_selector(sel.get("selector"),
+                                    f"content.extract[{key}].selector", required=True)
+            pr = sel.get("pairs")
+            if pr is not None:
+                if not isinstance(pr, dict):
+                    errs.append(f"content.extract[{key}].pairs must be a mapping "
+                                f"with 'label' and 'value'")
+                else:
+                    errs += _check_selector(pr.get("label"),
+                                            f"content.extract[{key}].pairs.label",
+                                            required=True)
+                    errs += _check_selector(pr.get("value"),
+                                            f"content.extract[{key}].pairs.value",
+                                            required=True)
+            if "text" in sel and not isinstance(sel["text"], bool):
+                errs.append(f"content.extract[{key}].text must be true or false")
+            extra = set(sel) - {"selector", "pairs", "text"}
+            if extra:
+                errs.append(f"content.extract[{key}]: unknown key(s) {sorted(extra)}")
+        else:
+            errs += _check_selector(sel, f"content.extract[{key}]", required=True)
     return errs
 
 

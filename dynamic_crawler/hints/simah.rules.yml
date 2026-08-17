@@ -56,8 +56,32 @@ expand_selector: "button.accordion-button"
 # The page itself is document #1.
 include_page: true
 
+# ONE ENTRY, WITH THE PDF ATTACHED.
+#
+# The page carries the Credit Information Law (17 articles) and, beneath it, a
+# download block for its Implementing Regulations. Those were two rows: the Law
+# with its text, and a second row holding a title, a .pdf url and NOTHING else —
+# because that PDF lives on simah.com and allow_live is false, so it can never be
+# fetched while the block stands. A permanent empty shell is not a document.
+#
+# `combined` matches how the manual library models this, and how SDAIA's
+# "Personal Data Protection Law and The implementing Regulation" is already
+# stored here: one instrument, its files in extra_meta["attachment_links"].
+#
+# If the manual library turns out to list SIMAH as two separate entries, this is
+# the line to change back — that is ground truth and it beats the inference.
+attachment_is_document: "combined"
+
 # Document #2: the block holding the heading, the blurb and the download button.
 row_selector: "div.accordion-sub-hd"
+
+# The download block is duplicated: it is the ROW that becomes the attachment,
+# and it also sits inside the page's own HTML, where it reads as if "click the
+# below button to download the PDF file" were part of the Law's text. Strip it
+# from the stored document; the file it points at is on the row already.
+content:
+  strip:
+    - "div.accordion-sub-hd"
 detail_link_selector: "a[href]"
 
 pagination:
@@ -89,5 +113,25 @@ notes: "Page-as-document plus one attached PDF; accordions expanded before captu
 # same path the library will use. Defined here only — the pipeline reuses
 # them rather than prepending its own copy.
 library:
-  regulator: "SIMAH"
+  # Full name, then the acronym — house style, and this is doc_path[0] and
+  # therefore the root folder of SIMAH's tree. Changed 2026-08-14.
+  regulator: "Saudi Credit Bureau (SIMAH)"
   source_system: "Rules and Regulations"
+meta:
+  approved: true
+  approved_by: lead
+  approved_at: '2026-08-13T17:06:15+00:00'
+  form_hash: fd47a25b049c
+  verify:
+    verdict: WARN
+    counts:
+    - 2
+    - 2
+    - 2
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-13T17:06:15+00:00'
+    source: snapshot
+    forced: true

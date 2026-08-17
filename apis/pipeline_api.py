@@ -2257,7 +2257,8 @@ def trigger_requirement_matching_v2(regulation_id: int):
                 "kpis":             [],
                 "_obligation_id":   ob["obligation_id"],
                 "_requirement_id":  row["requirement_id"],
-                # version_id is None for SAMA/SBP, populated for CBB
+                # version_id is whatever was active in regulation_versions when
+                # the analysis ran; None only if no version row existed yet.
                 "_version_id":      row.get("version_id"),
             })
 
@@ -2652,8 +2653,49 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
             text_content = doc_html
             content_type = "html"
 
+    # ── LAST RESORT: the document IS the file at document_url ──────────
+    #
+    # Every source above reads text the library already holds. A PDF-only
+    # regulator holds none: its `document_url` IS the regulation, `document_html`
+    # is empty by design, and nothing ever wrote `content_text`. So the four
+    # checks above all miss and the endpoint refused with "No extractable text"
+    # — measured 2026-08-16 on the Anti-Money Laundering Law (id=3).
+    #
+    # That is not a property of one document. It blocks every PDF-only source in
+    # the library: AML 11, MOH 83, SDAIA 29, ZATCA Agreements 98, Tadawul 19,
+    # MISA's 65 PDFs — 300+ regulations that could not be analysed at all.
+    #
+    # The orchestrator already downloads and extracts exactly these files
+    # (`_download_and_extract_pdf`, with OCR when a PDF has no text layer), so
+    # this reuses that path rather than adding a second extractor. It is LAST on
+    # purpose: fetching is the expensive option, and any stored text is both
+    # cheaper and reproducible.
     if not text_content:
-        raise HTTPException(422, f"No extractable text for regulation {regulation_id}.")
+        doc_url = (regulation.get("document_url") or "").strip()
+        if doc_url.startswith("http"):
+            try:
+                from orchestrator.orchestrator import Orchestrator
+                from processor.downloader import Downloader
+                fetched = Orchestrator(
+                    crawler=None, repo=repo, downloader=Downloader()
+                )._download_and_extract_pdf(doc_url, regulation_id)
+                if fetched and len(fetched) > 200:
+                    text_content = fetched
+                    content_type = "pdf_text"
+                    logger.info("fetched %d chars from document_url for %s",
+                                len(fetched), regulation_id)
+            except Exception as e:                      # noqa: BLE001 - reported below
+                logger.warning("could not fetch %s for regulation %s: %s",
+                               doc_url[:90], regulation_id, e)
+
+    if not text_content:
+        raise HTTPException(
+            422,
+            f"No extractable text for regulation {regulation_id}. "
+            f"Checked: regulation_versions.content_text/content_html, "
+            f"extra_meta.org_pdf_text, document_html, and a download of "
+            f"document_url. A regulation with no stored text and no reachable "
+            f"file cannot be analysed.")
 
     normalizer = LLMAnalyzer()
     try:
@@ -2713,14 +2755,16 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
             )
             conn.commit()
 
-    # Get version_id from regulation_versions for CBB
-    version_id = None
-    if regulation.get("regulator") == "Central Bank of Bahrain":
-        version_data = repo.get_active_regulation_version(regulation_id)
-        if version_data:
-            version_id = version_data.get("version_id")
+    # Anchor to whatever version_id is active for this regulation right now.
+    # Every regulator gets regulation_versions rows since the orchestrator
+    # merge (2026-08-16 handoff), not just CBB, so this used to leave
+    # version_id NULL for everyone else even though an active version
+    # existed — archive_current_analysis(regulation_id, version_id) then had
+    # nothing to stamp. Falls back to None only when no version row exists
+    # yet (e.g. a regulator that hasn't been through direct-write).
+    version_data = repo.get_active_regulation_version(regulation_id)
+    version_id = version_data.get("version_id") if version_data else None
 
-    # Store with version_id (populated for CBB, None for others)
     repo.store_analysis(rows, version_id=version_id)
     # Only after a successful store -- a hash recorded against an analysis that
     # failed to persist would suppress the retry.
@@ -3143,7 +3187,7 @@ def get_analysis_versions(
                 "requirements": current_requirements,
                 "created_at": serialize_datetime(current_rows[0].get("created_at")),
                 "label": "Current (active — shown in all analysis endpoints)",
-                "note": "version_id is set for CBB regulations, null for SAMA/SBP/SECP."
+                "note": "version_id reflects the regulation_versions row active when the analysis ran; null only if no version existed yet."
             }
         else:
             current_summary = {
@@ -3152,7 +3196,7 @@ def get_analysis_versions(
                 "requirement_count": len(current_rows),
                 "created_at": serialize_datetime(current_rows[0].get("created_at")),
                 "label": "Current (active — shown in all analysis endpoints)",
-                "note": "version_id is set for CBB regulations, null for SAMA/SBP/SECP."
+                "note": "version_id reflects the regulation_versions row active when the analysis ran; null only if no version existed yet."
             }
 
     # ── Get archived versions (CBB only) ───────────────────────────────────
@@ -3697,7 +3741,8 @@ def root():
         "versioning_note": (
             "All regulators write to compliance_analysis (current). "
             "CBB additionally archives to compliance_analysis_versions on content change. "
-            "version_id is set on CBB rows; NULL for SAMA/SBP/SECP."
+            "version_id anchors to whatever regulation_versions row was active when the "
+            "analysis ran, for every regulator; NULL only if no version existed yet."
         ),
         "endpoints": {
             "upload":         "POST /upload-regulation",

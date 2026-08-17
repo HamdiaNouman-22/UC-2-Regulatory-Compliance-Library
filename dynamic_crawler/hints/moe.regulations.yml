@@ -36,7 +36,12 @@ wait_ms: 14000
 tabs:
   selector: "div.PhotoLibraryCategoriesItem"
   skip_labels: ["All"]
-  wait_ms: 1500
+  # 1500ms was too short: the tab strip itself needs 14s to render, and the card
+  # list had not re-filtered before it was harvested, so 20 documents were filed
+  # under a category they do not belong to (Scholarship rows under Special
+  # Education). The walker now verifies the row set changed and skips a tab whose
+  # click has not landed, but the right fix is to give it time in the first place.
+  wait_ms: 5000
   max_tabs: 30
 
 row_selector: "div.single-blog.single-blog-2"
@@ -83,9 +88,9 @@ library:
   source_system: "Systems, Regulations and Policies"
 meta:
   approved: true
-  approved_by: your name
-  approved_at: '2026-08-03T09:11:18+00:00'
-  form_hash: 960f2639eec9
+  approved_by: lead
+  approved_at: '2026-08-12T11:36:56+00:00'
+  form_hash: bc421d06209e
   verify:
     verdict: PASS
     counts:
@@ -97,4 +102,5 @@ meta:
       title: 100.0
       document_url: 100.0
     verified_at: '2026-08-03T09:11:18+00:00'
+    source: live
     forced: false
