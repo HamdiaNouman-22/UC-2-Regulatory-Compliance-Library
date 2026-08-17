@@ -1,0 +1,165 @@
+# MLCU — Egypt's AML/CFT unit — Legislative and Supervisory Framework
+#
+# Written 2026-08-17. CUSTOM, like MOH, and for the mirror-image reason: MOH's
+# page needs no browser because the CMS exposes JSON; MLCU's needs no browser
+# because the links are plain server-rendered `href`s. In both cases formfill is
+# impossible — here because a headless Chromium is REFUSED by the site's F5
+# BIG-IP ASM WAF while a plain desktop-UA GET returns 200.
+#
+#   Measured 2026-08-17 over 13 requests, all cached in UC-2-Scratch/mlcu_cache/.
+#   24 documents across five leaves: 1066 (10), 1065 (6), 3142 (4), 3143 (2),
+#   3144 (2). Selector `ul.news-linksLargIcon li a` returns the same count as
+#   `a.AutoDownload` on all five.
+#
+# THE HOST HAS ALREADY REFUSED THIS ADDRESS ONCE. Re-run against
+# UC-2-Scratch/mlcu_cache/ via `snapshot_dir` before running live, and never
+# reach for a browser here. See the access rule in UC-2-Scratch/MLCU_TASKS.md.
+#
+# NO ETag, NO Last-Modified, and sitemap.xml carries NO <lastmod> — so
+# `signal: sitemap` is out and a stored-inventory probe has no honest token to
+# read. The change signal is still open (T8); nothing is wired into
+# change_signals.yml or the scheduler yet, deliberately.
+
+regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
+owner: ai.team
+
+# `_v2` IS ALREADY IN THE WILD — 3144 holds `قانون مكافحة الارهاب_v2.pdf`. Under
+# the default identity (document_url, doc_path, title) a `_v3` re-upload changes
+# document_url, so the same instrument reads as one NEW document plus one
+# DISAPPEARED — a withdrawal proposal against a law still in force, and a lost
+# version history.
+#
+# Dropping document_url fixes that: (doc_path, title) is stable across the
+# re-upload, so the instrument stays ONE row with its version history intact and
+# no withdrawal is ever proposed against a law still in force.
+#
+# doc_path already ends in the title; `title` is kept in the tuple to match how
+# every other source spells this and to survive a doc_path shape change.
+identity: [doc_path, title]
+
+# THE FINGERPRINT — decided 2026-08-17, and it is a decision, not a default.
+#
+# `MLCUCrawler` hashes the document's EXTRACTED TEXT, which is the onboarding
+# doc's first preference. `document_url|title` is the floor, not the rule: the
+# crawler sets content_hash from the text and `stamp_content_hashes` fills only
+# what it left blank, so a document that extracts to nothing falls back on its
+# own. Today that is 18 documents on text and 6 on the fallback, and every row
+# records which in extra_meta["content_hash_basis"].
+#
+# The fallback is load-bearing, not tidiness. Six documents here are scanned
+# images and this repo's machine has no tesseract; `content_key("")` is "", so a
+# blanket text rule would have given all six THE SAME hash and reported them
+# `unchanged` straight through a replacement.
+#
+# WHAT THIS CHANGED, and it is not obvious. Under the old `document_url|title`
+# basis a `_v3` re-upload of IDENTICAL content classified as `modified` and wrote
+# a version row, because the url moved. On the text basis it classifies as
+# `unchanged` — same words, same fingerprint. That is the better answer (a
+# re-upload is not an amendment, and a version row for identical content is the
+# noise content_hash exists to prevent), but it means the two halves of this
+# source now treat a pure re-upload differently: the 6 fallback documents still
+# version on it. A genuine amendment is caught either way.
+#
+# REVISIT WHEN TESSERACT + THE `ara` TRAINEDDATA ARE INSTALLED. Extraction is
+# deterministic today — the same bytes hashed identically across three exports —
+# but the six scanned documents contribute nothing until OCR exists, and
+# installing it will change their text and re-version them once. Expect that; it
+# is not a fault.
+#
+# The crawler also NFKC-normalises before hashing. Four 1065 documents extract as
+# Arabic presentation forms (U+FB50-FEFF) rather than ordinary Arabic, which
+# matches neither their own title nor any Arabic search. Normalising before the
+# hash keeps the fingerprint over the text that actually reaches the workbook.
+
+# DEVELOPMENT-ONLY FLAGS, DELIBERATELY ABSENT FROM THIS FILE.
+#   `snapshot_dir`   replays a cached section page; means ZERO network, always.
+#   `pdf_cache_dir`  read-through cache for the PDFs, also read from the
+#                    MLCU_PDF_CACHE_DIR environment variable.
+# Both exist to satisfy the access rule while iterating — the hazard on this host
+# is the retry LOOP, not the byte count. Neither belongs here: a cache serving
+# production would be SIMAH's rule 5, a stale document quietly reporting
+# `unchanged` while the law was amended. This config crawls live, every run.
+
+# FIVE ENTRIES, NOT ONE CRAWLER WALKING FIVE SECTIONS. This is a correctness
+# requirement, not a preference: the completeness gate groups on
+# extra_meta["crawl_source"] falling back to the bare regulator name
+# (dynamic_crawler/formfill/orch.py:588) and `_run_key` re-keys per FORM only
+# (:594). Five sections inside one crawler class would therefore share ONE
+# baseline and be measured against a count belonging to another section — the
+# ZATCA pathology, which quarantines every run. Five sources instead gets
+# `source_names` (crawler/generic_crawler_wrapper.py:496) and a per-section
+# `crawl_source` stamp (:521) for free, and makes a section that returns zero
+# documents visible instead of invisible.
+#
+# `init_kwargs.regulator` IS SET EXPLICITLY ON EVERY ENTRY, and that repetition
+# is the point. For `mode: custom`, build_source passes ONLY init_kwargs
+# (generic_crawler_wrapper.py:553) — the top-level `regulator:` above is copied
+# down at :601 but then discarded, so it reaches the report label and NOT the
+# stored rows. MOH and CMA both leave it to a default argument inside the
+# crawler class, which is how CMA's stored name and its change_signals.yml entry
+# came to disagree while both looked right. The string that names this source in
+# the library is on this page, next to the one change_signals.yml will have to
+# match.
+sources:
+  - name: "اجراءات العناية الواجبة بالعملاء"
+    mode: custom
+    crawler_class: "crawler.mlcu_crawler.MLCUCrawler"
+    init_kwargs:
+      regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
+      source_system: "Legislative and Supervisory Framework"
+      section_id: "1066"
+      section_url: "https://mlcu.org.eg/ar/1066/اجراءات-العناية-الواجبة-بالعملاء"
+      section_title: "اجراءات العناية الواجبة بالعملاء"
+      category: "Customer Due Diligence"
+
+  - name: "الضوابط الرقابية"
+    mode: custom
+    crawler_class: "crawler.mlcu_crawler.MLCUCrawler"
+    init_kwargs:
+      regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
+      source_system: "Legislative and Supervisory Framework"
+      section_id: "1065"
+      section_url: "https://mlcu.org.eg/ar/1065/الضوابط-الرقابية"
+      section_title: "الضوابط الرقابية"
+      category: "Supervisory Controls"
+
+  - name: "قانون مكافحة غسل الاموال ولائحتة التنفيذية"
+    mode: custom
+    crawler_class: "crawler.mlcu_crawler.MLCUCrawler"
+    init_kwargs:
+      regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
+      source_system: "Legislative and Supervisory Framework"
+      section_id: "3143"
+      section_url: "https://mlcu.org.eg/ar/3143/قانون-مكافحة-غسل-الاموال-ولائحتة-التنفيذية"
+      section_title: "قانون مكافحة غسل الاموال ولائحتة التنفيذية"
+      category: "AML Law and Executive Regulations"
+
+  - name: "قوانين ذات صلة بمكافحة الارهاب وتمويله"
+    mode: custom
+    crawler_class: "crawler.mlcu_crawler.MLCUCrawler"
+    init_kwargs:
+      regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
+      source_system: "Legislative and Supervisory Framework"
+      section_id: "3144"
+      section_url: "https://mlcu.org.eg/ar/3144/قوانين-ذات-صلة-بمكافحة-الارهاب-وتمويله"
+      section_title: "قوانين ذات صلة بمكافحة الارهاب وتمويله"
+      category: "Counter-Terrorist Financing Laws"
+
+  - name: "قوانين اخرى"
+    mode: custom
+    crawler_class: "crawler.mlcu_crawler.MLCUCrawler"
+    init_kwargs:
+      regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
+      source_system: "Legislative and Supervisory Framework"
+      section_id: "3142"
+      section_url: "https://mlcu.org.eg/ar/3142/قوانين-اخرى"
+      section_title: "قوانين اخرى"
+      category: "Other Related Laws"
+
+# NOT LISTED, DELIBERATELY:
+#   1063 / 1064 are parent menu pages, not leaves — the selector matches nothing
+#     on either (verified against the cached copies), which is why they are
+#     absent rather than empty.
+#   3145 اخبار is a SIGNAL CANDIDATE, never a stored source: it would duplicate
+#     an instrument 1066 already holds, most of it is press releases, and a news
+#     feed only ever grows. T8 measures whether it is usable.
