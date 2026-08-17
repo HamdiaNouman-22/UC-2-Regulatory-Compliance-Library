@@ -1,0 +1,67 @@
+# GOSI — Social Insurance. SIX legal instruments on ONE url.
+#
+# The page carries a tab strip whose tabs are separate instruments, addressed by
+# fragment (<a href="#3"> revealing <div id="3">). Nothing navigates, so
+# generic_crawler never followed a tab and kept only the longest panel: 1 of 6
+# instruments, 9 of 45 sections, reported as status: ok.
+#
+# GRANULARITY: one document per INSTRUMENT (6). The alternative — one per
+# accordion section (45) — is gosi.social_insurance.sections.yml; the two differ
+# only in `panels.include_panel` vs `row_selector`.
+#
+# DO NOT add expand_selector. The panels are pre-rendered and read with
+# textContent; clicking is unnecessary and innerText is actively worse — the
+# ACTIVE panel reports 279 characters (its accordions are collapsed) against
+# 82,064 of textContent, while the hidden panels report the full text either way.
+
+version: 1
+name: gosi.social_insurance
+seed_url: "https://www.gosi.gov.sa/en/SystemsAndRegulations/SocialInsurance"
+shape: list
+
+# The page is an Angular app (_ngcontent-* attributes on every node). Phase 2
+# RELOADS the seed to re-stamp the panels, and at the default settle only the
+# first panel had rendered — so panels 1..5 were "not found again" and five of
+# six instruments stored NO html at all. Everything else that broke on this
+# project today was a settle time; give it room.
+wait_ms: 8000
+scope: prefix
+
+panels:
+  tabs: "ul.tabs.blocksTabs li.tab a"
+  include_panel: true
+
+pagination:
+  mode: none
+  max_pages: 1
+
+section_path:
+  # "Home > Retirement Laws > Social Insurance Law", the site's own words.
+  prefix: ["Social Insurance Law"]
+
+fetch_details: true
+notes: "Six instruments in fragment-addressed tab panels; each panel's text is the document."
+# Names this source stores under. MUST match config/change_signals.yml,
+# or the change sweep and the ingest path keep separate memories of the
+# same documents.
+library:
+  regulator: "General Organization for Social Insurance (GOSI)"
+  source_system: "Laws and Regulations"
+meta:
+  approved: true
+  approved_by: lead
+  approved_at: '2026-08-12T14:21:48+00:00'
+  form_hash: 19381943c202
+  verify:
+    verdict: WARN
+    counts:
+    - 6
+    - 6
+    - 6
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-12T14:21:48+00:00'
+    source: live
+    forced: false

@@ -2,15 +2,21 @@ import logging
 import time
 import re
 from urllib.parse import urljoin
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 from bs4 import BeautifulSoup
 from typing import List, Optional, Dict
 from dataclasses import dataclass, field
+
+from crawler.fingerprint import stamp_content_hashes
 from datetime import datetime
+
+# The stored regulator name. Full name then acronym is the house style, and
+# this string is ALSO the first crumb of doc_path, so it is the root folder of
+# SAMA's tree. Changed 2026-08-15: it was the bare acronym "SAMA", while the
+# library already held the full name — a crawl would have created a SECOND
+# regulator beside the 6,101 rows already stored.
+SAMA_REGULATOR = "Saudi Arabian Monetary Authority (SAMA)"
+
 
 # Configure logging
 logging.basicConfig(
@@ -20,6 +26,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _SAMA_BASE = "https://rulebook.sama.gov.sa"
+_USER_AGENT = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+               '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+
+def _parse_sama_date(date_str: Optional[str]):
+    """'D/M/YYYY' or 'DD/MM/YYYY' -> date. SAMA's site pads days/months
+    inconsistently (e.g. '21/5/2026' vs '21/05/2026' for the same crawl), so
+    comparisons must go through this rather than raw string equality."""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str.strip(), "%d/%m/%Y").date()
+    except ValueError:
+        return None
+
+
+def _norm_title(title: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", (title or "")).strip().casefold()
 
 
 def _absolutify_links(html: str, base_url: str = _SAMA_BASE) -> str:
@@ -53,6 +77,12 @@ class RegulatoryDocument:
     published_date: Optional[str] = None
     reference_no: Optional[str] = None
     fingerprint: Optional[str] = None
+    # A real FIELD, not an attribute stamped on later: this is a dataclass and
+    # `asdict()` — which save_to_json and the wrapper both use — copies fields
+    # only, so a stamped-on attribute would be silently dropped between the
+    # crawl and the database. Distinct from `fingerprint` above, which nothing
+    # reads; `content_hash` is what change detection actually compares.
+    content_hash: Optional[str] = None
 
     # ---- Folder / compliance category ----
     compliancecategory_id: Optional[int] = None
@@ -76,38 +106,60 @@ class RegulatoryDocument:
 
 
 class SAMARulebookCrawler:
-    """Crawler for SAMA Rulebook Circulars"""
+    """Crawler for SAMA Rulebook Circulars.
+
+    Playwright-based (not Selenium): the site's own Chrome + a Selenium-Manager
+    -downloaded chromedriver.exe both hit an enterprise WDAC/Smart App Control
+    block on locked-down Windows machines (chromedriver isn't signed to the
+    required "Enterprise" level, and that re-triggers every time Chrome
+    auto-updates and forces a fresh driver download). Playwright bundles its
+    own browser binary and does not hit that same block.
+    """
 
     BASE_URL = "https://rulebook.sama.gov.sa/en/sama-circulars"
 
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, request_delay: float = 1.0):
         self.headless = headless
-        self.driver = None
-        logger.info(f"Initializing SAMARulebookCrawler (headless={headless})")
+        self.request_delay = request_delay
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self.page = None
+        logger.info(f"Initializing SAMARulebookCrawler (headless={headless}, request_delay={request_delay}s)")
 
     def _init_driver(self):
-        """Initialize Chrome WebDriver"""
-        logger.info("Initializing Chrome WebDriver...")
-        options = webdriver.ChromeOptions()
-        if self.headless:
-            options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--window-size=1920,1080')
-        options.add_argument(
-            'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-
-        self.driver = webdriver.Chrome(options=options)
-        self.driver.implicitly_wait(10)
-        logger.info("Chrome WebDriver initialized")
+        """Launch Playwright Chromium."""
+        logger.info("Launching Playwright Chromium...")
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=self.headless)
+        self._context = self._browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=_USER_AGENT,
+        )
+        self.page = self._context.new_page()
+        logger.info("Playwright Chromium launched")
 
     def _close_driver(self):
-        """Close WebDriver"""
-        if self.driver:
-            logger.info("Closing WebDriver...")
-            self.driver.quit()
-            self.driver = None
+        """Close the browser.
+
+        Runs from fetch_documents' finally block. If the browser already
+        crashed mid-crawl, closing it can itself raise -- letting that
+        escape here would blow up the finally block and lose every document
+        already collected before it could be returned/saved, so it's
+        swallowed and just logged.
+        """
+        for closer, label in (
+            (self._context, "context"),
+            (self._browser, "browser"),
+            (self._playwright, "playwright"),
+        ):
+            if not closer:
+                continue
+            try:
+                closer.close() if label != "playwright" else closer.stop()
+            except Exception as e:
+                logger.warning(f"Failed to close {label} (browser likely already crashed): {e}")
+        self.page = self._context = self._browser = self._playwright = None
 
     def _select_show_all(self) -> bool:
         """Select 'All' from the DataTables entries dropdown"""
@@ -115,10 +167,8 @@ class SAMARulebookCrawler:
             logger.info("Attempting to select 'Show All' option...")
 
             # Wait for table
-            WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'table.circulars'))
-            )
-            time.sleep(3)
+            self.page.wait_for_selector('table.circulars', timeout=20000)
+            time.sleep(0.5)  # let DataTables finish initializing its JS over the table
 
             # Find select element
             select_selectors = [
@@ -129,43 +179,52 @@ class SAMARulebookCrawler:
                 'select[name$="_length"]'
             ]
 
-            select_element = None
+            select_locator = None
             for selector in select_selectors:
                 try:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements and elements[0].is_displayed():
-                        select_element = elements[0]
+                    loc = self.page.locator(selector)
+                    if loc.count() > 0 and loc.first.is_visible():
+                        select_locator = loc.first
                         logger.info(f"Found select element: {selector}")
                         break
-                except:
+                except Exception:
                     continue
 
-            if not select_element:
+            if not select_locator:
                 logger.error("Could not find select element")
                 return False
 
             # Scroll and select
-            self.driver.execute_script("arguments[0].scrollIntoView(true);", select_element)
-            time.sleep(1)
+            select_locator.scroll_into_view_if_needed()
+            time.sleep(0.3)
 
             try:
-                select = Select(select_element)
-                select.select_by_value('-1')
+                select_locator.select_option('-1')
                 logger.info("Selected 'All' via value=-1")
-            except:
+            except Exception:
                 # JavaScript fallback
-                self.driver.execute_script("""
-                    var select = document.querySelector('select[name*="length"]');
-                    if (select) {
-                        select.value = '-1';
-                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                self.page.evaluate("""
+                    () => {
+                        var select = document.querySelector('select[name*="length"]');
+                        if (select) {
+                            select.value = '-1';
+                            select.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
                     }
                 """)
                 logger.info("Selected 'All' via JavaScript")
 
-            time.sleep(5)
+            # Poll instead of a blind sleep -- DataTables usually finishes
+            # rendering ~685 rows well under the old fixed 5s wait.
+            try:
+                self.page.wait_for_function(
+                    "() => document.querySelectorAll('table.circulars tbody tr').length > 10",
+                    timeout=12000,
+                )
+            except PWTimeoutError:
+                pass
 
-            row_count = len(self.driver.find_elements(By.CSS_SELECTOR, 'table.circulars tbody tr'))
+            row_count = self.page.locator('table.circulars tbody tr').count()
             logger.info(f"Rows visible: {row_count}")
 
             return row_count > 10
@@ -188,7 +247,7 @@ class SAMARulebookCrawler:
             parts = date_str.split('/')
             if len(parts) == 3 and len(parts[2]) == 4:
                 return parts[2]
-        except:
+        except Exception:
             pass
         return None
 
@@ -198,7 +257,7 @@ class SAMARulebookCrawler:
 
         try:
             logger.info("Extracting table rows...")
-            page_source = self.driver.page_source
+            page_source = self.page.content()
             soup = BeautifulSoup(page_source, 'html.parser')
 
             table = soup.find('table', class_='circulars')
@@ -284,11 +343,11 @@ class SAMARulebookCrawler:
 
         try:
             logger.info(f"Visiting detail page: {detail_url}")
-            self.driver.get(detail_url)
-            time.sleep(3)
+            self.page.goto(detail_url, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(1.5)
 
             # Look for PDF download link using BeautifulSoup (more reliable)
-            page_source = self.driver.page_source
+            page_source = self.page.content()
             soup = BeautifulSoup(page_source, 'html.parser')
 
             # Strategy 1: Look for the specific PDF block
@@ -342,9 +401,37 @@ class SAMARulebookCrawler:
             logger.error(f"Error in _extract_detail_page: {e}")
 
         return result
-    def fetch_documents(self, limit: Optional[int] = None) -> List[RegulatoryDocument]:
-        """Main method to fetch all SAMA circulars"""
+
+    def fetch_documents(self, limit: Optional[int] = None,
+                         known_documents: Optional[List[Dict[str, str]]] = None) -> List[RegulatoryDocument]:
+        """Main method to fetch all SAMA circulars.
+
+        known_documents: optional list of {"title": ..., "published_date": ...}
+        already stored (e.g. from the DB). The circulars table lists newest
+        first, so this is used two ways:
+          1. Early stop: once a row's issue date is older than the latest
+             known date, everything after it is assumed already stored and
+             the rest of the table is not visited at all.
+          2. Same-day dedup: rows whose date matches a known date are only
+             skipped (no detail-page visit) if their title also matches one
+             already known for that date -- two circulars can share a date.
+        Dates are parsed rather than string-compared, since SAMA's site pads
+        the day inconsistently (e.g. '21/5/2026' vs '21/05/2026').
+        """
         documents = []
+        skipped_unchanged = 0
+        stopped_early_at = None
+
+        known_by_date: Dict = {}
+        latest_known_date = None
+        if known_documents:
+            for k in known_documents:
+                d = _parse_sama_date(k.get("published_date"))
+                if d is None:
+                    continue
+                known_by_date.setdefault(d, set()).add(_norm_title(k.get("title")))
+                if latest_known_date is None or d > latest_known_date:
+                    latest_known_date = d
 
         try:
             logger.info("=" * 80)
@@ -354,8 +441,9 @@ class SAMARulebookCrawler:
             self._init_driver()
 
             logger.info(f"Navigating to {self.BASE_URL}")
-            self.driver.get(self.BASE_URL)
-            time.sleep(5)
+            self.page.goto(self.BASE_URL, wait_until="domcontentloaded", timeout=60000)
+            # No blind sleep here -- goto() already blocks for DOMContentLoaded,
+            # and _select_show_all() below waits explicitly for the table.
 
             # Select "Show All"
             show_all_success = self._select_show_all()
@@ -380,6 +468,24 @@ class SAMARulebookCrawler:
             # Process each row
             for i, row in enumerate(rows_data, 1):
                 try:
+                    if known_documents is not None:
+                        row_date = _parse_sama_date(row['issue_date_gregorian'])
+
+                        if row_date and latest_known_date and row_date < latest_known_date:
+                            logger.info(
+                                f"Row {i}: issue date {row_date} is older than the latest known "
+                                f"circular ({latest_known_date}) -- stopping, rest of the table is "
+                                f"assumed already stored ({len(rows_data) - i + 1} rows not visited)."
+                            )
+                            stopped_early_at = i
+                            break
+
+                        if row_date and row_date in known_by_date:
+                            if _norm_title(row['title']) in known_by_date[row_date]:
+                                skipped_unchanged += 1
+                                continue
+                            # Same date, different title -- a distinct circular, fetch it.
+
                     logger.info(f"\n[{i}/{len(rows_data)}] Processing: {row['circular_no']} - {row['title'][:50]}...")
 
                     # Extract detail page data
@@ -391,7 +497,7 @@ class SAMARulebookCrawler:
 
                     # Create RegulatoryDocument
                     doc = RegulatoryDocument(
-                        regulator="SAMA",
+                        regulator=SAMA_REGULATOR,
                         source_system="SAMA RULEBOOK",
                         category="SAMA Circulars",
                         title=row['title'],
@@ -415,8 +521,8 @@ class SAMARulebookCrawler:
                     documents.append(doc)
                     logger.info(f"Document {i} processed successfully")
 
-                    # Small delay between requests
-                    time.sleep(1)
+                    # Delay between requests (politeness / avoid rate limiting)
+                    time.sleep(self.request_delay)
 
                 except Exception as e:
                     logger.error(f"Error processing row {i}: {e}")
@@ -425,18 +531,31 @@ class SAMARulebookCrawler:
                     continue
 
             logger.info("\n" + "=" * 80)
-            logger.info(f"CRAWLING COMPLETE: {len(documents)} documents extracted")
+            logger.info(
+                f"CRAWLING COMPLETE: {len(documents)} documents extracted"
+                + (f", {skipped_unchanged} skipped (already up to date)" if known_documents is not None else "")
+                + (f", stopped early at row {stopped_early_at}/{len(rows_data)}" if stopped_early_at else "")
+            )
             logger.info("=" * 80)
 
         except Exception as e:
             logger.error(f"Critical error in fetch_documents: {e}")
             import traceback
             logger.error(traceback.format_exc())
+            # Re-raise rather than returning an empty list: callers save
+            # documents to disk keyed on this return value, and a crash
+            # before any row was even read must not look identical to a
+            # legitimate "found 0 new circulars" result -- that would
+            # silently overwrite good prior output with nothing.
+            raise
 
         finally:
             self._close_driver()
 
-        return documents
+        # The only exit that can carry rows — the early `return documents` above
+        # fires before anything is appended. Without a fingerprint every circular
+        # classifies `modified` on every run; see crawler/fingerprint.py.
+        return stamp_content_hashes(documents)
 
     def save_to_json(self, documents: List[RegulatoryDocument], filename: str = "sama_circulars.json"):
         """Save documents to JSON file"""

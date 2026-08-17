@@ -1,0 +1,134 @@
+{
+  "sama_rulebook": {
+    "shape": "generic",
+    "breadcrumb": [],
+    "section_anchor": "",
+    "content_text_len": 379,
+    "n_links": 197,
+    "n_doc_links": 4,
+    "doc_section_paths": [
+      ""
+    ],
+    "profile": {
+      "breadcrumb_current": false,
+      "unwrap_forms": false,
+      "sharepoint_main": false,
+      "group_headings": false
+    }
+  },
+  "sama_circulars": {
+    "shape": "table",
+    "breadcrumb": [
+      "SAMA Rulebook",
+      "SAMA Circulars"
+    ],
+    "section_anchor": "sama circulars",
+    "content_text_len": 2831,
+    "n_links": 414,
+    "n_doc_links": 4,
+    "doc_section_paths": [
+      "SAMA Rulebook > SAMA Circulars"
+    ],
+    "profile": {
+      "breadcrumb_current": false,
+      "unwrap_forms": false,
+      "sharepoint_main": false,
+      "group_headings": false
+    }
+  },
+  "cbb": {
+    "shape": "tree",
+    "breadcrumb": [
+      "Common Volume"
+    ],
+    "section_anchor": "common volume",
+    "content_text_len": 1779,
+    "n_links": 130,
+    "n_doc_links": 1,
+    "doc_section_paths": [
+      "Common Volume"
+    ],
+    "profile": {
+      "breadcrumb_current": false,
+      "unwrap_forms": false,
+      "sharepoint_main": false,
+      "group_headings": false
+    }
+  },
+  "secp_acts": {
+    "shape": "table",
+    "breadcrumb": [
+      "Home",
+      "Laws"
+    ],
+    "section_anchor": "laws",
+    "content_text_len": 4229,
+    "n_links": 375,
+    "n_doc_links": 23,
+    "doc_section_paths": [
+      "Home > Laws"
+    ],
+    "profile": {
+      "breadcrumb_current": false,
+      "unwrap_forms": false,
+      "sharepoint_main": false,
+      "group_headings": false
+    }
+  },
+  "sbp_circulars": {
+    "shape": "generic",
+    "breadcrumb": [],
+    "section_anchor": "",
+    "content_text_len": 111,
+    "n_links": 263,
+    "n_doc_links": 0,
+    "doc_section_paths": [],
+    "profile": {
+      "breadcrumb_current": false,
+      "unwrap_forms": false,
+      "sharepoint_main": false,
+      "group_headings": false
+    }
+  },
+  "cma_regs": {
+    "shape": "generic",
+    "breadcrumb": [
+      "Capital Market Authority",
+      "Laws & Regulations"
+    ],
+    "section_anchor": "laws & regulations",
+    "content_text_len": 6634,
+    "n_links": 265,
+    "n_doc_links": 36,
+    "doc_section_paths": [
+      "Capital Market Authority > Laws & Regulations"
+    ],
+    "profile": {
+      "breadcrumb_current": false,
+      "unwrap_forms": false,
+      "sharepoint_main": false,
+      "group_headings": false
+    }
+  },
+  "aml_rules": {
+    "shape": "generic",
+    "breadcrumb": [
+      "Anti-Money Laundering Committee",
+      "Rules and Regulations"
+    ],
+    "section_anchor": "rules and regulations",
+    "content_text_len": 3606,
+    "n_links": 135,
+    "n_doc_links": 11,
+    "doc_section_paths": [
+      "Anti-Money Laundering Committee > Rules and Regulations > Laws and Regulations",
+      "Anti-Money Laundering Committee > Rules and Regulations > Rules and Instructions"
+    ],
+    "profile": {
+      "breadcrumb_current": true,
+      "unwrap_forms": true,
+      "sharepoint_main": true,
+      "group_headings": true
+    }
+  }
+}

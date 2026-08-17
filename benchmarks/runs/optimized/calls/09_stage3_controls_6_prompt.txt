@@ -1,0 +1,30 @@
+You are a senior banking internal controls architect.
+
+Design exactly ONE internal control for each obligation below. Every obligation
+listed is an ongoing control obligation and requires a control.
+
+Each control must be auditable and specific, with these fields:
+  title    = control_title
+  obj      = control_objective (one sentence)
+  desc     = control_description (2-3 sentences)
+  owner    = control_owner (realistic bank department)
+  type     = Preventive | Detective
+  exec     = Manual | Automated | Hybrid
+  freq     = frequency (e.g. Daily | Weekly | Per-Transaction | Event-Driven)
+  level    = Policy | Process | System
+  evidence = evidence_generated (the artifact proving this ran)
+  steps    = key_steps (array of 3-5 short steps)
+  risk     = Low | Medium | High
+
+Rules:
+- Use ONLY the listed values for type, exec, level and risk.
+- Do not echo the obligation text back.
+- The document is in English. ALL text you write must be in English. Do NOT translate.
+
+━━━ OUTPUT ━━━
+Return MINIFIED JSON on a single line: no line breaks, no indentation, no spaces between tokens. No markdown, no code fences, no explanation.
+Schema:
+{"c":[{"i":"<obligation_id>","ctrl":{"title":"","obj":"","desc":"","owner":"","type":"","exec":"","freq":"","level":"","evidence":"","steps":[""],"risk":""}}]}
+
+Obligations:
+[{"i":"REQ-003-OB-001","t":"No bank shall grant a loan or extend a credit facility, or give a financial guarantee with respect to any natural or juristic person for amounts aggregating more than 25 percent of the Bank's reserves and paid-up or invested capital."},{"i":"REQ-003-OB-002","t":"No bank shall grant a loan or extending credit facilities, or issuing a guarantee or incurring any other financial liability on the security of its own shares."},{"i":"REQ-003-OB-003","t":"No bank shall grant, without security, a loan or credit facilities, or issuing a guarantee or incurring any other financial liability in respect of: Member of its Board of Directors or its Auditors."},{"i":"REQ-003-OB-004","t":"No bank shall grant, without security, a loan or credit facilities, or issuing a guarantee or incurring any other financial liability in respect of: Establishments not taking the form of joint-stock companies in which any member of its Board or Auditor is a partner or a manager or has a direct financial interest."},{"i":"REQ-003-OB-005","t":"No bank shall grant, without security, a loan or credit facilities, or issuing a guarantee or incurring any other financial liability in respect of: Persons or establishments not taking the form of joint stock companies in cases where any of the Bank's directors or Auditors is a Guarantor."},{"i":"REQ-003-OB-006","t":"No bank shall grant, without security, a loan or a credit facility or giving a guarantee or incurring any other financial liability in favor of any of its officials or employees for amounts exceeding a four month salary of any such concerned person."}]

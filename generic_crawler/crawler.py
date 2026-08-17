@@ -75,8 +75,10 @@ from playwright.sync_api import sync_playwright
 # Shape-aware strategies (additive): detect tree / table layouts and dispatch.
 try:
     from strategies import detect_shape, crawl_tree, crawl_table, crawl_list
+    from blockcheck import blocked_reason
 except ImportError:  # when imported as a package
     from .strategies import detect_shape, crawl_tree, crawl_table, crawl_list
+    from .blockcheck import blocked_reason
 
 # Windows consoles default to cp1252; force UTF-8 so Arabic/curly chars don't crash logging.
 try:
@@ -124,6 +126,50 @@ DENY_PATH_PAT = re.compile(
 def first_seg(path: str) -> str:
     segs = [s for s in path.split("/") if s]
     return segs[0] if segs else ""
+
+
+def scope_prefix(path: str) -> str:
+    """The path that `scope: prefix` means by "under the seed".
+
+    Naively this was `path.rstrip("/")`, which is right only when the seed URL is
+    a DIRECTORY. Point it at a page and the page's own filename lands in the
+    prefix, so nothing on the site can ever start with it:
+
+        seed    /en/RulesRegulations/Pages/rules.aspx
+        prefix  /en/RulesRegulations/Pages/rules.aspx      <- a leaf
+        test    /en/RulesRegulations/Agreements  -> False  <- the real content
+
+    Every sibling is rejected, including the documents the seed exists to reach.
+    Measured on ZATCA and Ministry of Commerce: 38 and 47 rows of site chrome
+    (Contact Us, Careers, News, Brand Identity) and zero regulations.
+
+    TWO SEGMENTS COME OFF, IN ORDER:
+
+    1. A trailing FILENAME — a last segment containing a dot. `/a/b/rules.aspx`
+       is the page, `/a/b` is the section it lives in.
+
+    2. A trailing `/pages` — SharePoint keeps every page of a section in a
+       `Pages/` folder, so `/en/RulesRegulations/Pages` names a storage folder,
+       not a subject area. Sibling sections live at `/en/RulesRegulations/Taxes`
+       and `/en/RulesRegulations/Agreements`, which are under the SECTION but
+       not under `Pages`. Both KSA sites we crawl this way are SharePoint.
+
+        /en/RulesRegulations/Pages/rules.aspx   -> /en/RulesRegulations
+        /en/Regulations/pages/default.aspx      -> /en/Regulations
+        /activities/laws                        -> /activities/laws  (unchanged)
+
+    A directory seed is returned untouched, so hosts that already worked are
+    unaffected. Never returns "" — an empty prefix matches every path on the
+    host, silently turning `prefix` into `host`; the last real segment is kept
+    instead.
+    """
+    p = (path or "").rstrip("/")
+    segs = [s for s in p.split("/") if s]
+    if segs and "." in segs[-1]:            # a file, not a directory
+        segs.pop()
+    if len(segs) > 1 and segs[-1].lower() == "pages":   # SharePoint page store
+        segs.pop()
+    return "/" + "/".join(segs) if segs else ""
 
 
 def content_key(text: str) -> str:
@@ -177,14 +223,36 @@ EXTERNAL_LAW_PORTALS = {
 }
 
 
-def is_external_law_portal(url: str) -> bool:
+def is_external_law_portal(url: str, seed_host: str = "") -> bool:
     """True if the URL's host is a known legal portal that serves law text itself,
-    rather than something we can recognise from the path or extension."""
+    rather than something we can recognise from the path or extension.
+
+    IT MUST NOT FIRE FOR LINKS THAT STAY ON THE SITE WE ARE CRAWLING.
+
+    EXTERNAL_LAW_PORTALS answers "some OTHER regulator's site links OUT to
+    zatca.gov.sa as a cross-reference — that link is a law, not a page to crawl".
+    The word doing the work is EXTERNAL. When the seed IS zatca.gov.sa, every
+    ordinary navigation link on the site matches the host and is misread as a
+    terminal document.
+
+    Measured on ZATCA 2026-08-12: the seed page alone produced n_pages=1 and
+    n_documents=38, and those 38 were Contact Us, Careers, News, Magazine and
+    Brand Identity. Documents are collected regardless of scope, so no scope
+    setting can filter them out — the crawl also never went deeper, because
+    every link it could have followed had been marked terminal.
+
+    The standalone crawler (generic_crawler/crawler_MISA_MC_ZATCA.py) already
+    carried this seed_host guard and the warning above; this shared engine had
+    the copy without it. MC has the same exposure — mc.gov.sa is also listed.
+    """
     host = urlparse(url).netloc.lower()
+    if seed_host and (host == seed_host or seed_host.endswith("." + host)
+                      or host.endswith("." + seed_host)):
+        return False
     return any(host == d or host.endswith("." + d) for d in EXTERNAL_LAW_PORTALS)
 
 
-def is_document_link(url: str) -> bool:
+def is_document_link(url: str, seed_host: str = "") -> bool:
     """True if a link points to a downloadable document — not just plain .pdf/.docx,
     but also download-manager links (WordPress Download Manager `wpdmdl=`, /document/,
     /download/ endpoints) that serve a file without a file extension in the URL,
@@ -199,26 +267,53 @@ def is_document_link(url: str) -> bool:
     segs = [s for s in p.path.lower().split("/") if s]
     if any(s in ("document", "documents", "download", "downloads") for s in segs):
         return True
-    if is_external_law_portal(url):
+    if is_external_law_portal(url, seed_host):
         return True
     return False
 
 
-def doc_type_of(url: str) -> str:
+def doc_type_of(url: str, seed_host: str = "") -> str:
+    """The file_type stored for a document link.
+
+    `seed_host` matters here for the same reason it does in is_document_link:
+    without it, EXTERNAL_LAW_PORTALS matches the site we are CURRENTLY crawling
+    and every one of its own pages is stamped EXTERNAL. Measured on Ministry of
+    Commerce 2026-08-12 — mc.gov.sa is in that set, so mc.gov.sa's own pages came
+    back as EXTERNAL. The guard was threaded through is_document_link and missed
+    here.
+    """
     e = ext_of(url).lstrip(".").upper()
-    # A real file extension always wins.
-    if e and ("." + e.lower()) in DOC_EXTS:
+    if e:
         return e
-    # An external law portal serves HTML, not a file — even when the URL ends in
-    # .aspx (mc.gov.sa). Marking it EXTERNAL rather than DOC/ASPX tells the
-    # pipeline to read the page instead of trying to download and OCR it.
-    if is_external_law_portal(url):
+    if is_external_law_portal(url, seed_host=seed_host):
         return "EXTERNAL"
-    return e if e else "DOC"
+    return "DOC"
 
 
 GENERIC_LINK_TEXT = {"", "download", "pdf", "download pdf", "view", "view details",
-                     "click here", "read more", "open", "details", "more"}
+                     "click here", "read more", "open", "details", "more",
+                     # Action words that had been missing. "press here" reached
+                     # the library as a document TITLE via the formfill side; the
+                     # same words arrive here through anchor text.
+                     "press here", "press", "click", "tap here", "here",
+                     "download here", "download file", "download document",
+                     "see more", "show more", "view more", "read", "detail",
+                     "link", "attachment", "file", "document",
+                     "اضغط هنا", "تحميل", "المزيد"}
+
+
+def _norm_link_text(s: str) -> str:
+    """Lowercased, with the invisible characters gov sites embed removed.
+
+    GENERIC_LINK_TEXT is matched EXACTLY, so a single zero-width space defeats
+    it. Ministry of Commerce stored a document titled `click here​` for
+    exactly that reason — visually "click here", not equal to it.
+    """
+    s = (s or "").strip().lower()
+    s = s.replace("​", "").replace("‌", "").replace("‎", "")
+    s = s.replace("‏", "").replace("﻿", "").replace(" ", " ")
+    s = re.sub(r"[\s.:،…]+", " ", s).strip()
+    return s
 
 
 PAGE_EXTS = {".aspx", ".asp", ".html", ".htm", ".php", ".jsp"}
@@ -372,7 +467,7 @@ def best_doc_title(link: dict, url: str) -> str:
       4. the URL slug               — last resort
     """
     t = (link.get("text") or "").strip()
-    if t.lower() not in GENERIC_LINK_TEXT and len(t) > 3:
+    if _norm_link_text(t) not in GENERIC_LINK_TEXT and len(t) > 3:
         return t[:200]
     ta = (link.get("title_attr") or "").strip()
     if len(ta) > 3:
@@ -602,7 +697,24 @@ const rankedHeads = Array.from(document.querySelectorAll(
   .map(h => ({ el: h, rank: rankOf(h),
                text: (h.innerText || h.textContent || '').replace(/\s+/g, ' ').trim() }))
   .filter(h => h.rank && h.text && h.text.length < 300 && !inWidget(h.el));
-return Array.from(document.querySelectorAll('a[href]')).map(a => {
+// Links are not always <a href>. Government SharePoint routinely ships a
+// <button onclick="window.location.href='...'"> that navigates exactly like a
+// link — CMA builds its entire article index that way, so every article was
+// invisible to a walk that only reads anchors. Note the destination must come
+// from the onclick: CMA's matching data-bs-target id is lowercase and 404s.
+// Collected as pseudo-anchors so the rest of this function is unchanged.
+const _cands = [];
+for (const a of document.querySelectorAll('a[href]')) _cands.push({el: a, href: a.href});
+for (const b of document.querySelectorAll('[onclick]')) {
+  if (b.tagName === 'A' && b.hasAttribute('href')) continue;    // already have it
+  const oc = b.getAttribute('onclick') || '';
+  const m = oc.match(/location\.href\s*=\s*['"]([^'"]+)['"]/i);
+  if (!m) continue;
+  let abs = '';
+  try { abs = new URL(m[1], location.href).href; } catch (e) { continue; }
+  _cands.push({el: b, href: abs});
+}
+return _cands.map(({el: a, href: _href}) => {
   const t = (a.textContent || '').trim();
   let nav = false, el = a;
   for (let i = 0; i < 4 && el; i++) {
@@ -655,7 +767,7 @@ return Array.from(document.querySelectorAll('a[href]')).map(a => {
   // <nav>/<aside> are deliberately NOT treated as chrome: unlike header/footer
   // they are often a genuine in-page category sidebar.
   const chrome = !!a.closest('header, footer, [role="banner"], [role="contentinfo"]');
-  return { href: a.href, text: t.slice(0, 300), nav: nav, ctx: ctx, group: group,
+  return { href: _href, text: t.slice(0, 300), nav: nav, ctx: ctx, group: group,
            heading_path: chrome ? [] : heading_path,
            chrome: chrome,
            // title="..." often holds the full document name when the visible
@@ -1159,7 +1271,10 @@ def detect_scope(breadcrumb, links, seed_url, seed_host):
         p = urlparse(href)
         if p.scheme not in ("http", "https") or p.netloc.lower() != seed_host:
             continue                                    # off-site / mailto:
-        if is_document_link(href):
+        # seed_host matters here too: without it every same-host link on a
+        # portal host counts as a document, and this function's docs-vs-pages
+        # ratio is exactly what chooses the scope.
+        if is_document_link(href, seed_host):
             docs += 1                                   # a file, not a page
             continue
         if ext_of(href) in SKIP_EXTS:
@@ -1264,9 +1379,11 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
     seed_norm = normalize_url(seed_url)
     seed_host = urlparse(seed_norm).netloc.lower()
     # Per-host fixes. Hosts with no profile behave exactly as they did before.
+    # (scope_prefix is defined at module level — see its docstring for why the
+    #  seed's own filename must not end up in the prefix.)
     prof = profile_for(seed_norm)
     group_headings = group_headings or prof["group_headings"]
-    seed_prefix = urlparse(seed_norm).path.rstrip("/")  # "under the seed path" for prefix scope
+    seed_prefix = scope_prefix(urlparse(seed_norm).path)  # "under the seed path" for prefix scope
     # If the seed sits under a 2-3 letter language segment (/en/...), lock the crawl
     # to that language so we don't load every page's /ar/ mirror just to reject it.
     _seg0 = first_seg(urlparse(seed_norm).path)
@@ -1280,6 +1397,12 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
     link_titles = {}        # normalized url -> the anchor text that linked to it
     link_parents = {}       # normalized url -> the page it was linked from
     section_anchor = None   # set from the seed's breadcrumb (last item)
+
+    # What the walk learned about itself. These were all emitted as events and
+    # then forgotten — baseline.py re-parsed stdout to get them back — so nothing
+    # downstream of the process could tell a clean run from a truncated one.
+    note = {"blocked_pages": 0, "errors": 0, "retries": 0,
+            "cap_hit": False, "seed_loaded": True, "stopped": "", "resume": {}}
 
     emit({"event": "start", "seed": seed_norm, "scope": scope,
           "max_pages": max_pages, "max_depth": max_depth})
@@ -1321,13 +1444,31 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                     if page.evaluate("()=>document.querySelectorAll('a[href]').length") > 15:
                         seed_loaded = True
                         break
+                    note["retries"] += 1
                     emit({"event": "retry", "url": seed_norm, "attempt": attempt,
                           "message": "seed rendered with no links"})
                 except Exception as e:
+                    note["retries"] += 1
                     emit({"event": "retry", "url": seed_norm, "attempt": attempt,
                           "message": str(e)[:160]})
                 page.wait_for_timeout(2000)
+            # A challenge page can satisfy the link check above, and a blocked
+            # SEED means every decision below it — scope, shape, the whole walk —
+            # was made against the WAF's page rather than the site's.
+            reason = blocked_reason(page)
+            if reason:
+                note["blocked_pages"] += 1
+                note["stopped"] = f"seed blocked by bot protection ({reason})"
+                emit({"event": "blocked", "url": seed_norm, "reason": reason})
             if not seed_loaded:
+                note["seed_loaded"] = False
+                note["errors"] += 1
+                # Not just a failed page: the seed decides scope AND shape for the
+                # whole run, so everything below it was decided on defaults
+                # (MERGE_LOG §13, robustness fix 1).
+                note["stopped"] = note["stopped"] or (
+                    "seed did not load after 3 attempts — scope and shape fell "
+                    "back to defaults, so this walk may be of the wrong pages")
                 emit({"event": "error", "url": seed_norm,
                       "message": "seed did not load after 3 attempts — scope and "
                                  "shape fall back to defaults"})
@@ -1355,25 +1496,30 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
         if strategy != "generic":
             if shape in ("tree", "table", "list"):
                 if shape == "tree":
-                    recs, docs = crawl_tree(ctx, seed_norm, out, max_pages=max_pages,
-                                            max_depth=max_depth, wait_ms=max(wait_ms, 2000))
+                    recs, docs, walked = crawl_tree(ctx, seed_norm, out, max_pages=max_pages,
+                                                    max_depth=max_depth,
+                                                    wait_ms=max(wait_ms, 2000))
                 elif shape == "list":
                     # For this shape max_pages bounds LISTING pages, not
                     # documents: SBP's 139 listing pages hold 4,160 entries, so
                     # the default 150 covers it. list_details=False stops before
                     # the expensive detail pass (see crawl_list).
-                    recs, docs = crawl_list(ctx, seed_norm, out,
-                                            max_pages=max_pages,
-                                            wait_ms=wait_ms,
-                                            fetch_details=list_details,
-                                            max_details=max_details)
+                    recs, docs, walked = crawl_list(ctx, seed_norm, out,
+                                                    max_pages=max_pages,
+                                                    wait_ms=wait_ms,
+                                                    fetch_details=list_details,
+                                                    max_details=max_details)
                 else:
-                    recs, docs = crawl_table(ctx, seed_norm, out, max_pages=max_pages * 50,
-                                             wait_ms=wait_ms)
+                    recs, docs, walked = crawl_table(ctx, seed_norm, out,
+                                                     max_pages=max_pages * 50,
+                                                     wait_ms=wait_ms)
+                # The walker reports what it hit; the seed checks above already
+                # put their own findings in `note`. Add, never overwrite.
+                _merge_note(note, walked)
                 # Write FIRST, close second. A dead browser can hang close(),
                 # and losing a completed walk to a failed teardown is the worst
                 # possible trade.
-                result = _finish(out, seed_norm, recs, docs, [], shape=shape)
+                result = _finish(out, seed_norm, recs, docs, [], shape=shape, note=note)
                 _safe_close(browser)
                 return result
             # shape == "generic": continue with the existing link-walk below.
@@ -1402,11 +1548,22 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                     break
                 except Exception as e:
                     last_err = str(e)[:200]
+                    note["retries"] += 1
                     emit({"event": "retry", "url": url, "attempt": attempt, "message": last_err})
                     page.wait_for_timeout(1500)
             if not nav_ok:
+                note["errors"] += 1
                 emit({"event": "error", "url": url, "depth": depth, "message": last_err})
                 continue
+            # Checked on every page, not just the seed: a WAF usually lets the
+            # first few through and starts serving challenges once it has decided
+            # we are a bot — which is exactly how SIMAH was tripped.
+            reason = blocked_reason(page)
+            if reason:
+                note["blocked_pages"] += 1
+                if note["blocked_pages"] <= 3:
+                    emit({"event": "blocked", "url": url, "reason": reason})
+                continue          # never record a challenge page as a page
             try:
                 # Many JS sites (e.g. SBP) render their list only on scroll (lazy load).
                 # Scroll down a few times to trigger it, then return to top.
@@ -1426,6 +1583,7 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                 except Exception:
                     pass
             except Exception as e:
+                note["errors"] += 1
                 emit({"event": "error", "url": url, "depth": depth, "message": str(e)[:200]})
                 continue
 
@@ -1510,12 +1668,12 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
             page_docs = []
             for l in links:
                 href = l["href"]
-                if urlparse(href).scheme in ("http", "https") and is_document_link(href):
+                if urlparse(href).scheme in ("http", "https") and is_document_link(href, seed_host):
                     dn = normalize_url(href)
                     rec_doc = {
                         "title": best_doc_title(l, dn),   # real title/date, not "Download"
                         "doc_url": dn,
-                        "type": doc_type_of(href),
+                        "type": doc_type_of(href, seed_host),
                         "found_on": url,
                         "section_path": doc_section_path(
                             breadcrumb,
@@ -1603,7 +1761,7 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                 if pu.netloc.lower() != seed_host:      # same-host rule
                     continue
                 e = ext_of(nh)
-                if e in SKIP_EXTS or is_document_link(nh):  # assets ignored; docs recorded above
+                if e in SKIP_EXTS or is_document_link(nh, seed_host):  # assets ignored; docs recorded above
                     continue
                 if is_aggregator(nh, l.get("text", "")):  # never crawl entire-section/print pages
                     continue
@@ -1632,6 +1790,19 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                     visited.add(nh)
                     queue.append((nh, depth + 1))
 
+        # The cap stops the walk with work still queued. That is the difference
+        # between "this is the site" and "this is 150 pages of the site", and
+        # what is left in the queues is where a resumed run would start.
+        left = len(queue) + len(page_queue)
+        if len(records) >= max_pages and left:
+            note["cap_hit"] = True
+            note["stopped"] = (f"page cap: {len(records)} of max_pages={max_pages}, "
+                               f"{left} URLs still queued")
+            note["resume"] = {"pages_walked": len(records), "queued": left,
+                              "next_urls": [u for u, _ in list(queue)[:5]]
+                                           or [u for u, _ in list(page_queue)[:5]]}
+            emit({"event": "cap", "pages": len(records), "queued": left})
+
         _safe_close(browser)
 
     # ---- write outputs ----
@@ -1642,7 +1813,7 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
     dropped_chrome = [d for u, d in chrome_documents.items() if u not in kept_urls]
 
     return _finish(out, seed_norm, records, list(documents.values()),
-                   dropped_chrome, shape="generic")
+                   dropped_chrome, shape="generic", note=note)
 
 
 def _safe_close(browser):
@@ -1668,11 +1839,60 @@ def _safe_close(browser):
     done.wait(10)
 
 
-def _finish(out, seed_norm, records, documents, chrome_dropped, shape):
+# THE OUTCOME, IN ONE WORD. `done` used to mean only "the walk reached _finish",
+# and every consumer read that as success — main() never even set an exit code. A
+# WAF page reaches _finish too, and its 1,054 characters clear the 200-char bar
+# that makes a page a document.
+#
+#   ok          pages recorded, nothing blocked, nothing cut short
+#   blocked     a page was a bot-protection wall; no count means anything
+#   zero        no pages recorded — a failed extraction, not an empty site
+#   incomplete  cap hit / seed never loaded / browser died / pages failed.
+#               REPORTED, NOT FATAL (MERGE_LOG §13: keep the rows, log
+#               INCOMPLETE). `stopped` and `resume` are what
+#               resume-from-where-it-died will read; today that is thrown away.
+#
+# NO-DOCS stays in baseline_report.py: only it has the cross-site context to tell
+# SAMA's real 3 files from a broken extraction, and it already flags it.
+FATAL_STATUSES = ("blocked", "zero")
+
+
+def _merge_note(note: dict, walked: dict) -> dict:
+    """Fold a walker's findings into the run's note. Counters add; the first
+    `stopped` wins, because the earliest thing that cut the walk short is the one
+    a reader needs to act on."""
+    for k in ("blocked_pages", "errors", "retries"):
+        note[k] = note.get(k, 0) + (walked or {}).get(k, 0)
+    note["stopped"] = note.get("stopped") or (walked or {}).get("stopped", "")
+    note["resume"] = note.get("resume") or (walked or {}).get("resume") or {}
+    return note
+
+
+def run_status(counts: dict) -> str:
+    """Classify a finished run. Pure function of the counters, so it is testable
+    without a browser and cannot drift from what `done` reports.
+
+    `errors` is counted but does not decide the status: a page that 404s is skipped
+    by design, and if 1 bad page in 150 said INCOMPLETE the word would stop meaning
+    anything. Only the walk being CUT SHORT flips it — cap, dead browser, or a seed
+    that never arrived (which decides scope and shape for everything after it).
+    """
+    if counts.get("blocked_pages"):
+        return "blocked"
+    if not counts.get("pages"):
+        return "zero"
+    if (counts.get("cap_hit") or counts.get("stopped")
+            or not counts.get("seed_loaded", True)):
+        return "incomplete"
+    return "ok"
+
+
+def _finish(out, seed_norm, records, documents, chrome_dropped, shape, note=None):
     """Shared tail for every walker: normalise, hash, write, return.
 
     Every path through crawl() ends here, so tree/table/generic produce the same
-    schema, the same files, and the same return value.
+    schema, files, return value — and now the same outcome vocabulary. `note`
+    carries what the walk learned; absent, the run is judged on its counts alone.
     Returns (records, documents).
     """
     # Rewrite only titles that several different documents share (SDAIA's "2025").
@@ -1694,15 +1914,34 @@ def _finish(out, seed_norm, records, documents, chrome_dropped, shape):
         d["content_hash"] = content_key(
             f"{d.get('doc_url','')}|{d.get('title','')}")
 
+    n = dict(note or {})
+    counts = {"pages": len(records), "documents": len(documents),
+              "blocked_pages": n.get("blocked_pages", 0),
+              "errors": n.get("errors", 0), "retries": n.get("retries", 0),
+              "cap_hit": bool(n.get("cap_hit")),
+              "seed_loaded": n.get("seed_loaded", True),
+              "stopped": n.get("stopped", "")}
+    status = run_status(counts)
+
+    # `status` travels in pages.json as well as the event: the file outlives the
+    # stdout stream, and whoever reads it later must be able to tell a crawl from
+    # a challenge page. Additive — every existing key is untouched. `pages` and
+    # `documents` stay the LISTS they have always been, so the counters go in
+    # under their own names.
+    outcome = {f"n_{k}" if k in ("pages", "documents") else k: v
+               for k, v in counts.items()}
     (out / "pages.json").write_text(
-        json.dumps({"seed": seed_norm, "shape": shape, "pages": records,
+        json.dumps({"seed": seed_norm, "shape": shape, "status": status,
+                    **outcome, "resume": n.get("resume") or {},
+                    "pages": records,
                     "documents": documents, "chrome_dropped": chrome_dropped},
                    ensure_ascii=False, indent=2),
         encoding="utf-8")
     _write_excel(out / "pages.xlsx", records, documents, chrome_dropped)
 
-    emit({"event": "done", "shape": shape, "pages": len(records),
-          "documents": len(documents), "chrome_dropped": len(chrome_dropped),
+    emit({"event": "done", "status": status, "shape": shape, **counts,
+          "resume": n.get("resume") or {},
+          "chrome_dropped": len(chrome_dropped),
           "titles_disambiguated": renamed,
           "out_dir": str(out), "xlsx": str(out / "pages.xlsx")})
     return records, documents
@@ -1774,6 +2013,57 @@ def main():
           scope=args.scope, headless=not args.headful, wait_ms=args.wait_ms,
           strategy=args.strategy, group_headings=args.group_headings)
 
+    # The status is authoritative, and `pages.json` is where it survives the
+    # process. A blocked or empty crawl exits non-zero so a caller that reads
+    # nothing else still cannot mistake it for a crawl; INCOMPLETE exits 0 by
+    # design — the rows are worth keeping, they just are not the whole site.
+    return _report_outcome(Path(args.out))
+
+
+def _report_outcome(out: Path) -> int:
+    """Print the outcome and turn it into an exit code. Reads pages.json rather
+    than a return value so it reports the same thing a later reader would see."""
+    try:
+        data = json.loads((out / "pages.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"\nNO-RESULT  -  could not read {out / 'pages.json'}: {e}",
+              file=sys.stderr)
+        return 1
+
+    status = data.get("status", "ok")
+    line = (f"{data.get('n_pages', 0)} pages | {data.get('n_documents', 0)} documents"
+            f" | {data.get('blocked_pages', 0)} blocked"
+            f" | {data.get('errors', 0)} errors | {data.get('retries', 0)} retries")
+    if status == "ok":
+        print(f"\nOK  -  {line}\n  {out}")
+        return 0
+
+    w = sys.stderr
+    print(f"\n{'=' * 70}\n{status.upper()}  -  {data.get('seed', '')}\n{'=' * 70}", file=w)
+    print(f"  {line}", file=w)
+    if data.get("stopped"):
+        print(f"  stopped: {data['stopped']}", file=w)
+    if data.get("resume"):
+        print(f"  resume:  {json.dumps(data['resume'])}", file=w)
+    print(f"  {_NEXT_STEP.get(status, '')}\n  read: {out / 'pages.json'}", file=w)
+    return 1 if status in FATAL_STATUSES else 0
+
+
+# Kept next to the exit code so the two cannot say different things. ASCII only:
+# this text lands in scheduler logs and pipes, where a Windows console encoding
+# turns a stray em-dash into a UnicodeEncodeError.
+_NEXT_STEP = {
+    "blocked": ("A bot-protection wall answered instead of the site. Nothing here can\n"
+                "  be used. Slow the pacing, or give this source a hand-written\n"
+                "  crawler. Do NOT re-run in a loop - that is what trips a WAF."),
+    "zero": ("No pages were recorded, which is a failed extraction, not an empty\n"
+             "  site. Check the scope and the shape first - calibrate_shape.py and\n"
+             "  calibrate_scope.py both exit non-zero on a wrong answer."),
+    "incomplete": ("Part of the site was not walked, so these counts are a floor, not a\n"
+                   "  total. Read `stopped` above before comparing this run with any\n"
+                   "  other, and never treat it as coverage."),
+}
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,0 +1,292 @@
+# ZATCA — Zakat, Tax and Customs Regulations
+#
+# WHY A FORM AND NOT `mode: generic`
+#
+# config/sources/zatca.yml pointed the generic engine at the Rules & Regulations
+# landing page. That page is three CARDS, not a list of documents:
+#
+#     Rules and Regulations
+#       ├─ Zakat, Tax and Customs Regulations   <- this form (4 pages x 9 cards)
+#       ├─ Tax and Customs Agreements
+#       └─ Information Exchange Portal
+#
+# A link walk cannot see that structure. It collected 31 assorted files with no
+# hierarchy and never opened a single detail page. The real inventory is behind
+# a paginated card grid whose cards each open a detail page carrying the prose
+# AND the link to the instrument itself.
+#
+# THE SHAPE, MEASURED 2026-08-13
+#
+#   grid      div.card, 9 real cards per page, 4 pages
+#   title     .card-title
+#   category  .custom-badge   ->  General / Customs / Corporate Income Tax /
+#                                 Withholding Tax / E-Invoicing / Excise Tax
+#   detail    /en/RulesRegulations/Taxes/Pages/<slug>.aspx
+#   pager     a.page-link--next  (aria-label="Next", href="javascript:void(0)")
+#   crumb     Home > Rules and Regulations > Zakat, Tax and Customs Regulations
+#             > <document title>
+#
+# TWO NON-DOCUMENT CARDS SHARE div.card
+#
+# "Comments and Suggestions" (href="javascript:void(0)") and a cookie notice
+# (-> /en/Pages/PrivacyPolicy.aspx) are built from the same component as the real
+# cards, so a bare `div.card` row selector collects 12 rows for 9 documents. The
+# row selector is narrowed with :has() to cards whose link is a detail page in
+# THIS section, which excludes both without naming either — a new noise card
+# built the same way is excluded automatically.
+#
+# THE DOCUMENT LINK CARRIES A ZERO-WIDTH SPACE
+#
+# The detail page ends "To View the regulations, click Here", and that anchor's
+# text is "Here​" — visually "Here", not equal to it. Ministry of Commerce
+# stored a document titled `click here​` for the same reason. The title
+# comes from the CARD here, so the row is named correctly regardless, and the
+# generic-link-text normalisation handles the rest.
+
+version: 1
+name: zatca.taxes
+seed_url: "https://zatca.gov.sa/en/RulesRegulations/Taxes/Pages/default.aspx"
+shape: list
+scope: prefix
+
+# The grid renders late — the cards are not in the DOM on domcontentloaded, and
+# the pager arrives later still. This also governs the pagination settle
+# (max(CLICK_SETTLE_MS, wait_ms)): a page this slow cannot re-render a click's
+# worth in the 8s default, which is what made MHRSD return 122 rows one run and
+# 18 the next.
+wait_ms: 16000
+
+# Only cards that link into this section's detail pages — see the note above.
+# Matched on "Taxes" rather than the full path because the schema's selector
+# guard does not allow "/" (it is valid inside an attribute string, but the
+# guard is deliberately conservative). "Taxes" is enough of a discriminator:
+# neither noise card's href contains it — one is javascript:void(0), the other
+# /en/Pages/PrivacyPolicy.aspx.
+row_selector: 'div.card:has(a[href*="Taxes"])'
+detail_link_selector: 'a[href*="Taxes"]'
+
+pagination:
+  # The numbers and arrows are all href="javascript:void(0)", so there is no url
+  # to walk — the pager has to be clicked.
+  #
+  # MEASURED 2026-08-13, both ways, three runs each:
+  #
+  #     mode: click   ->  34, 34, 34     the whole inventory
+  #     mode: none    ->   9,  9,  9     page 1 only
+  #
+  # So the clicks DO work and rows accumulate across pages 2-4 (9+9+9+7). Do not
+  # be talked out of this by the run note, which says
+  #
+  #     plan  {"pages_walked": 1, "stopped": "page 2: rows unchanged after click"}
+  #
+  # That counter is wrong — 34 rows cannot come from one page of 9 — and the
+  # "rows unchanged" stop fires at the pager END, where there is no next control
+  # to click. The `Page.click: Timeout` warning on page 4 is the same event. Both
+  # read like a broken selector and neither is; the A/B above is what settles it.
+  mode: click
+  next_selector: "a.page-link--next"
+  # 4 real pages. Above the real count on purpose, so the walk attempts one more
+  # turn and observes the pager end.
+  max_pages: 10
+
+fields:
+  title:
+    from: css
+    selector: ".card-title"
+    attr: text
+  # The site's own subject label, and the only thing on the card that says which
+  # tax a regulation belongs to.
+  category:
+    from: css
+    selector: ".custom-badge"
+    attr: text
+  # The detail page. It is what gets opened in phase 2, and the instrument's own
+  # link is inside it rather than on the card.
+  document_url:
+    from: css
+    selector: 'a[href*="Taxes"]'
+    attr: href
+
+# Open every card. The detail page holds the prose AND the link to the
+# instrument, so without this the row is a title and a url to a page nobody read.
+fetch_details: true
+
+# WHAT THE STORED HTML MUST NOT BE.
+#
+# This is a SharePoint site, and JS_DETAIL UNWRAPS <form> rather than removing it
+# (SIMAH's whole law lives inside <form id="aspnetForm">). Unwrapping keeps
+# ASP.NET's plumbing, and the site's own furniture sits outside the content too.
+#
+# Measured on Board03.aspx, 2026-08-13:
+#
+#     no strip     174,419 chars of html,  4,111 of text
+#                  starting "Loading... A government website registered with..."
+#     with strip    11,927 chars of html,    461 of text
+#                  starting "Board of Directors Regulations ... Issued by the
+#                  ZATCA Board of Directors Decision No. (21-01-03)"
+#
+# The hidden-input plumbing is now stripped globally in JS_DETAIL. What remains
+# here is this site's chrome, and each entry was confirmed present on the page —
+# the standalone crawler documents the same widgets by the same names.
+content:
+  # THE PAGE'S OWN LAST-UPDATE STAMP, kept because it is the only date this
+  # site gives us — the cards declare no published_date. It is lifted into
+  # extra_meta["last_update"] rather than stripped, so nothing is thrown away:
+  #
+  #   extra_meta["last_update"] = "Last Update: 25 Feb 2026 02:25 PM Saudi Arabia Time"
+  #
+  # `text: true` because this is ONE VALUE. Storing its markup would wrap a
+  # single date in a div, a container class and a <p>, which is no more readable
+  # in extra_meta than it was in the document.
+  extract:
+    last_update:
+      selector: ".home-lastupdate-container"
+      text: true
+    # THE CARD GRID. Read this before deciding it is navigation.
+    #
+    # It renders inside the stored document as a run of headings with nothing
+    # under them, because each card is a <h5> title plus a card-footer holding
+    # one arrow link and no body:
+    #
+    #   <div class="card" data-category="12">
+    #     <div class="card-body"><h5 class="card-title">About Bonded Zones</h5></div>
+    #     <div class="card-footer"><a href="...Bonded Zones/Zones-Brief.aspx">
+    #
+    # It was briefly STRIPPED on 2026-08-14 on the belief that it is always a
+    # menu. It is not, and the A/B measurement caught it:
+    #
+    #   Bonded Zones     lost "About Bonded Zones | Establishment of Bonded Zones
+    #                    | Educational Llibrary | FAQ's"        -> navigation
+    #   Customs Brokers  lost "Infraction Rule | Practising Standards for
+    #                    Assessing Customs Brokers' Performance" -> THE ACTUAL
+    #                    REGULATION NAMES, and 101 of that page's 116 characters
+    #
+    # The same class means both, so no rule tells them apart. So it is LIFTED,
+    # not deleted: document_html stops carrying an empty-looking menu, and
+    # nothing is lost. Kept as MARKUP rather than text: the hrefs are the point.
+    # Those linked pages are NOT in this form's 34-card inventory — a coverage
+    # gap, recorded here because this block is where the evidence for it lives.
+    sub_pages: ".category-sub-card-container"
+  strip:
+    - ".zatca-loader"              # spinner markup, left in the DOM after load
+    - ".header-wrapper"            # gov-verification badge, language, search
+    - "#cookiesModal, .cookies-notification, .modal"  # .modal incl. #voiceModal
+    - "[id*=ucAddComment], [id*=ucAddFeedback], [id*=ucFooter]"  # 3 webparts
+    - ".pagetopfunctions-wrapper, .rsbtn"  # listen/print toolbar, ReadSpeaker
+    - "[class*=breadcrumb]"        # captured separately as section_path
+    # THE SITE FOOTER AND THE MEGAMENU. Both are plain <div>s — #footerContent
+    # is div.footer-main, and the top navigation is li.nav-item.dropdown — so
+    # the runner's semantic header/footer/nav filter never matched them.
+    #
+    # These are stripped for what they LINK, not for what they say. Each one
+    # holds a copy of ZATCA-Glossary.pdf, and every regulation was collecting it
+    # as an attachment: 32 of 34 rows carried it, and on the 8 rows with no file
+    # of their own it became document_url, so 8 distinct regulations shared one
+    # identity. `strip` now also excludes links (runner.JS_DETAIL), which is what
+    # makes declaring them here enough.
+    # Grouped one-per-line-worth of selectors into comma lists: `strip` caps at
+    # 20 entries and the honest count of ZATCA's furniture is 26.
+    - "#footerContent, .footer-main, .dropdown-menu"
+    # SHAREPOINT FURNITURE. Invisible on the live site and therefore easy to
+    # miss: these carry no visible text in a browser, so an innerText-based check
+    # says the page is clean. They only surface when the stored fragment is
+    # rendered WITHOUT the site's CSS — which is exactly how a reader or an
+    # analyser sees document_html. Measured on WithholdingTax.aspx 2026-08-14,
+    # where the stored document read:
+    #
+    #   "... Page Content <the actual paragraph> ... Page Image Last Update: ...
+    #    Zakat, Tax and Customs Regulations Currently selected Tax and Customs
+    #    Agreements Information Exchange Portal Agreements ... Circulars"
+    #
+    # Of 11,226 stored characters, the instrument was two sentences.
+    #
+    # Webpart labels: SharePoint emits <div id="..._label">Page Content</div> and
+    # "..._label">Page Image" beside each field. Matched on the id SUFFIX because
+    # the ctl00_PlaceHolderMain_* prefix differs per webpart.
+    - '[id$="_label"]'
+    # The section navigation, and the source of the "Currently selected" marker
+    # and the trailing repeat of the page title. Its real id is
+    # zz1_TopNavigationMenu — the zz1/zz2 prefixes are GENERATED PER PAGE, so an
+    # id match would break on the next page; the suffix and the ms-core-*
+    # classes are SharePoint's own and stable.
+    - '[id$="TopNavigationMenu"], .ms-core-navigation, .ms-dialogHidden'
+    # The share/print/favourite bar renders as an EMPTY <ul> once its icons are
+    # gone, which is the run of blank bullets at the top of the stored document.
+    # TWO SPELLINGS, and the pages do not agree: WithholdingTax.aspx uses
+    # .share-options, Bonded-Zones.aspx uses .social-actions. Fixing only the
+    # first left the blank bullets on the second, so both are named.
+    - ".share-options, .social-actions"
+    # (.category-sub-card-container is NOT stripped — it is extracted above.
+    #  Stripping it deleted real regulation names. See the note there.)
+    # reCAPTCHA, on the feedback form at the foot of the page: an invisible
+    # iframe plus <textarea class="g-recaptcha-response">, which is the pair of
+    # empty boxes at the bottom of the stored document. The comment and feedback
+    # webparts themselves are already stripped above by their ucAdd* ids; this is
+    # Google's widget, which has no ZATCA id at all.
+    - '[class*="recaptcha"], [id*="recaptcha"]'
+    # Nothing a regulation contains is a form control. Cheap, and it covers the
+    # next form webpart this site adds without another round trip.
+    - "textarea"
+    # Wrappers left holding nothing once the blocks above are gone. They render
+    # as invisible whitespace rather than as a visible artefact, so these are
+    # tidiness and not correctness — found by sweeping 8 pages for text-free
+    # elements (34, 8 and 7 occurrences respectively).
+    - '.toast, menu.ms-hide, .textSection__photoContainer'
+    # THE MINDROCKETS ACCESSIBILITY WIDGET, on all 32 html rows: a sign-language
+    # launcher and an "assist using site" button, both third-party
+    # (cdn.mindrocketsapis.com). They are a tool for reading the page, not part
+    # of the regulation. The empty <iframe> that sat beside them is now removed
+    # globally in JS_DETAIL, for every site.
+    - '[id*="Mindrockets"], #DeafServicePlace, #MrAccessInHand'
+
+# Home > Rules and Regulations > Zakat, Tax and Customs Regulations > <title>
+#
+# ONE ROW PER CARD, with its files attached.
+#
+# Without this each detail page's PDF became its OWN row, named from the link
+# text — and a file has no name of its own, so the library filled with rows
+# called "Board03en", "Glossary", "Updated Items", "Deleted Items" and "here."
+# (that last one is the zero-width-space "Here" link at the end of every page).
+# 34 real documents produced 65 rows, 31 of them unnameable.
+#
+# The card IS the instrument; the PDF is its content. Same model as SDAIA and
+# Ministry of Commerce.
+attachment_is_document: "combined"
+
+# Home > Rules and Regulations > Zakat, Tax and Customs Regulations > <title>
+#
+# The regulator and source system come from the library: block at the end of
+# this file, so they are NOT repeated here — naming them in both places makes
+# each a second folder (moe.regulations.yml hit exactly that). The section name
+# IS named here, because nothing else supplies it.
+#
+# `levels` is empty on purpose: every card on this grid belongs to the same
+# section, so there is no per-row level to read. The card's own `category` chip
+# is captured as a FIELD rather than a folder — a document has one place in the
+# tree, and "General"/"Customs" is a label on it, not where it lives.
+section_path:
+  prefix: ["Zakat, Tax and Customs Regulations"]
+  levels: []
+
+library:
+  regulator: "ZATCA"
+  source_system: "Rules and Regulations"
+meta:
+  approved: true
+  approved_by: lead
+  approved_at: '2026-08-13T04:25:43+00:00'
+  form_hash: cde57ddc1a1b
+  verify:
+    verdict: WARN
+    counts:
+    - 34
+    - 34
+    - 34
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+      category: 100.0
+    verified_at: '2026-08-13T04:25:26+00:00'
+    source: live
+    forced: false

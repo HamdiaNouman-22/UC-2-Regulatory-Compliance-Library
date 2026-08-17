@@ -1,0 +1,1102 @@
+[
+  {
+    "i": 3,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6122-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6122-0",
+    "page_title": "HC-6.1.22",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.22"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.22",
+    "snippet": "[History] Versions Apr 01 2023 - May 05 2026 May 06 2026\n[Change] Amended: May 2026 Added: April 2023 \u2039 HC-6.1.21 HC-7 Senior Management \u203a\n[Intro] \u2039 HC-6.1.21 HC-7 Senior Management \u203a HC-6.1.22 If a senior manager is also a director , his remuneration as a senior manager must take into account compensation received in his capacity as a director . Amended: May 2026 Added: April 2023 \u2039 HC-6.1.21 ",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70341,
+        "title": "HC-6.1.22",
+        "cat_id": 38418,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6122",
+        "content": "If a senior manager is also a director, his remuneration as a senior manager must take into account compensation received in his capacity as a director. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75083,
+        "title": "HC-6.1.22",
+        "cat_id": 44719,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6122-0",
+        "content": "If a senior manager is also a director, his remuneration as a senior manager must take into account compensation received in his capacity as a director. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75083,
+      "reg_title": "HC-6.1.22",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": true,
+      "reg_id": 75083,
+      "change_type": "AMENDED",
+      "confidence": 1.0,
+      "reason": "The new page has the same section code (HC-6.1.22) and URL as the existing database candidate, and the content's history explicitly states it was amended."
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 4,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6121-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6121-0",
+    "page_title": "HC-6.1.21",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.21"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.21",
+    "snippet": "[History] Versions Apr 01 2023 - May 05 2026 May 06 2026\n[Change] Amended: May 2026 Added: April 2023 \u2039 HC-6.1.20 HC-6.1.22 \u203a\n[Intro] \u2039 HC-6.1.20 HC-6.1.22 \u203a HC-6.1.21 Remuneration of non-executive directors must not include performance-related elements such as grants of shares, share options or other deferred stock-related incentive schemes, bonuses, or pension benefits. Amended: ",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70340,
+        "title": "HC-6.1.21",
+        "cat_id": 38417,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6121",
+        "content": "Remuneration of non-executive directors must not include performance-related elements such as grants of shares, share options or other deferred stock-related incentive schemes, bonuses, or pension benefits. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75082,
+        "title": "HC-6.1.21",
+        "cat_id": 44718,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6121-0",
+        "content": "Remuneration of non-executive directors must not include performance-related elements such as grants of shares, share options or other deferred stock-related incentive schemes, bonuses, or pension benefits. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75082,
+      "reg_title": "HC-6.1.21",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": true,
+      "reg_id": 75082,
+      "change_type": "AMENDED",
+      "confidence": 1.0,
+      "reason": "The section code HC-6.1.21 and URL are identical to the existing record, and the content explicitly states the rule was amended in May 2026."
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 5,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6120-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6120-0",
+    "page_title": "HC-6.1.20",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.20"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.20",
+    "snippet": "[History] Versions Apr 01 2023 - May 05 2026 May 06 2026\n[Change] Amended: May 2026 Added: April 2023 \u2039 HC-6.1.19 HC-6.1.21 \u203a\n[Intro] \u2039 HC-6.1.19 HC-6.1.21 \u203a HC-6.1.20 Directors and senior management , including those appointed as members of the Board of special purpose vehicles or other operating companies, are not permitted to take any benefits (commission, fees, shares, consider",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70339,
+        "title": "HC-6.1.20",
+        "cat_id": 38416,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6120",
+        "content": "Approved persons , including those appointed as members of the Board of special purpose vehicles or other operating companies, are not permitted to take any benefits (commission, fees, shares, consideration in kind, or other remuneration or incentives in respect of the performance of the project or investment) from any projects or investments which are managed by the conventional bank licensee or promoted to its customers or potential customers except for Board related remuneration linked to their fiduciary duties to the investors of the project/investment. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75081,
+        "title": "HC-6.1.20",
+        "cat_id": 44717,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6120-0",
+        "content": "Approved persons , including those appointed as members of the Board of special purpose vehicles or other operating companies, are not permitted to take any benefits (commission, fees, shares, consideration in kind, or other remuneration or incentives in respect of the performance of the project or investment) from any projects or investments which are managed by the Islamic bank licensee or promoted to its customers or potential customers except for Board related remuneration linked to their fiduciary duties to the investors of the project/investment. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75081,
+      "reg_title": "HC-6.1.20",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": true,
+      "reg_id": 75081,
+      "change_type": "AMENDED",
+      "confidence": 1.0,
+      "reason": "The new page has the exact same title, URL, and section code as the existing candidate, and the content history states it was amended."
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 6,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6119-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6119-0",
+    "page_title": "HC-6.1.19",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.19"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.19",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.18 HC-6.1.20 \u203a HC-6.1.19 If the licensee and/or relevant line of business is incurring losses in any year during the vesting period, any unvested portions must be subject to malus. Accrual and deferral of variable remuneration does not oblig",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70338,
+        "title": "HC-6.1.19",
+        "cat_id": 38415,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6119",
+        "content": "If the licensee and/or relevant line of business is incurring losses in any year during the vesting period, any unvested portions must be subject to malus. Accrual and deferral of variable remuneration does not oblige the licensee to pay the variable remuneration, particularly when the anticipated outcome has not materialised. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75080,
+        "title": "HC-6.1.19",
+        "cat_id": 44716,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6119-0",
+        "content": "If the licensee and/or relevant line of business is incurring losses in any year during the vesting period, any unvested portions must be subject to malus. Accrual and deferral of variable remuneration does not oblige the licensee to pay the variable remuneration, particularly when the anticipated outcome has not materialised. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75080,
+      "reg_title": "HC-6.1.19",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75080,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 7,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6118-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6118-0",
+    "page_title": "HC-6.1.18",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.18"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.18",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.17 HC-6.1.19 \u203a HC-6.1.18 Bonuses must either be reduced or be deferred in the event of poor licensee , divisional or business unit performance. Subdued or negative financial performance of the licensee must lead to contraction of the license",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70337,
+        "title": "HC-6.1.18",
+        "cat_id": 38414,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6118",
+        "content": "Bonuses must either be reduced or be deferred in the event of poor licensee , divisional or business unit performance. Subdued or negative \nfinancial performance of the licensee must lead to contraction of the licensee\u2019s total variable remuneration, taking into account both current \nremuneration and reductions in payouts of amounts previously earned, \nincluding through malus and clawback arrangements. Recognition of \nstaff who have achieved their targets or better, may take place by way of \ndeferred compensation, which may be paid once the licensee\u2019s performance improves. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75079,
+        "title": "HC-6.1.18",
+        "cat_id": 44715,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6118-0",
+        "content": "Bonuses must either be reduced or be deferred in the event of poor licensee , divisional or business unit performance. Subdued or negative financial performance of the licensee must lead to contraction of the licensee\u2019s total variable remuneration, taking into account both current remuneration and reductions in payouts of amounts previously earned, including through malus and clawback arrangements. Recognition of staff who have achieved their targets or better, may take place by way of deferred compensation, which may be paid once the licensee\u2019s performance improves. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75079,
+      "reg_title": "HC-6.1.18",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75079,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 8,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6117-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6117-0",
+    "page_title": "HC-6.1.17",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.17"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.17",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.16 HC-6.1.18 \u203a HC-6.1.17 Licensees must have an appropriate compliance mechanism to ensure that their employees commit themselves not to use personal hedging strategies or remuneration- and liability-related insurance to undermine the risk a",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70336,
+        "title": "HC-6.1.17",
+        "cat_id": 38413,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6117",
+        "content": "Licensees must have an appropriate compliance mechanism to ensure that their employees commit themselves not to use personal hedging strategies or remuneration- and liability-related insurance to undermine the risk alignment effects embedded in their remuneration arrangements. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75078,
+        "title": "HC-6.1.17",
+        "cat_id": 44714,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6117-0",
+        "content": "Licensees must have an appropriate compliance mechanism to ensure that their employees commit themselves not to use personal hedging strategies or remuneration- and liability-related insurance to undermine the risk alignment effects embedded in their remuneration arrangements. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75078,
+      "reg_title": "HC-6.1.17",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75078,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 9,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6116-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6116-0",
+    "page_title": "HC-6.1.16",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.16"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.16",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.15 HC-6.1.17 \u203a HC-6.1.16 Existing contractual payments related to a termination of employment must be re-examined and kept in place only if there is a clear basis for concluding that they are aligned with long-term value creation and prudent",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70335,
+        "title": "HC-6.1.16",
+        "cat_id": 38412,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6116",
+        "content": "Existing contractual payments related to a termination of employment must be re-examined and kept in place only if there is a clear basis for concluding that they are aligned with long-term value creation and prudent risk-taking. Prospectively, any such payments must be related to performance achieved over time and designed in a way that does not reward failure. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75077,
+        "title": "HC-6.1.16",
+        "cat_id": 44713,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6116-0",
+        "content": "Existing contractual payments related to a termination of employment must be re-examined and kept in place only if there is a clear basis for concluding that they are aligned with long-term value creation and prudent risk-taking. Prospectively, any such payments must be related to performance achieved over time and designed in a way that does not reward failure. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75077,
+      "reg_title": "HC-6.1.16",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75077,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 10,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6115-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6115-0",
+    "page_title": "HC-6.1.15",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.15"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.15",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.14 HC-6.1.16 \u203a HC-6.1.15 The size of the variable remuneration pool and its allocation within the licensee must not compromise the financial soundness of the licensee and must take into account the full range of current and potential risks, ",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70334,
+        "title": "HC-6.1.15",
+        "cat_id": 38411,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6115",
+        "content": "The size of the variable remuneration pool and its allocation within the licensee must not compromise the financial soundness of the licensee and must take into account the full range of current and potential risks, including: (a) The cost and quantity of capital required to support the risks taken; (b) The cost and quantity of the liquidity risk assumed in the conduct of business; and (c) Consistency with the timing and likelihood of potential future revenues incorporated into current earnings. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75076,
+        "title": "HC-6.1.15",
+        "cat_id": 44712,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6115-0",
+        "content": "The size of the variable remuneration pool and its allocation within the licensee must not compromise the financial soundness of the licensee and must take into account the full range of current and potential risks, including: (a) The cost and quantity of capital required to support the risks taken; (b) The cost and quantity of the liquidity risk assumed in the conduct of business; and (c) Consistency with the timing and likelihood of potential future revenues incorporated into current earnings. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75076,
+      "reg_title": "HC-6.1.15",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75076,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 11,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6114-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6114-0",
+    "page_title": "HC-6.1.14",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.14"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.14",
+    "snippet": "[History] Versions Apr 01 2023 - May 05 2026 May 06 2026\n[Change] Amended: May 2026 Added: April 2023 \u2039 HC-6.1.13 HC-6.1.15 \u203a\n[Intro] \u2039 HC-6.1.13 HC-6.1.15 \u203a HC-6.1.14 Senior management and other staff of risk management, financial controls, internal audit, operations, internal Shari\u2019a audit, Shari\u2019a coordination and implementation, AML/ CFT, compliance, human resources, informatio",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70333,
+        "title": "HC-6.1.14",
+        "cat_id": 38410,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6114",
+        "content": "Approved persons and other staff of risk management, financial controls, internal audit, operations, internal Shari\u2019a audit, Shari\u2019a coordination and implementation, AML/ CFT, compliance, human resources, information technology and legal functions must be remunerated based principally on the achievement of the objectives and targets of their functions. As such the mix of fixed and variable remuneration for these functions\u2019 personnel must be skewed toward fixed remuneration. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75075,
+        "title": "HC-6.1.14",
+        "cat_id": 44711,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6114-0",
+        "content": "Approved persons and other staff of risk management, financial controls, internal audit, operations, internal Shari\u2019a audit, Shari\u2019a coordination and implementation, AML/ CFT, compliance, human resources, information technology and legal functions must be remunerated based principally on the achievement of the objectives and targets of their functions. As such the mix of fixed and variable remuneration for these functions\u2019 personnel must be skewed toward fixed remuneration. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75075,
+      "reg_title": "HC-6.1.14",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": true,
+      "reg_id": 75075,
+      "change_type": "AMENDED",
+      "confidence": 1.0,
+      "reason": "The new page has the exact same section code (HC-6.1.14) and URL as an existing database candidate, and its history indicates it was amended in May 2026."
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 12,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6113-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6113-0",
+    "page_title": "HC-6.1.13",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.13"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.13",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.12 HC-6.1.14 \u203a HC-6.1.13 For Bahraini Islamic bank licensees , all share incentive plans must be approved by the shareholders. Added: April 2023 \u2039 HC-6.1.12 HC-6.1.14 \u203a",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70332,
+        "title": "HC-6.1.13",
+        "cat_id": 38409,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6113",
+        "content": "For Bahraini conventional bank licensees , all share incentive plans must be approved by the shareholders. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75074,
+        "title": "HC-6.1.13",
+        "cat_id": 44710,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6113-0",
+        "content": "For Bahraini Islamic bank licensees , all share incentive plans must be approved by the shareholders. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75074,
+      "reg_title": "HC-6.1.13",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75074,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 13,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6112-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6112-0",
+    "page_title": "HC-6.1.12",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.12"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.12",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.11 HC-6.1.13 \u203a HC-6.1.12 For Bahraini Islamic bank licensees , where fixed or variable remuneration include common shares, licensees must limit the shares awarded to an annual aggregate limit of 10% of the total issued shares outstanding of ",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70331,
+        "title": "HC-6.1.12",
+        "cat_id": 38408,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6112",
+        "content": "For Bahraini conventional bank licensees , where fixed or variable remuneration include common shares, licensees must limit the shares awarded to an annual aggregate limit of 10% of the total issued shares outstanding of the licensee , at all times. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75073,
+        "title": "HC-6.1.12",
+        "cat_id": 44709,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6112-0",
+        "content": "For Bahraini Islamic bank licensees , where fixed or variable remuneration include common shares, licensees must limit the shares awarded to an annual aggregate limit of 10% of the total issued shares outstanding of the licensee , at all times. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75073,
+      "reg_title": "HC-6.1.12",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75073,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 14,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6111-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6111-0",
+    "page_title": "HC-6.1.11",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.11"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.11",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.10 HC-6.1.12 \u203a HC-6.1.11 Licensees must not provide any form of guaranteed variable remuneration as part of the overall remuneration package. Exceptional minimum variable remuneration must only occur in the context of hiring new staff and li",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70330,
+        "title": "HC-6.1.11",
+        "cat_id": 38407,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6111",
+        "content": "Licensees must not provide any form of guaranteed variable remuneration as part of the overall remuneration package. Exceptional minimum variable remuneration must only occur in the context of hiring new staff and limited to the first year. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75072,
+        "title": "HC-6.1.11",
+        "cat_id": 44708,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6111-0",
+        "content": "Licensees must not provide any form of guaranteed variable remuneration as part of the overall remuneration package. Exceptional minimum variable remuneration must only occur in the context of hiring new staff and limited to the first year. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75072,
+      "reg_title": "HC-6.1.11",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75072,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 15,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-6110-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-6110-0",
+    "page_title": "HC-6.1.10",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.10"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.10",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.9 HC-6.1.11 \u203a HC-6.1.10 The only instance where deferred remuneration can be paid out before the end of the vesting period is in the case of the death of the employee where the beneficiaries would receive any unpaid deferred remuneration. Ad",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70329,
+        "title": "HC-6.1.10",
+        "cat_id": 38406,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6110",
+        "content": "The only instance where deferred remuneration can be paid out before the end of the vesting period is in the case of the death of the employee where the beneficiaries would receive any unpaid deferred remuneration. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75071,
+        "title": "HC-6.1.10",
+        "cat_id": 44707,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-6110-0",
+        "content": "The only instance where deferred remuneration can be paid out before the end of the vesting period is in the case of the death of the employee where the beneficiaries would receive any unpaid deferred remuneration. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75071,
+      "reg_title": "HC-6.1.10",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75071,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 16,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-619-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-619-0",
+    "page_title": "HC-6.1.9",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.9"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.9",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.8 HC-6.1.10 \u203a HC-6.1.9 Awards in shares or share-linked instruments must be subject to a minimum share retention policy of 6 months from the time the shares are awarded, unless the licensee\u2019s policy requires a longer period. Added: April 202",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70328,
+        "title": "HC-6.1.9",
+        "cat_id": 38405,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-619",
+        "content": "Awards in shares or share-linked instruments must be subject to a minimum share retention policy of 6 months from the time the shares are awarded, unless the licensee\u2019s policy requires a longer period. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75070,
+        "title": "HC-6.1.9",
+        "cat_id": 44706,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-619-0",
+        "content": "Awards in shares or share-linked instruments must be subject to a minimum share retention policy of 6 months from the time the shares are awarded, unless the licensee\u2019s policy requires a longer period. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75070,
+      "reg_title": "HC-6.1.9",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75070,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 17,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-618-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-618-0",
+    "page_title": "HC-6.1.8",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.8"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.8",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.7 HC-6.1.9 \u203a HC-6.1.8 Remuneration systems must link the size of the bonus pool to the overall performance of the licensee . Added: April 2023 \u2039 HC-6.1.7 HC-6.1.9 \u203a",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70327,
+        "title": "HC-6.1.8",
+        "cat_id": 38404,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-618",
+        "content": "Remuneration systems must link the size of the bonus pool to the overall performance of the licensee . Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75069,
+        "title": "HC-6.1.8",
+        "cat_id": 44705,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-618-0",
+        "content": "Remuneration systems must link the size of the bonus pool to the overall performance of the licensee . Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75069,
+      "reg_title": "HC-6.1.8",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75069,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 18,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-617-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-617-0",
+    "page_title": "HC-6.1.7",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.7"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.7",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.6 HC-6.1.8 \u203a HC-6.1.7 Employees\u2019 incentive payments must be linked to the contribution of the individual and business to such performance. Added: April 2023 \u2039 HC-6.1.6 HC-6.1.8 \u203a",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70326,
+        "title": "HC-6.1.7",
+        "cat_id": 38403,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-617",
+        "content": "Employees\u2019 incentive payments must be linked to the contribution of the individual and business to such performance. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75068,
+        "title": "HC-6.1.7",
+        "cat_id": 44704,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-617-0",
+        "content": "Employees\u2019 incentive payments must be linked to the contribution of the individual and business to such performance. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75068,
+      "reg_title": "HC-6.1.7",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75068,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 19,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-616-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-616-0",
+    "page_title": "HC-6.1.6",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.6"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.6",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.5 HC-6.1.7 \u203a HC-6.1.6 The mix of cash, equity and other forms of remuneration must be consistent with risk alignment. The mix will vary depending on the employee\u2019s position and role and the licensee must document the rationale for its mix. A",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70325,
+        "title": "HC-6.1.6",
+        "cat_id": 38402,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-616",
+        "content": "The mix of cash, equity and other forms of remuneration must be consistent with risk alignment. The mix will vary depending on the employee\u2019s position and role and the licensee must document the rationale for its mix. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75067,
+        "title": "HC-6.1.6",
+        "cat_id": 44703,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-616-0",
+        "content": "The mix of cash, equity and other forms of remuneration must be consistent with risk alignment. The mix will vary depending on the employee\u2019s position and role and the licensee must document the rationale for its mix. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75067,
+      "reg_title": "HC-6.1.6",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75067,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 20,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-615-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-615-0",
+    "page_title": "HC-6.1.5",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.5"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.5",
+    "snippet": "[History] Versions Apr 01 2023 - May 05 2026 May 06 2026\n[Change] Amended: May 2026 Added: April 2023 \u2039 HC-6.1.4 HC-6.1.6 \u203a\n[Intro] \u2039 HC-6.1.4 HC-6.1.6 \u203a HC-6.1.5 Remuneration, based on both quantitative measures and human judgement, must be adjusted for all types and magnitudes of risks, including intangible and other risks managed b y senior management and material risk-taker, ",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70324,
+        "title": "HC-6.1.5",
+        "cat_id": 38401,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-615",
+        "content": "Remuneration, based on both quantitative measures and human judgement, must be adjusted for all types and magnitudes of risks, including intangible and other risks managed by the approved person and material risk-taker, and remuneration outcomes must be symmetric with risk outcomes. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75066,
+        "title": "HC-6.1.5",
+        "cat_id": 44702,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-615-0",
+        "content": "Remuneration, based on both quantitative measures and human judgement, must be adjusted for all types and magnitudes of risks, including intangible and other risks managed by the approved person and material risk-taker, and remuneration outcomes must be symmetric with risk outcomes. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75066,
+      "reg_title": "HC-6.1.5",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": true,
+      "reg_id": 75066,
+      "change_type": "AMENDED",
+      "confidence": 1.0,
+      "reason": "Same section code (HC-6.1.5) and URL indicate this is an amendment to the existing regulation."
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 21,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-614-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-614-0",
+    "page_title": "HC-6.1.4",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.4"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.4",
+    "snippet": "[History] Versions\n[Intro] \u2039 HC-6.1.3 HC-6.1.5 \u203a HC-6.1.4 As a minimum, 50% of total variable remuneration (including both the deferred and undeferred portions) must be awarded in shares or share-linked instruments or where appropriate, other non-cash instruments. The remainin",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70323,
+        "title": "HC-6.1.4",
+        "cat_id": 38400,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-614",
+        "content": "As a minimum, 50% of total variable remuneration (including both the deferred and undeferred portions) must be awarded in shares or share-linked instruments or where appropriate, other non-cash instruments. The remaining portion of the deferred remuneration can be paid as cash remuneration vested over a minimum 3-year period. Added: April 2023"
+      },
+      {
+        "score": 1.0,
+        "id": 75065,
+        "title": "HC-6.1.4",
+        "cat_id": 44701,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-614-0",
+        "content": "As a minimum, 50% of total variable remuneration (including both the deferred and undeferred portions) must be awarded in shares or share-linked instruments or where appropriate, other non-cash instruments. The remaining portion of the deferred remuneration can be paid as cash remuneration vested over a minimum 3-year period. Added: April 2023"
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75065,
+      "reg_title": "HC-6.1.4",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": false,
+      "reg_id": 75065,
+      "change_type": "UNCHANGED",
+      "confidence": 1.0,
+      "reason": "content identical to existing DB record \u2014 TR re-publish"
+    },
+    "agreed": true,
+    "needs_review": false
+  },
+  {
+    "i": 22,
+    "url": "https://cbben.thomsonreuters.com/rulebook/hc-613-0",
+    "date": "2026-06-30",
+    "feed_title": "hc-613-0",
+    "page_title": "HC-6.1.3",
+    "doc_path": [
+      "Central Bank of Bahrain",
+      "Central Bank of Bahrain Volume 2\u2014Islamic Banks",
+      "Part A",
+      "High Level Standards",
+      "HC High-Level Controls",
+      "HC-B Scope of Application",
+      "Part One: Bahraini Islamic Bank Licensees",
+      "HC-6 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1 Remuneration of Senior Management and Material Risk-Takers",
+      "HC-6.1.3"
+    ],
+    "folder_id": 97533,
+    "section_code": "HC-6.1.3",
+    "snippet": "[History] Versions Apr 01 2023 - May 05 2026 May 06 2026\n[Change] Amended: May 2026 Added: April 2023 \u2039 HC-6.1.2 HC-6.1.4 \u203a\n[Intro] \u2039 HC-6.1.2 HC-6.1.4 \u203a HC-6.1.3 Fo r senior management and material risk-takers whose total annual remuneration (including all benefits) is in excess of BD100,000: (a) An appropriate ratio between the fixed and variable components of total remuneratio",
+    "candidates": [
+      {
+        "score": 1.0,
+        "id": 70322,
+        "title": "HC-6.1.3",
+        "cat_id": 38399,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-613",
+        "content": "For approved persons and material risk-takers whose total annual remuneration (including all benefits) is in excess of BD100,000: (a) An appropriate ratio between the fixed and variable components of total remuneration must be set to ensure that fixed and variable components of total remuneration are appropriately balanced and paid on the basis of individual, business-unit and bank-wide measures that adequately measure performance; and (b) The variable proportion of remuneration must increase significantly along with the level of seniority and/or responsibility. More specifically: i. at least "
+      },
+      {
+        "score": 1.0,
+        "id": 75064,
+        "title": "HC-6.1.3",
+        "cat_id": 44700,
+        "url": "https://cbben.thomsonreuters.com/rulebook/hc-613-0",
+        "content": "For approved persons and material risk-takers whose total annual remuneration (including all benefits) is in excess of BD100,000: (a) An appropriate ratio between the fixed and variable components of total remuneration must be set to ensure that fixed and variable components of total remuneration are appropriately balanced and paid on the basis of individual, business-unit and bank-wide measures that adequately measure performance; and (b) The variable proportion of remuneration must increase significantly along with the level of seniority and/or responsibility. More specifically: i. at least "
+      }
+    ],
+    "approach_a": {
+      "reg_id": 75064,
+      "reg_title": "HC-6.1.3",
+      "method": "section_code_path_match",
+      "score": 0.95
+    },
+    "approach_b": {
+      "is_update": true,
+      "reg_id": 75064,
+      "change_type": "AMENDED",
+      "confidence": 0.95,
+      "reason": "The new page has the identical section code HC-6.1.3 and URL as the existing DB candidate, and its metadata explicitly states 'Amended: May 2026'."
+    },
+    "agreed": true,
+    "needs_review": false
+  }
+]

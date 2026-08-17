@@ -1,0 +1,146 @@
+# Saudi Exchange (Tadawul) — Exchange Rules And Procedures
+#
+# The regulator name used in the data is "Saudi Exchange". "Tadawul" appears
+# only in this file's name, which is the site's common name and the output
+# folder — it never reaches a document.
+#
+#   https://www.saudiexchange.sa/wps/portal/saudiexchange/rules-guidance/market-rules-forms/rules?locale=en
+#
+# One page holding two sections: Rules (10 documents) and Procedures (9).
+# Every document is published TWICE — an Arabic PDF and an English PDF — as two
+# adjacent links inside the same card.
+#
+# MEASURED 2026-08-02 (headful, since headless is refused):
+#   li:has(div.lngDownload)   x19   Rules 10 / Procedures 9
+#   title 19/19   English 19/19   Arabic 19/19   last-updated 19/19
+#
+# WHY requires_headed
+#   The site is behind Akamai and fingerprints headless Chromium:
+#     headless -> 403 "Access Denied", 0 anchors
+#     headful  -> 200, 616 anchors, correct title
+#   Without this flag a scheduled run would harvest nothing and look healthy.
+#   On a headless server this needs a virtual display (Xvfb) — it is not
+#   something the form can solve on its own.
+#
+# WHY where_text on the two URL fields
+#   The Arabic and English anchors are indistinguishable in markup: same tag, no
+#   class, no hreflang. They are always in the order Arabic, English — but
+#   selecting by POSITION would silently SWAP the languages on any card that
+#   offered only one of them, filing an Arabic PDF as the English document. So
+#   each is picked by its own visible text instead. If the site relabels them the
+#   field comes back empty and the verify fill-rate check fails loudly.
+
+version: 1
+name: tadawul.rules
+seed_url: "https://www.saudiexchange.sa/wps/portal/saudiexchange/rules-guidance/market-rules-forms/rules?locale=en"
+shape: list
+scope: prefix
+requires_headed: true
+
+# The card is the <li> that contains the language-download block. Chromium
+# supports :has(), and it is what distinguishes these 19 list items from every
+# other <li> on a WebSphere Portal page (nav menus, ticker rows, footer links).
+row_selector: "li:has(div.lngDownload)"
+
+# The row's own link is the English PDF — same as document_url below. Detail
+# pages are not fetched: every row links straight to a file, there is no
+# intermediate page to open.
+detail_link_selector: "div.lngDownload a"
+
+pagination:
+  mode: none          # single page, both sections on it
+
+fields:
+  title:
+    from: css
+    selector: "h2"
+    attr: text
+
+  # English PDF -> the document itself
+  document_url:
+    from: css
+    selector: "div.lngDownload a"
+    attr: href
+    where_text: "^\\s*English\\s*$"
+
+  # Arabic PDF -> travels in extra_meta, like CBB's extra_meta["arabic_pdf_link"]
+  arabic_url:
+    from: css
+    selector: "div.lngDownload a"
+    attr: href
+    where_text: "^\\s*(Arabic|العربية|عربي)\\s*$"
+
+  # "Last Updated: 5th January, 2026" / "3rd Jan, 2022" / "14th Oct, 2024"
+  #
+  # This is a LAST UPDATED date, NOT a publication date — it is when the rule was
+  # last revised. It deliberately does NOT go into published_date: the
+  # orchestrator treats published_date as part of a document's identity
+  # (filter_new_documents dedupes on title + published_date), so feeding it a
+  # revision date would make an amended rule look like a different document every
+  # time Tadawul touches it. It lands in extra_meta instead.
+  #
+  # Both the ordinal suffix and the "Last Updated:" label are optional, because
+  # the site is inconsistent about both: the "Procedures for Trading in Suspended
+  # Listed Companies' Shares Over the Counter" card prints "26th June, 2025" with
+  # no label at all, and requiring the label lost that one row's date. Each card
+  # carries exactly one date, so dropping the label does not make this ambiguous.
+  last_updated_date:
+    from: regex
+    pattern: '(?:Last Updated:\s*)?(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9},?\s+\d{4})'
+
+# Saudi Exchange > Exchange Rules And Procedures > Rules|Procedures
+#
+# The first two levels are fixed — the regulator name, then the page's <h1>. The
+# third is the nearest <h3> ABOVE the card, which is what splits Rules from
+# Procedures; both groups sit in one flat list, so nothing about the card itself
+# says which it is.
+#
+# The regulator is "Saudi Exchange", not "Tadawul / Saudi Exchange". This is the
+# FIRST level of doc_path, so it becomes the top-level folder in the library and
+# has to match whatever the regulator is called everywhere else — two spellings
+# would create two sibling trees holding the same regulator's documents.
+# MOVED to the library: block below, 2026-08-12. These two crumbs ARE the
+# regulator and the source system, and declaring them only as a prefix meant they
+# were never STORED — so config/change_signals.yml had no (regulator,
+# source_system) pair to look this source up by, and a sweep could not find its
+# documents. Naming them in both places would repeat each as a second folder
+# (see moe.regulations.yml, which hit exactly that). The h3 level stays here: it
+# is the only crumb this PAGE contributes.
+section_path:
+  prefix: []
+  levels:
+    - {preceding: "h3"}
+
+# Every row is already a PDF link, so there is no detail page worth opening.
+fetch_details: false
+
+# Names this source stores under, leading the folder trail:
+#   Saudi Exchange | Exchange Rules And Procedures | Rules or Procedures | <title>
+#
+# "Saudi Exchange", NOT "Tadawul" — this is the top-level folder in the library
+# and has to match whatever the regulator is called everywhere else. Two
+# spellings would build two sibling trees holding one regulator's documents.
+# "Tadawul" survives only in this form's filename and output folder.
+library:
+  regulator: "Saudi Exchange"
+  source_system: "Exchange Rules And Procedures"
+meta:
+  approved: true
+  approved_by: lead
+  approved_at: '2026-08-12T15:34:18+00:00'
+  form_hash: cca53c363a5a
+  verify:
+    verdict: PASS
+    counts:
+    - 19
+    - 19
+    - 19
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+      arabic_url: 100.0
+      last_updated_date: 100.0
+    verified_at: '2026-08-12T15:33:59+00:00'
+    source: live
+    forced: false

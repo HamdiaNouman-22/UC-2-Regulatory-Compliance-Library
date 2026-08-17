@@ -1,6 +1,8 @@
 import os
+import hashlib
 import logging
 import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from processor.downloader import Downloader
 from storage.mssql_repo import MSSQLRepository
 from processor.html_fallback_engine import HTMLFallbackEngine
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 MIN_TEXT_LEN = 200
 
 
-class Orchestrator:
+class BaseOrchestrator:
     """
     Central pipeline controller.
 
@@ -100,6 +102,57 @@ class Orchestrator:
         FOR CBB: If regulation_id is provided, fetch from regulation_versions first.
         """
         extra_meta = getattr(doc, "extra_meta", {}) or {}
+
+        # ── TIER 0: an instrument published as SEVERAL files ──────────────
+        #
+        # SDAIA's "Personal Data Protection Law and The implementing Regulation"
+        # attaches three PDFs — the law, its implementing regulation and the
+        # transfer regulation. All three ARE the instrument, so all three have to
+        # reach the analyzer. Reading only document_url would analyse one and
+        # silently drop the regulatory text of the other two.
+        #
+        # Each file is delimited by a header naming it. The analyzer records a
+        # `source_reference` per obligation, so with markers present an obligation
+        # can still say WHICH file it came from — without them a combined row
+        # loses attribution between the law and its implementing regulation.
+        #
+        # Only for genuinely multi-file rows: one url falls through to the tiers
+        # below, unchanged.
+        #
+        # Read from extra_meta["attachment_links"], which is where the files live.
+        # This used to read a `document_urls` list field on the document; that
+        # field was removed 2026-08-12 in favour of extra_meta, so a multi-file
+        # instrument now survives into the database with no schema change at all.
+        # `document_url` is EMPTY on these rows, so without this tier they would
+        # reach the analyzer with no text whatsoever.
+        urls = [u.strip() for u in
+                str(extra_meta.get("attachment_links") or "").split("|") if u.strip()]
+        if len(urls) > 1:
+            logger.info(f"  TIER 0: instrument carries {len(urls)} files")
+            titles = [t.strip() for t in
+                      str(extra_meta.get("file_titles") or "").split("|")]
+            parts, got = [], 0
+            for i, u in enumerate(urls):
+                label = (titles[i] if i < len(titles) and titles[i]
+                         else u.rsplit("/", 1)[-1])
+                piece = self._download_and_extract_pdf(u, regulation_id)
+                if not piece or len(piece) < MIN_TEXT_LEN:
+                    # Recorded, not fatal. A row that loses one of three files is
+                    # still worth analysing, but the gap must be visible in the
+                    # text rather than inferred from a short document.
+                    logger.warning(f"    file {i+1}/{len(urls)} yielded no text: {u[:70]}")
+                    parts.append(f"=== FILE {i+1}/{len(urls)}: {label} | {u} ===\n"
+                                 f"[no text could be extracted from this file]")
+                    continue
+                got += 1
+                parts.append(f"=== FILE {i+1}/{len(urls)}: {label} | {u} ===\n{piece}")
+
+            if got:
+                combined = "\n\n".join(parts)
+                logger.info(f"  TIER 0: {got}/{len(urls)} files -> "
+                            f"{len(combined):,} chars combined")
+                return combined, "pdf_text"
+            logger.warning("  TIER 0: no file yielded text; falling through")
 
         # ── CBB VERSIONED CONTENT: Fetch from regulation_versions ──
         if regulation_id:
@@ -302,14 +355,28 @@ class Orchestrator:
                 self.repo.flag_partially_matched_requirements(partially_matched_ids)
 
             new_req_mappings = [m for m in requirement_mappings if m["match_status"] == "new"]
-            for i, mapping in enumerate(new_req_mappings):
+            for mapping in new_req_mappings:
                 try:
                     req_text = mapping["extracted_requirement_text"]
                     title    = req_text[:100].strip() + ("..." if len(req_text) > 100 else "")
+                    # The key is derived from the TEXT, not from the loop index.
+                    #
+                    # It used to be AUTO-<regulation_id>-<i>, and `i` is a position
+                    # in a list the LLM produced. Re-analyse the same regulation and
+                    # the model may emit a different number of new requirements in a
+                    # different order, so AUTO-42-0 could name different regulatory
+                    # text on every run. That made the row un-upsertable: the only
+                    # options were to duplicate forever, or to overwrite one
+                    # requirement with another's text.
+                    #
+                    # Hashing the text gives a stable identity — same obligation,
+                    # same key, every run — which is what lets
+                    # insert_new_suggested_requirement reuse the existing row.
+                    digest = hashlib.md5(req_text.strip().encode("utf-8")).hexdigest()[:8]
                     new_req_id = self.repo.insert_new_suggested_requirement({
                         "title":       title,
                         "description": req_text,
-                        "ref_key":     f"AUTO-{regulation_id}-{i}",
+                        "ref_key":     f"AUTO-{regulation_id}-{digest}",
                         "ref_no":      f"REG-{regulation_id}"
                     })
                     for ctrl in new_controls_to_insert:
@@ -493,28 +560,76 @@ class Orchestrator:
             logger.warning("No new documents to process. Exiting...")
             return
 
-        for idx, doc in enumerate(new_docs, start=1):
-            logger.info(f"Processing {idx}/{len(new_docs)}: {doc.title}")
-            self._process_single_doc(idx, doc, regulator_name)
-            gc.collect()
+        self._process_docs(new_docs, regulator_name)
 
         logger.warning(f"Finished processing all {len(new_docs)} documents.")
 
-    def run_for_cbb(self, mode: str = "auto"):
-        from crawler.cbb_crawler import CBBCrawler
+    def _process_docs(self, docs: List, regulator_name: str):
+        """Process documents concurrently.
+
+        Each document is an independent chain of network-bound calls (download,
+        OCR, four LLM stages), so they overlap cleanly. Total in-flight LLM
+        requests are additionally bounded by LLM_MAX_CONCURRENCY inside
+        StagedLLMAnalyzer, so raising DOC_MAX_WORKERS cannot stampede OpenRouter.
+
+        Set DOC_MAX_WORKERS=1 to restore the previous serial behaviour.
+        """
+        total = len(docs)
+        workers = max(1, int(os.getenv("DOC_MAX_WORKERS", "4")))
+
+        if workers == 1 or total == 1:
+            for idx, doc in enumerate(docs, start=1):
+                logger.info(f"  [{idx}/{total}] {str(doc.title)[:60]}")
+                self._process_single_doc(idx, doc, regulator_name)
+                gc.collect()
+            return
+
+        logger.warning(f"  Processing {total} documents with {workers} workers")
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(self._process_single_doc, idx, doc, regulator_name): doc
+                for idx, doc in enumerate(docs, start=1)
+            }
+            for fut in as_completed(futures):
+                doc = futures[fut]
+                done += 1
+                try:
+                    fut.result()
+                    logger.info(f"  [{done}/{total}] done: {str(doc.title)[:60]}")
+                except Exception as e:
+                    # One bad document must not abort the batch — but the message
+                    # alone is not diagnosable. `'NoneType' object is not
+                    # subscriptable` told us nothing about WHICH call failed and
+                    # cost a whole debugging pass on 2026-08-16; the traceback
+                    # goes to debug so it is there when needed and silent when not.
+                    logger.error(f"  [{done}/{total}] FAILED: {str(doc.title)[:60]} — {e}")
+                    logger.debug("document that failed: %s", str(getattr(doc, "document_url", ""))[:120],
+                                 exc_info=True)
+        gc.collect()
+
+    def run_for_cbb(self, mode: str = "auto", from_date=None, to_date=None, skip_analysis: bool = False):
+        from crawler.cbb_crawler import CBBCrawlerV2
         from crawler.cbb_monitoring_crawler import CBBMonitoringCrawler
 
-        logger.warning(f"=== CBB PIPELINE: mode={mode} ===")
+        logger.warning(f"=== CBB PIPELINE: mode={mode} skip_analysis={skip_analysis} ===")
+        self._skip_analysis = skip_analysis
 
         if mode == "auto":
             last_date = self.repo.get_last_cbb_crawl_date()
             mode = "monitoring" if last_date else "full"
             logger.warning(f"  Auto-detected mode: {mode} (last crawl: {last_date})")
 
-        crawler = CBBCrawler(request_delay=1.5) if mode == "full" \
+        crawler = CBBCrawlerV2(request_delay=1.5) if mode == "full" \
             else CBBMonitoringCrawler(repo=self.repo, request_delay=1.0)
 
-        docs = crawler.fetch_documents()
+        fetch_kwargs = {}
+        if mode == "monitoring" and from_date is not None:
+            fetch_kwargs["from_date"] = from_date
+        if mode == "monitoring" and to_date is not None:
+            fetch_kwargs["to_date"] = to_date
+
+        docs = crawler.fetch_documents(**fetch_kwargs)
         logger.warning(f"  Fetched {len(docs)} documents")
 
         new_docs, existing_docs = self.filter_new_documents(docs)
@@ -533,12 +648,178 @@ class Orchestrator:
             logger.warning("  No documents to process.")
             return
 
-        for idx, doc in enumerate(docs_to_process, start=1):
-            logger.info(f"  [{idx}/{len(docs_to_process)}] {doc.title[:60]}")
-            self._process_single_doc(idx, doc, "CBB")
-            gc.collect()
+        self._process_docs(docs_to_process, "CBB")
 
         logger.warning(f"  CBB pipeline complete. Processed {len(docs_to_process)} documents.")
+
+    # ================================================================== #
+    #  SIMAH — the only non-CBB path that versions a modified document     #
+    # ================================================================== #
+
+    def run_for_simah(self):
+        """New documents plus amended ones.
+
+        Separate from `run_for_regulator`, which discards existing docs and so
+        can never report a modification. Scoped to SIMAH on purpose — no shared
+        method is modified, and no other regulator calls this.
+        """
+        logger.warning("=== RUNNING REGULATOR: SIMAH ===")
+        docs = self.crawler.fetch_documents()
+        logger.warning(f"Fetched {len(docs)} documents from crawler")
+
+        buckets = {"new": [], "modified": [], "unchanged": []}
+        for d in docs:
+            status = (getattr(d, "extra_meta", {}) or {}).get(
+                "monitoring_status", "new")
+            buckets.get(status, buckets["new"]).append(d)
+
+        logger.warning(
+            f"  {len(buckets['new'])} new / {len(buckets['modified'])} modified"
+            f" / {len(buckets['unchanged'])} unchanged")
+
+        # Say what we cannot see; silence would read as coverage.
+        blind = [d for d in docs
+                 if not (getattr(d, "extra_meta", {}) or {}).get(
+                     "hash_covers_content", True)]
+        if blind:
+            logger.warning(
+                f"  {len(blind)} document(s) hashed on identity only — an edit "
+                f"at the same URL CANNOT be detected: "
+                + ", ".join((d.title or "?")[:40] for d in blind))
+
+        docs_to_process = buckets["new"] + buckets["modified"]
+        if not docs_to_process:
+            logger.warning("  Nothing to process.")
+            return
+
+        for idx, doc in enumerate(docs_to_process, start=1):
+            logger.info(f"  [{idx}/{len(docs_to_process)}] {(doc.title or '')[:60]}")
+            self._process_simah_doc(idx, doc)
+            gc.collect()
+
+        logger.warning(f"  SIMAH pipeline complete. "
+                       f"Processed {len(docs_to_process)} documents.")
+
+    def _process_simah_doc(self, idx, doc):
+        """Insert a new document, or version an amended one.
+
+        Mirrors `_process_cbb_doc`, which hardcodes CBB's regulator string and
+        log step — rewriting that would change a path three live regulators use.
+        """
+        meta = getattr(doc, "extra_meta", {}) or {}
+        status = meta.get("monitoring_status", "new")
+        existing_reg_id = meta.get("existing_regulation_id")
+        content_hash = meta.get("content_hash", "") or getattr(doc, "content_hash", "")
+        document_html = getattr(doc, "document_html", None)
+        content_text = meta.get("content_text", "")
+
+        try:
+            if hasattr(doc, "doc_path") and isinstance(doc.doc_path, list):
+                doc.compliancecategory_id = self._get_or_create_compliance_category(
+                    doc.doc_path)
+            else:
+                doc.compliancecategory_id = None
+        except Exception as e:
+            logger.error(f"Failed to assign compliance category: {e}")
+            doc.compliancecategory_id = None
+
+        # ── MODIFIED ────────────────────────────────────────────────────── #
+        if status == "modified" and existing_reg_id:
+            try:
+                logger.warning(f"  Versioning MODIFIED SIMAH document "
+                               f"(reg_id={existing_reg_id})")
+
+                existing = self.repo.get_regulation_by_id(existing_reg_id)
+                if existing:
+                    old_html = existing.get("document_html") or ""
+                    old_meta = existing.get("extra_meta") or {}
+                    old_text = old_meta.get("content_text") or ""
+                    old_hash = existing.get("content_hash") or ""
+                else:
+                    logger.warning(f"Could not fetch existing regulation "
+                                   f"{existing_reg_id}")
+                    old_html = old_text = old_hash = ""
+
+                # Deactivate before inserting, or two versions read as current.
+                with self.repo._get_conn() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        UPDATE regulation_versions
+                        SET status = 'inactive'
+                        WHERE regulation_id = ?
+                        AND status = 'active'
+                        """,
+                        (existing_reg_id,)
+                    )
+                    rows_updated = cursor.rowcount
+                    conn.commit()
+                    logger.info(f"  Marked {rows_updated} version(s) inactive")
+
+                old_version_id = self.repo.insert_regulation_version(
+                    regulation_id=existing_reg_id,
+                    regulator=doc.regulator,
+                    content_html=old_html,
+                    content_text=old_text,
+                    content_hash=old_hash,
+                    updated_date=date.today(),
+                    change_summary=(
+                        f"Previous version archived on {date.today().isoformat()}"),
+                    status='inactive',
+                )
+                logger.info(f"  Archived old content as version {old_version_id}")
+
+                archived = self.repo.archive_current_analysis(
+                    existing_reg_id, old_version_id)
+                logger.info(f"  Archived {archived} analysis rows")
+
+                current_version_id = self.repo.insert_regulation_version(
+                    regulation_id=existing_reg_id,
+                    regulator=doc.regulator,
+                    content_html=document_html,
+                    content_text=content_text,
+                    content_hash=content_hash,
+                    updated_date=doc.published_date,
+                    change_summary=(
+                        f"Content changed at source, detected "
+                        f"{date.today().isoformat()} "
+                        f"(snapshot captured {meta.get('captured_at', '?')})"),
+                )
+                logger.info(f"  Created new version {current_version_id}")
+
+                self.repo.update_cbb_content_hash(existing_reg_id, content_hash)
+                self.repo.update_regulation(
+                    existing_reg_id,
+                    document_html=document_html,
+                    published_date=doc.published_date,
+                )
+                self.log(existing_reg_id, "simah_version", "SUCCESS",
+                         f"Versions: {old_version_id} (archived) -> "
+                         f"{current_version_id} (active)")
+
+                self._extract_and_analyze_versioned(
+                    doc, existing_reg_id, current_version_id)
+            except Exception as e:
+                logger.error(f"Failed to version SIMAH doc {doc.title}: {e}")
+                self.log(existing_reg_id, "simah_version", "ERROR", str(e))
+            return
+
+        # ── NEW ─────────────────────────────────────────────────────────── #
+        try:
+            regulation_id = self.repo._insert_regulation(doc)
+            doc.id = regulation_id
+            # Store the hash now, or the next run backfills and misses the first
+            # real amendment.
+            self.repo.update_cbb_content_hash(regulation_id, content_hash)
+            self.log(regulation_id, "insert", "SUCCESS",
+                     "SIMAH document inserted")
+        except Exception as e:
+            logger.error(f"Failed to insert SIMAH document: {e}")
+            self.log(None, "insert", "ERROR", str(e),
+                     doc_url=getattr(doc, "document_url", None))
+            return
+
+        self._extract_and_analyze(doc, regulation_id)
 
     def filter_new_documents(self, all_documents: List):
         new_docs, existing_docs = [], []
@@ -596,12 +877,22 @@ class Orchestrator:
         last_index = len(hierarchy) - 1
         for i, title in enumerate(hierarchy):
             folder_id = self.repo.get_folder_id(title, parent_id)
+
+            if folder_id is None and parent_id is not None:
+                # Not found as a direct child. The doc_path may be missing
+                # intermediate levels (e.g. a deletion notice page whose
+                # sidebar trail skips 'CBB Rulebook'). Search the subtree
+                # rooted at the current parent — if found, jump to that node
+                # so subsequent segments resolve against the correct parent.
+                folder_id = self.repo.find_folder_in_subtree(title, parent_id)
+
             if folder_id is not None and i == last_index:
                 # Leaf segment: if a different regulation already owns this
                 # exact (title, parent) slot, don't merge into it -- create a
                 # separate node so this document gets its own tree position.
                 if self.repo.regulation_exists_for_category(folder_id):
                     folder_id = None
+
             parent_id = folder_id if folder_id else self.repo.insert_folder(title, parent_id)
         return parent_id
 
@@ -833,6 +1124,11 @@ class Orchestrator:
                      f"depth={depth}, folder/index page")
             return
 
+        # Honour global skip flag
+        if getattr(self, "_skip_analysis", False):
+            logger.info(f"  Skipping analysis (--skip-analysis) for reg {regulation_id}")
+            return
+
         # Run analysis with version_id
         logger.info(
             f"  Running analysis for regulation {regulation_id}, "
@@ -893,3 +1189,33 @@ class Orchestrator:
     # Keep old method names as aliases — they delegate to the unified method
     def _extract_and_analyze_versioned(self, doc, regulation_id: int, version_id: int):
         self._extract_and_analyze(doc, regulation_id, version_id=version_id)
+
+# --------------------------------------------------------------------------- #
+#  ONE ORCHESTRATOR                                                            #
+# --------------------------------------------------------------------------- #
+#
+# `Orchestrator` is no longer this class. It resolves to the MERGED class —
+# `dynamic_crawler.formfill.orch.NewOrchestrator`, which is BaseOrchestrator plus
+# the identity, classification, versioning and folder-tree logic.
+#
+# WHY THIS AND NOT A FLATTENED FILE
+#
+# The two were never rivals: NewOrchestrator subclasses this one and overrides
+# exactly five methods, with a single `super()` call between them. The
+# inheritance IS the merge. What was actually wrong is that callers could still
+# reach the BASE, and four of them did — jobs/run_regulator.py, jobs/sama_job.py,
+# jobs/sbp_job.py and crawler/cbb_monitoring_crawler.py all constructed it
+# directly, so those runs had NO change classification, NO version rows and NO
+# compliancecategory tree. They looked like they were working.
+#
+# Rebinding the name fixes that for every caller at once, without moving 2,130
+# lines of working code between files and hoping nothing shifted.
+#
+# The import is LAZY (PEP 562 module __getattr__) because orch.py imports this
+# module — doing it at the top would be a cycle. Anything that genuinely wants
+# the pre-merge behaviour asks for `BaseOrchestrator` by name and thereby says so.
+def __getattr__(name):
+    if name == "Orchestrator":
+        from dynamic_crawler.formfill.orch import NewOrchestrator
+        return NewOrchestrator
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

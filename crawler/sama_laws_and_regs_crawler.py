@@ -10,7 +10,17 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from bs4 import BeautifulSoup
 from typing import List, Optional, Dict
 from dataclasses import dataclass, field
+
+from crawler.fingerprint import stamp_content_hashes
 from datetime import datetime
+
+# The stored regulator name. Full name then acronym is the house style, and
+# this string is ALSO the first crumb of doc_path, so it is the root folder of
+# SAMA's tree. Changed 2026-08-15: it was the bare acronym "SAMA", while the
+# library already held the full name — a crawl would have created a SECOND
+# regulator beside the 6,101 rows already stored.
+SAMA_REGULATOR = "Saudi Arabian Monetary Authority (SAMA)"
+
 
 # Configure logging
 logging.basicConfig(
@@ -53,6 +63,11 @@ class RegulatoryDocument:
     published_date: Optional[str] = None
     reference_no: Optional[str] = None
     fingerprint: Optional[str] = None
+    # A real FIELD, not stamped on later: this is a dataclass and `asdict()`
+    # copies fields only, so an attribute added after construction is dropped
+    # between the crawl and the database. Distinct from `fingerprint`, which
+    # nothing reads; `content_hash` is what change detection compares.
+    content_hash: Optional[str] = None
 
     # ---- Folder / compliance category ----
     compliancecategory_id: Optional[int] = None
@@ -629,7 +644,7 @@ class SAMALawsCrawler:
                             extra_meta['issue_date_hijri'] = detail_data['date_hijri']
 
                         doc = RegulatoryDocument(
-                            regulator="SAMA",
+                            regulator=SAMA_REGULATOR,
                             source_system="SAMA RULEBOOK",
                             category="Laws and Implementing Regulations",
                             title=tab['title'],
@@ -683,7 +698,10 @@ class SAMALawsCrawler:
         finally:
             self._close_driver()
 
-        return documents
+        # Neither construction site here sets content_hash; without a fingerprint
+        # every document classifies `modified` on every run. See
+        # crawler/fingerprint.py.
+        return stamp_content_hashes(documents)
 
     def save_to_json(self, documents: List[RegulatoryDocument], filename: str = "sama_laws.json"):
         """Save documents to JSON file"""
@@ -873,7 +891,9 @@ class SAMALawsCrawler:
             import traceback
             logger.error(traceback.format_exc())
 
-        return documents
+        # Reached by SAMACombinedCrawler as its third sub-crawl, so these SBP
+        # rows need a fingerprint for the same reason the SAMA ones do.
+        return stamp_content_hashes(documents)
 
 
 # Example usage

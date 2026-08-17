@@ -1314,4 +1314,73 @@ for a document listing.
 * A full phase-2 run is ~9 hours. It should be driven by phase-1 diffs, not run
   wholesale — that wiring is not built yet.
 * Chromium still dies periodically. The crawl now survives it and reports, but a
-  complete 4,160-page pass will need resume-from-where-it-died.
+  complete 4,160-page pass will need resume-from-where-it-died. **The `resume`
+  field in §14 is what that work should read** — before it, a dead browser's
+  stopping point existed only as a printed line.
+
+---
+
+## 14. CHANGE 14 — `done` reports the OUTCOME, and WAF pages are detected
+
+**New work.** **Files:** `blockcheck.py` (new), `crawler.py`, `strategies.py`,
+`app.py`, `baseline.py`, `baseline_report.py`, `tests/test_generic_crawler_outcome.py`.
+
+### The problem
+
+`done` meant only "the walk reached `_finish`", and every consumer read that as
+success: the Streamlit UI printed a finish line, `baseline.py` recorded
+`status: ok`, and `main()` never set an exit code at all. Two consequences:
+
+1. **No WAF detection existed here.** A Cloudflare challenge page returns 200 with
+   ~1,054 characters — over `MIN_PAGE_TEXT` (200) — so it was recorded as a page
+   and would be promoted to a document. SIMAH hit exactly this.
+2. **§13's own rule was unenforceable.** "A crash must never look like *this site
+   has no documents*" was implemented as the word `INCOMPLETE` inside a printed
+   `error` message. Nothing retained it, so `baseline.py` re-parsed stdout to
+   guess, and a truncated run was indistinguishable from a complete one.
+
+### What changed
+
+* **`blockcheck.py`** — one `BLOCK_RE` + `blocked_reason(page)`. Its own module
+  because `crawler.py` imports `strategies.py` and never the reverse, and because
+  `generic_crawler` must not import from `dynamic_crawler` (README: self-contained).
+  Checked on the seed, on every BFS page, in `_ResilientPage.load()` (which covers
+  `crawl_list` phases 1 and 2), and in `crawl_tree` / `crawl_table`.
+  **A challenge page is never recorded as a page.**
+* **`run_status()`** — four words in the `done` event, in `pages.json`, and as an
+  exit code:
+
+  | status | means | exits |
+  |---|---|---|
+  | `ok` | pages recorded, nothing blocked, nothing cut short | 0 |
+  | `blocked` | a page was a bot-protection wall; no count means anything | **1** |
+  | `zero` | no pages recorded — a failed extraction, not an empty site | **1** |
+  | `incomplete` | cap hit / dead browser / seed never loaded | 0 |
+
+* **`incomplete` is reported, not fatal** — §13's rule, kept: the rows are the
+  best inventory we have. `stopped` says what cut the walk short and `resume`
+  says where (listing page, detail index, or the queued URLs), which is the input
+  resume-from-where-it-died needs.
+* **`errors` does not decide the status.** A page that 404s is skipped by design;
+  if 1 bad page in 150 said INCOMPLETE, every real run would and the word would
+  stop meaning anything. Counted and printed, never promoted.
+* **`NO-DOCS` stays in `baseline_report.py`** — only it has the cross-site context
+  to tell SAMA's real 3 attached files from a broken extraction. `flag_for()` now
+  returns `BLOCKED` when the engine reports it, since no count below that rule is
+  trustworthy. Note `zero` here is **stricter** than the report's `ZERO`
+  (pages *and* documents at 0): links can be scraped off the seed while the walk
+  found nothing — which is the §8 misdetection.
+
+### Measured (local fixtures, no live site — SIMAH's block is IP-level)
+
+| fixture | status | exit | pages |
+|---|---|---|---|
+| clean page, 2 PDFs | `ok` | 0 | 2 |
+| Cloudflare challenge page | `blocked` | **1** | **0 — not stored** |
+| seed 404 | `incomplete` | 0 | 1, `stopped` explains |
+| `--strategy tree` on a page with no book menu (§8's bug) | `zero` | **1** | 0 |
+
+30 offline tests in `tests/test_generic_crawler_outcome.py`, plus the 9 existing
+formfill ones, pass. **Purely additive to `pages.json`** — every key that was
+there is still there, so nothing downstream had to change, and
+`crawler/generic_crawler_wrapper.py` was not touched.

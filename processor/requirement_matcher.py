@@ -4,6 +4,20 @@ import logging
 import re
 import requests
 from typing import List, Dict, Any, Optional
+from concurrent.futures import ThreadPoolExecutor
+from processor.llm_client import LLMClient
+
+# The matcher compares, it does not draft. Its own system prompt, kept from the
+# original implementation rather than inheriting the client's default.
+_MATCHER_SYSTEM_PROMPT = (
+    "You are a senior banking compliance officer with deep expertise in "
+    "Saudi Arabian regulations (SAMA). You compare regulatory requirements, "
+    "controls, and KPIs precisely and without hallucination."
+)
+
+_NO_RESPONSE = '{"match_status": "new", "matched_id": null, "explanation": "No response"}'
+from processor.llm_client import LLMClient
+
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +40,22 @@ class RequirementMatcher:
        - All extracted controls and KPIs go in as new suggested items
     """
 
-    def __init__(self, model: str = "deepseek/deepseek-v3.2"):
+    def __init__(self, model: str = "deepseek/deepseek-v3.2", max_workers: int = 8,
+                 deterministic: bool = False):
         self.model = model
-        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
-        if not self.openrouter_api_key:
-            raise ValueError("Missing OPENROUTER_API_KEY environment variable")
+        self.max_workers = max_workers
+        # Shared client for retry, truncation detection and the concurrency
+        # bound this class previously had none of.
+        #
+        # deterministic=False keeps the original request shape (temperature 0.1,
+        # free provider routing). Turning it on changes verdicts -- measured at
+        # 3 of 39 borderline cases flipping -- so it is a separate decision from
+        # this refactor, not a side effect of it.
+        self.client = LLMClient(
+            model=model,
+            system_prompt=_MATCHER_SYSTEM_PROMPT,
+            deterministic=deterministic,
+        )
 
     # ================================================================== #
     #  PUBLIC ENTRY POINT                                                  #
@@ -65,7 +90,15 @@ class RequirementMatcher:
         kpi_links            = []
         new_controls         = []
         new_kpis             = []
-
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            req_matches=list(pool.map(
+                lambda er:self._match_single_requirement(
+                    regulation_id=regulation_id,
+                    extracted_req_text=er.get("requirement_text", ""),
+                    existing_requirements=existing_requirements
+                ),
+                extracted_requirements,
+            ))
         for idx, extracted_req in enumerate(extracted_requirements, start=1):
             req_text     = extracted_req.get("requirement_text", "")
             req_controls = extracted_req.get("controls", [])  # strings from LLM
@@ -76,11 +109,7 @@ class RequirementMatcher:
             # ----------------------------------------------------------
             # STEP 1: Match requirement
             # ----------------------------------------------------------
-            req_match = self._match_single_requirement(
-                regulation_id=regulation_id,
-                extracted_req_text=req_text,
-                existing_requirements=existing_requirements
-            )
+            req_match = req_matches[idx-1]
             requirement_mappings.append(req_match)
 
             matched_req_id = req_match.get("matched_requirement_id")
@@ -330,37 +359,16 @@ Output ONLY raw JSON:
     # ================================================================== #
 
     def _call_llm(self, prompt: str) -> str:
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.openrouter_api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "Saudi Banking Compliance Copilot"
-        }
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a senior banking compliance officer with deep expertise in "
-                        "Saudi Arabian regulations (SAMA). You compare regulatory requirements, "
-                        "controls, and KPIs precisely and without hallucination."
-                    )
-                },
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.1,
-            "max_tokens":  300
-        }
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            return content.strip() if content else '{"match_status": "new", "matched_id": null, "explanation": "No response"}'
-        except requests.exceptions.RequestException as e:
-            logger.error(f"OpenRouter API error: {e}")
-            raise
+        # expect_json=False matches the original call, which never set
+        # response_format. _parse_response already handles fenced/prose replies.
+        content = self.client.complete(
+            prompt,
+            temperature=0.1,
+            max_tokens=300,
+            expect_json=False,
+            label="matcher",
+        )
+        return content or _NO_RESPONSE
 
     def _empty_result(self) -> Dict[str, Any]:
         return {

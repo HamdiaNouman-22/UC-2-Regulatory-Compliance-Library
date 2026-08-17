@@ -32,7 +32,6 @@ from crawler.secp_crawler import SECPCrawler
 from processor.downloader import Downloader
 from processor.html_fallback_engine import HTMLFallbackEngine
 from storage.mssql_repo import MSSQLRepository
-from crawler.cbb_monitoring_crawler import monitor_cbb_changes
 
 load_dotenv()
 
@@ -117,16 +116,24 @@ def run_sama_pipeline():
     except Exception as e:
         logger.error(f"SAMA pipeline failed: {e}", exc_info=True)
 
-def run_cbb_monitoring():
-    """Run CBB monitoring crawler to check for content changes"""
+def run_cbb_monitoring(from_date=None, to_date=None):
+    """
+    Run CBB monitoring pipeline via the main orchestrator.
+
+    Parameters
+    ----------
+    from_date : str | None  e.g. "2026-05-25"  (default: auto from DB)
+    to_date   : str | None  e.g. "2026-07-16"  (default: today)
+    """
     logger.info("=" * 60)
-    logger.info("Starting CBB Monitoring Crawler")
+    logger.info("Starting CBB Monitoring Pipeline (via Orchestrator)")
+    if from_date or to_date:
+        logger.info(f"  Date range: {from_date} -> {to_date or 'today'}")
     logger.info("=" * 60)
     try:
-        result = monitor_cbb_changes()
-        logger.info("CBB monitoring completed successfully")
-        logger.info(f"Result: {result}")
-        return result
+        orch = build_orchestrator(crawler=None)
+        orch.run_for_cbb(mode="monitoring", from_date=from_date, to_date=to_date)
+        logger.info("CBB monitoring pipeline completed successfully")
     except Exception as e:
         logger.error(f"CBB monitoring failed: {e}", exc_info=True)
         raise
@@ -238,11 +245,29 @@ def load_scheduler_config():
 # Map job names to functions
 # Choose either DIRECT or API execution mode
 
+# The KSA monitoring jobs. Imported lazily inside the mapping build so a broken
+# import here cannot stop the existing SBP/SECP jobs from being scheduled.
+from jobs.monitor_jobs import (monitor_cheap_probes, monitor_cma,  # noqa: E402
+                               monitor_mc, monitor_sama)
+
 DIRECT_JOB_MAPPING = {
     "sbp_pipeline": run_sbp_pipeline,
     "secp_pipeline": run_secp_pipeline,
     "sama_pipeline": run_sama_pipeline,
     "cbb_monitoring": run_cbb_monitoring,
+
+    # ---- KSA monitoring -------------------------------------------------- #
+    # Grouped by what each site will answer, not by regulator. See
+    # jobs/monitor_jobs.py for the measurement behind each grouping.
+    #
+    # Saudi Exchange and SIMAH HAVE NO JOB, deliberately: both are blocked, and
+    # both blocks were caused by automated access from this address. A scheduled
+    # retry is not a way out of them — it is what made them. They are retested
+    # BY HAND after the review dates in config/change_signals.yml.
+    "monitor_cheap_probes": monitor_cheap_probes,
+    "monitor_sama": monitor_sama,
+    "monitor_mc": monitor_mc,
+    "monitor_cma": monitor_cma,
 }
 
 API_JOB_MAPPING = {

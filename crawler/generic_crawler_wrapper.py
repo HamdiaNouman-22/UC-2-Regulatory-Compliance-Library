@@ -55,6 +55,8 @@ from typing import List, Optional
 
 from models.models import RegulatoryDocument
 
+from dynamic_crawler.formfill.runner import _ext_type, _is_doc
+
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +127,27 @@ def _parse_row_ref(row_text: str, title: str = "") -> Optional[str]:
     return m.group(1).strip()[:120] if m else None
 
 
+def _flatten_extracted(extracted: dict) -> dict:
+    """content.extract results, ready to merge into extra_meta.
+
+    A selector-only entry gives markup and is kept as-is. A `pairs` entry gives
+    {label: value} — MHRSD's sidebar yields "Resolution Number": "137440",
+    "Release Date": "23-Shawwal-1446-21-April-2025" — and those are flattened to
+    snake_case keys so each is addressable on its own.
+    """
+    out: dict = {}
+    for key, val in (extracted or {}).items():
+        if isinstance(val, dict):
+            for label, text in val.items():
+                slug = re.sub(r"[^a-z0-9]+", "_",
+                              str(label).strip().lower()).strip("_")
+                if slug and text:
+                    out[slug] = text
+        elif val:
+            out[key] = val
+    return out
+
+
 def _split_section_path(section_path: str) -> List[str]:
     return [p.strip() for p in (section_path or "").split(">") if p.strip()]
 
@@ -134,6 +157,49 @@ def _dedupe_keep_order(parts: List[str]) -> List[str]:
     for p in parts:
         if not out or out[-1].strip().lower() != p.strip().lower():
             out.append(p)
+    return out
+
+
+#: Crumbs that name the CMS, not a subject area. SharePoint calls its site
+#: collection "Internet", and it shows up in the breadcrumb of every page.
+_NON_SUBJECT_CRUMBS = {"internet", "home", "main", "index", "default",
+                       "site", "sitepages", "pages", "root", "portal"}
+
+
+def _crumb_key(s: str) -> str:
+    """Comparison form for a folder crumb.
+
+    "Regulations & Laws" and "Regulations and Laws" are the same folder written
+    two ways — the site's breadcrumb uses one, the source YAML the other — so a
+    plain lowercase comparison keeps both and the trail says it twice.
+    """
+    s = (s or "").strip().lower()
+    s = s.replace("&", " and ")
+    s = re.sub(r"[^\w\s]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _clean_trail(parts: List[str]) -> List[str]:
+    """Drop CMS crumbs and any crumb already said earlier in the trail.
+
+    `_dedupe_keep_order` only removes ADJACENT repeats. Ministry of Commerce
+    produced:
+
+        Ministry of Commerce | Regulations and Laws | Internet |
+        Ministry of Commerce | Regulations & Laws
+
+    — the regulator and the source system repeated at positions 3 and 4, not
+    adjacent to their originals because SharePoint's "Internet" sat between
+    them. All 115 rows shared that one trail.
+    """
+    out: List[str] = []
+    seen = set()
+    for p in parts:
+        k = _crumb_key(p)
+        if not k or k in _NON_SUBJECT_CRUMBS or k in seen:
+            continue
+        seen.add(k)
+        out.append(p.strip())
     return out
 
 
@@ -151,6 +217,7 @@ class GenericSiteCrawler:
         max_depth: int = 8,
         out_dir: Optional[str] = None,
         include_pages: str = "auto",      # "auto" | "always" | "never"
+        wait_ms: Optional[int] = None,    # per-site JS settle time
         in_process: bool = False,
         timeout: int = 3600,
     ):
@@ -163,6 +230,12 @@ class GenericSiteCrawler:
         self.max_depth = max_depth
         self.out_dir = out_dir
         self.include_pages = include_pages
+        # How long to let JavaScript settle before reading the page. The engine
+        # has always accepted --wait-ms; nothing passed it, so every site got the
+        # default. ZATCA's landing page renders its links client-side and read at
+        # the default returns text_len=22 and queues NOTHING — the crawl visits
+        # the seed, finds no links worth following and stops at one page.
+        self.wait_ms = wait_ms
         self.in_process = in_process
         self.timeout = timeout
         self.last_result = {}             # raw crawl output, for diagnostics
@@ -178,14 +251,17 @@ class GenericSiteCrawler:
         if self.in_process:
             sys.path.insert(0, str(REPO_ROOT))
             from generic_crawler.crawler import crawl
+            kw = {"wait_ms": self.wait_ms} if self.wait_ms else {}
             crawl(self.seed_url, str(out), max_pages=self.max_pages,
-                  max_depth=self.max_depth, scope=self.scope)
+                  max_depth=self.max_depth, scope=self.scope, **kw)
         else:
             cmd = [sys.executable, str(ENGINE),
                    "--url", self.seed_url, "--out", str(out),
                    "--scope", self.scope,
                    "--max-pages", str(self.max_pages),
                    "--max-depth", str(self.max_depth)]
+            if self.wait_ms:
+                cmd += ["--wait-ms", str(self.wait_ms)]
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   encoding="utf-8", errors="replace",
                                   timeout=self.timeout)
@@ -213,7 +289,7 @@ class GenericSiteCrawler:
         and tangle their documents together.
         """
         parts = [self.regulator, self.source_system] + _split_section_path(section_path)
-        return _dedupe_keep_order([p for p in parts if p])
+        return _clean_trail([p for p in parts if p])
 
     def _category_for(self, section_path: str) -> str:
         if self.category:
@@ -238,9 +314,10 @@ class GenericSiteCrawler:
             doc_path=self._doc_path(section_path),
             content_hash=d.get("content_hash"),
             extra_meta={
-                "crawler": "generic",
-                "shape": shape,
-                "seed_url": self.seed_url,
+                # `crawler`, `shape` and `seed_url` removed 2026-08-12: none had
+                # a reader, and this is the DOCUMENT-row path, which the earlier
+                # slimming of the page-row path missed — so every file row still
+                # carried them.
                 "section_path": section_path,
                 "record_kind": "document",
             },
@@ -263,6 +340,10 @@ class GenericSiteCrawler:
         # every short article on a rulebook site.
         pdf = (r.get("pdf_links") or "").split(" | ")[0].strip()
         extra_pdf = {"org_pdf_link": pdf} if pdf.startswith("http") else {}
+        # A targeted run walked past this row without opening it. Carried so the
+        # classifier can tell "not re-read" from "read and now empty"; absent on
+        # every ordinary run rather than stamped False on every document.
+        extra_skip = {"detail_skipped": True} if r.get("detail_skipped") else {}
         # The listing row is the only place the reference number and issue date
         # appear on most list sites — the detail page rarely repeats them.
         row_text = r.get("row_text") or ""
@@ -275,23 +356,43 @@ class GenericSiteCrawler:
             published_date=_parse_row_date(row_text),
             reference_no=_parse_row_ref(row_text, title),
             source_page_url=url,
-            file_type="HTML",
+            # DERIVED, not assumed. A "page row" is a row from a listing, and a
+            # listing row can link straight at a FILE — SIMAH's Implementing
+            # Regulations row points at implementing-regulations.pdf, and was
+            # stored as file_type HTML with no text, which reads as a broken page
+            # rather than a PDF nobody has fetched yet.
+            file_type=_ext_type(url) if _is_doc(url) else "HTML",
             doc_path=self._doc_path(section_path),
             document_html=r.get("html") or None,
             content_hash=r.get("content_hash"),
+            # extra_meta is stored on every regulation row and read by people, so
+            # it holds what a READER needs — not a record of how the crawl ran.
+            # Removed as noise: crawler, shape, seed_url, depth, parent_page_url
+            # (duplicates the source_page_url column), section_path (duplicates
+            # doc_path) and row_text (used to parse the date and reference above,
+            # then of no further use). None had a single reader.
             extra_meta={
-                "crawler": "generic",
-                "shape": shape,
-                "seed_url": self.seed_url,
-                "section_path": section_path,
-                "record_kind": "page",
-                # Tier 1b of the orchestrator's extraction: use this text directly
-                # instead of re-fetching the page.
+                # KEEP. Tier 1b of the orchestrator's extraction reads this to
+                # avoid re-fetching the page (orchestrator.py:183), and the
+                # versioning path reads it to snapshot previous content
+                # (formfill/orch.py:685). Dropping it would silently make every
+                # analysis re-download its page.
                 "content_text": text,
-                "depth": r.get("depth", 0),
-                "parent_page_url": r.get("parent_page_url", ""),
-                "row_text": row_text,
+                # KEEP. jobs/run_regulator.py summarises a run by this.
+                "record_kind": "page",
+                # Blocks the form named in content.extract. They were LIFTED OUT
+                # of document_html — so the stored HTML is the instrument and not
+                # the site's furniture around it — and kept here under the form's
+                # own key, so nothing captured is thrown away.
+                # Blocks the form named in content.extract, LIFTED OUT of
+                # document_html and kept here. A block read as label/value pairs
+                # is flattened — `Resolution Number` becomes
+                # extra_meta["resolution_number"], not a nested object nobody can
+                # query — because that is the point of parsing it rather than
+                # storing its markup.
+                **_flatten_extracted(r.get("extracted") or {}),
                 **extra_pdf,
+                **extra_skip,
             },
         )
 
@@ -373,21 +474,60 @@ class CompositeCrawler:
     crawlers and hand-written ones. Any object with fetch_documents() works.
 
     A failing source is logged and skipped; it must not take the others down.
+
+    It also stamps each document with the settings of the source that produced
+    it. This loop is the only place that knows which source that was: the
+    documents leave here as one flat list, and a custom source can write under
+    several source_systems (SAMACombinedCrawler is three crawlers).
     """
 
-    def __init__(self, crawlers: List[object]):
+    def __init__(self, crawlers: List[object], options: Optional[List[dict]] = None):
         self.crawlers = crawlers
+        # One dict per crawler — name, identity, version_key. A missing key means
+        # the regulator's default, so empty dicts are the old behaviour exactly.
+        self.options = list(options or [{} for _ in crawlers])
+
+    def _label(self, i: int) -> str:
+        return (self.options[i].get("name")
+                or getattr(self.crawlers[i], "seed_url", None)
+                or type(self.crawlers[i]).__name__)
+
+    @property
+    def source_names(self) -> List[str]:
+        """The sources this was built with, whether or not they produced anything.
+        A source that returned nothing is the case worth being able to see."""
+        return [self._label(i) for i in range(len(self.crawlers))]
+
+    @property
+    def source_systems(self) -> List[str]:
+        """Every source_system these sources write under. The completeness gate
+        needs all of them: one composite can hold several."""
+        out = []
+        for c in self.crawlers:
+            for s in (getattr(c, "source_systems", None)
+                      or [getattr(c, "source_system", None)]):
+                if s and s not in out:
+                    out.append(s)
+        return out
 
     def fetch_documents(self, limit: Optional[int] = None) -> List[RegulatoryDocument]:
         docs: List[RegulatoryDocument] = []
-        for c in self.crawlers:
-            name = getattr(c, "seed_url", None) or type(c).__name__
+        for i, c in enumerate(self.crawlers):
+            label, opts = self._label(i), self.options[i]
             try:
                 got = c.fetch_documents() or []
+                for d in got:
+                    meta = dict(getattr(d, "extra_meta", None) or {})
+                    meta["crawl_source"] = label
+                    if "identity" in opts:
+                        meta["identity_fields"] = opts["identity"]
+                    if "version_key" in opts:
+                        meta["version_key"] = opts["version_key"]
+                    d.extra_meta = meta
                 docs.extend(got)
-                logger.info("  source ok: %s -> %d documents", name, len(got))
+                logger.info("  source ok: %s -> %d documents", label, len(got))
             except Exception as e:
-                logger.error("  source FAILED: %s -> %s", name, e, exc_info=True)
+                logger.error("  source FAILED: %s -> %s", label, e, exc_info=True)
         return docs[:limit] if limit else docs
 
 
@@ -430,6 +570,7 @@ def build_source(cfg: dict):
         max_depth=int(cfg.get("max_depth", 8)),
         out_dir=cfg.get("out_dir"),
         include_pages=cfg.get("include_pages", "auto"),
+        wait_ms=(int(cfg["wait_ms"]) if cfg.get("wait_ms") else None),
     )
 
 
@@ -443,16 +584,44 @@ def build_regulator_crawler(config: dict):
     regulator = config.get("regulator")
     if not regulator:
         raise ValueError("config has no 'regulator'")
+    # A regulator that is off on purpose says so. An empty list cannot be told
+    # from an unfinished file, and it reads as working wherever configs are
+    # listed rather than run.
+    off = config.get("disabled")
+    if off:
+        raise ValueError(f"{regulator}: disabled on purpose. {off}")
     sources = config.get("sources") or []
     if not sources:
-        raise ValueError(f"{regulator}: config lists no sources")
+        raise ValueError(f"{regulator}: config lists no sources. If that is "
+                         f"deliberate, say so in `disabled:`")
 
-    built = []
+    built, options = [], []
     for src in sources:
         merged = dict(src)
         merged.setdefault("regulator", regulator)
         built.append(build_source(merged))
-    return CompositeCrawler(built)
+        options.append(_source_options(src, config))
+    return CompositeCrawler(built, options)
+
+
+def _source_options(src: dict, config: dict) -> dict:
+    """Per-source settings for the orchestrator, falling back to the regulator's.
+
+    What counts as "the same document" belongs to the SOURCE: one regulator can
+    hold a grid with a reference number and a link walk without one, and a single
+    identity for the whole file cannot serve both. `version_key` is looked up with
+    `in` rather than `or` because `version_key: null` disables the new-url
+    tiebreak, which is a different instruction from not mentioning it.
+    """
+    opts = {"name": src.get("name")}
+    identity = src.get("identity") or config.get("identity")
+    if identity:
+        opts["identity"] = identity
+    for level in (src, config):
+        if "version_key" in level:
+            opts["version_key"] = level["version_key"]
+            break
+    return opts
 
 
 __all__ = ["GenericSiteCrawler", "CompositeCrawler",

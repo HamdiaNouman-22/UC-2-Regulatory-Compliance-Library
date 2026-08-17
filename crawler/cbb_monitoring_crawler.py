@@ -30,6 +30,16 @@ CBB_GOV_BASE         = "https://www.cbb.gov.bh"
 REQUEST_DELAY = 1.0
 MAX_RETRIES   = 3
 REGULATOR     = "Central Bank of Bahrain"
+EMPTY_HASH    = "d41d8cd98f00b204e9800998ecf8427e"  # MD5 of empty string = folder page
+
+_SECTION_CODE_RE  = re.compile(r'^([A-Z]{1,5}-\d+[A-Z]?(?:\.\d+[A-Z]?)*)', re.IGNORECASE)
+_DELETION_KEYWORDS = re.compile(r'\b(deleted|moved\s+to\s+section|removed|transferred)\b', re.IGNORECASE)
+
+
+def _extract_section_code(title: str) -> Optional[str]:
+    """Extract leading section code from a title, e.g. 'LR-1A.1 General' -> 'LR-1A.1'."""
+    m = _SECTION_CODE_RE.match((title or "").strip())
+    return m.group(1).upper() if m else None
 
 
 def _make_session() -> requests.Session:
@@ -80,20 +90,22 @@ def _get_thomson_reuters_changes(from_date: date, to_date: date) -> List[Dict]:
     changed_pages = []
     seen = set()
 
-    params = {
-        "f_days":         "on",
-        "changed":        "between",
-        "min":            from_date.strftime("%d/%m/%Y"),
-        "max":            to_date.strftime("%d/%m/%Y"),
-        "items_per_page": "40",
-        "sort_by":        "revision_timestamp_1",
+    base_params = {
+        "f_date":              "on",
+        "min":                 from_date.strftime("%Y-%m-%d"),
+        "max":                 to_date.strftime("%Y-%m-%d"),
+        "items_per_page":      "40",
+        "sort_by":             "revision_timestamp_1",
     }
 
-    page_url = CHANGES_URL
     page_num = 0
 
-    while page_url:
-        soup = _fetch(page_url, params=params if page_num == 0 else None)
+    while True:
+        params = dict(base_params)
+        if page_num > 0:
+            params["page"] = str(page_num)
+
+        soup = _fetch(CHANGES_URL, params=params)
         if not soup:
             break
 
@@ -101,7 +113,31 @@ def _get_thomson_reuters_changes(from_date: date, to_date: date) -> List[Dict]:
         if not results_area:
             break
 
-        for row in results_area.find_all("div", class_="views-row"):
+        rows = results_area.find_all("div", class_="views-row")
+        if not rows:
+            break
+
+        def _row_date(r):
+            """Extract date from <time datetime="..."> attribute — avoids whitespace regex issues."""
+            dd = r.find("div", class_="book-detail")
+            if not dd:
+                return None
+            t = dd.find("time", attrs={"datetime": True})
+            if not t:
+                return None
+            try:
+                return datetime.fromisoformat(t["datetime"]).date()
+            except (ValueError, KeyError):
+                return None
+
+        # Check first entry (newest on page) — if it's already before from_date,
+        # the entire page and all following pages are out of range
+        first_date = _row_date(rows[0])
+        if first_date is not None and first_date < from_date:
+            log.info(f"  First entry on page {page_num + 1} dated {first_date} — before {from_date}, stopping.")
+            break
+
+        for row in rows:
             detail_div = row.find("div", class_="book-detail")
             if not detail_div:
                 continue
@@ -115,15 +151,12 @@ def _get_thomson_reuters_changes(from_date: date, to_date: date) -> List[Dict]:
             seen.add(full_url)
 
             title = a.get_text(strip=True)
-            change_date = None
-            dm = re.search(r"\((\d{1,2}\s+\w+\s+\d{4})\)", detail_div.get_text())
-            if dm:
-                for fmt in ("%d %B %Y", "%d %b %Y"):
-                    try:
-                        change_date = datetime.strptime(dm.group(1), fmt).date().isoformat()
-                        break
-                    except ValueError:
-                        pass
+            item_date = _row_date(row)
+            change_date = item_date.isoformat() if item_date else None
+
+            # Skip entries outside our date window
+            if item_date is not None and (item_date < from_date or item_date > to_date):
+                continue
 
             trail_div = row.find("div", class_="book-trail")
             changed_pages.append({
@@ -133,16 +166,11 @@ def _get_thomson_reuters_changes(from_date: date, to_date: date) -> List[Dict]:
                 "breadcrumb": trail_div.get_text(strip=True) if trail_div else "",
             })
 
-        pager = soup.find("nav", class_="pager")
-        if pager:
-            next_link = pager.find("a", string=re.compile(r"next|›", re.IGNORECASE))
-            if next_link and next_link.get("href"):
-                page_url = urljoin(BASE_URL, next_link["href"])
-                params = None
-                page_num += 1
-                time.sleep(REQUEST_DELAY)
-                continue
-        break
+        if len(rows) < 40:
+            break
+        page_num += 1
+        log.info(f"  Fetching page {page_num + 1} of TR changes...")
+        time.sleep(REQUEST_DELAY)
 
     log.info(f"Total TR changed pages found: {len(changed_pages)}")
     return changed_pages
@@ -180,7 +208,7 @@ def _extract_doc_path_from_page(soup: BeautifulSoup, category: str = "") -> List
                 if text:
                     trail.append(text)
         if trail:
-            return ["CBB Rulebook"] + trail
+            return [REGULATOR] + trail
 
     # Fallback: Location breadcrumb (<nav class="breadcrumb">)
     crumb_nav = soup.find("nav", class_="breadcrumb")
@@ -191,7 +219,7 @@ def _extract_doc_path_from_page(soup: BeautifulSoup, category: str = "") -> List
             if a.get_text(strip=True)
         ]
         if items:
-            return [REGULATOR, "CBB Rulebook"] + items
+            return [REGULATOR] + items
 
     return [REGULATOR, category]
 
@@ -337,6 +365,30 @@ def _detect_book_category(soup: BeautifulSoup) -> str:
     return "CBB Rulebook"
 
 
+def _extract_toc_links(soup: BeautifulSoup) -> List[str]:
+    """
+    Get the direct children of the current page from the sidebar navigation.
+    Finds the deepest active-trail <li> and returns the links in its nested <ul>.
+    """
+    seen, links = set(), []
+    for nav in soup.find_all("nav", id=re.compile(r"^book-block-menu-")):
+        active_items = nav.find_all("li", class_=re.compile(r"menu-item--active-trail"))
+        if not active_items:
+            continue
+        last_active = active_items[-1]
+        child_ul = last_active.find("ul", recursive=False)
+        if not child_ul:
+            continue
+        for li in child_ul.find_all("li", recursive=False):
+            a = li.find("a", href=True)
+            if a:
+                full = urljoin(BASE_URL, a["href"])
+                if full not in seen:
+                    seen.add(full)
+                    links.append(full)
+    return links
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SCRAPING CHANGED PAGES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -346,11 +398,13 @@ def _scrape_changed_tr_page(
     category: str,
     monitoring_status: str,
     existing_regulation_id: Optional[int] = None,
+    soup: Optional[BeautifulSoup] = None,
 ) -> Optional[RegulatoryDocument]:
-    time.sleep(REQUEST_DELAY)
-    soup = _fetch(url)
-    if not soup:
-        return None
+    if soup is None:
+        time.sleep(REQUEST_DELAY)
+        soup = _fetch(url)
+        if not soup:
+            return None
 
     title_tag = soup.find("h2", class_="page-title") or soup.find("h1")
     title = title_tag.get_text(strip=True) if title_tag else url.split("/")[-1]
@@ -383,9 +437,10 @@ def _scrape_changed_tr_page(
         if l["url"].lower().endswith(".pdf") or "pdf" in l["text"].lower()
     ]
 
+    source_system = "CBB-Rulebook" if "/rulebook/" in url else f"CBB-{category.replace(' ', '-')}"
     return RegulatoryDocument(
         regulator       = REGULATOR,
-        source_system   = "CBB-Rulebook",
+        source_system   = source_system,
         category        = category,
         title           = title,
         document_url    = primary_pdf or url,
@@ -407,6 +462,7 @@ def _scrape_changed_tr_page(
             "content_hash":          content_hash,
             "monitoring_status":     monitoring_status,
             "existing_regulation_id": existing_regulation_id,
+            "depth":                 len(doc_path) - 1,
         },
         doc_path = doc_path,
     )
@@ -456,8 +512,9 @@ def _create_cbb_gov_bh_doc(
 
 class CBBMonitoringCrawler:
     def __init__(self, repo, request_delay: float = REQUEST_DELAY):
-        self.repo          = repo
-        self.request_delay = request_delay
+        self.repo           = repo
+        self.request_delay  = request_delay
+        self._smart_matcher = None   # initialised lazily in fetch_documents()
 
     def _get_last_crawl_date(self) -> date:
         try:
@@ -470,28 +527,164 @@ class CBBMonitoringCrawler:
             log.warning(f"Could not get last crawl date: {e}")
         return date.today() - timedelta(days=30)
 
-    def fetch_documents(self, timeout=None) -> List[RegulatoryDocument]:
-        from_date = self._get_last_crawl_date()
-        to_date   = date.today()
+    def _handle_deletion_notice(self, url: str, title: str, visited: set) -> None:
+        """
+        Called when a page has empty content AND title contains deletion/moved keywords
+        with no TOC children. Finds all matching old records and marks them deleted.
+
+        Priority:
+          1. URL-based lookup → marks the reg + its compliancecategory children
+          2. Section-code prefix fallback → marks all title-matched records (section + sub-sections)
+        """
+        ids_to_delete: List[int] = []
+
+        # 1. URL-based lookup
+        existing_id = self.repo.get_regulation_id_by_source_url(url)
+        if existing_id:
+            ids_to_delete.append(existing_id)
+            for child_url in self.repo.get_child_source_urls(url):
+                child_id = self.repo.get_regulation_id_by_source_url(child_url)
+                if child_id and child_id not in ids_to_delete:
+                    ids_to_delete.append(child_id)
+            log.info(f"    URL match: will delete {len(ids_to_delete)} record(s)")
+        else:
+            # 2. Section-code fallback (handles URL changes)
+            section_code = _extract_section_code(title)
+            if not section_code:
+                log.warning(f"    Cannot identify section from title: {title[:60]}")
+                return
+            ids_to_delete = self.repo.find_regulation_ids_by_section_code_prefix(section_code)
+            if not ids_to_delete:
+                log.warning(f"    No records found for [{section_code}] — may already be deleted or not yet crawled")
+                return
+            log.info(f"    Section-code match [{section_code}]: will delete {len(ids_to_delete)} record(s)")
+
+        for reg_id in ids_to_delete:
+            log.info(f"    Marking deleted: reg_id={reg_id}")
+            self.repo.mark_regulation_deleted(reg_id)
+
+    def _handle_folder_change(
+        self,
+        url: str,
+        soup: BeautifulSoup,
+        category: str,
+        all_docs: List,
+        visited: set,
+    ) -> None:
+        """
+        Called when TR reports a folder page (empty content) as changed.
+
+        Algorithm per child found in the sidebar TOC:
+          - Not in DB             → NEW: scrape & add; if also a folder, recurse
+          - In DB, empty hash     → existing FOLDER: recurse to check subtree
+          - In DB, has content    → existing LEAF: TR reports these separately, skip
+          (Deleted children — in DB but missing from TOC — are flagged as a warning;
+           full deletion handling is a future enhancement.)
+        """
+        if url in visited:
+            return
+        visited.add(url)
+
+        toc_urls = _extract_toc_links(soup)
+        if not toc_urls:
+            log.info(f"    Folder has no TOC children in sidebar: {url}")
+            return
+
+        log.info(f"    Folder has {len(toc_urls)} direct children — checking each")
+
+        for child_url in toc_urls:
+            if child_url in visited:
+                continue
+
+            existing_id  = self.repo.get_regulation_id_by_source_url(child_url)
+            stored_hash  = self.repo.get_cbb_content_hash(existing_id) if existing_id else None
+
+            if not existing_id:
+                # ── NEW child ────────────────────────────────────────────────
+                log.info(f"    NEW child: {child_url}")
+                time.sleep(self.request_delay)
+                child_soup = _fetch(child_url)
+                if not child_soup:
+                    continue
+                child_category = _detect_book_category(child_soup)
+
+                child_content  = _extract_content(child_soup)
+                child_hash     = hashlib.md5((child_content["content_text"] or "").encode()).hexdigest()
+                child_toc      = _extract_toc_links(child_soup)
+
+                if child_hash == EMPTY_HASH:
+                    child_title_tag = child_soup.find("h2", class_="page-title") or child_soup.find("h1")
+                    child_title     = child_title_tag.get_text(strip=True) if child_title_tag else child_url.split("/")[-1]
+                    is_child_deletion = bool(_DELETION_KEYWORDS.search(child_title)) and not child_toc
+                    if is_child_deletion:
+                        log.info(f"    NEW child is a DELETION NOTICE: {child_title[:60]}")
+                        self._handle_deletion_notice(child_url, child_title, visited)
+                        visited.add(child_url)
+                        continue
+                    else:
+                        # New folder child — recurse into its sub-children
+                        self._handle_folder_change(child_url, child_soup, child_category, all_docs, visited)
+                else:
+                    # New leaf child with content — add to processing queue
+                    doc = _scrape_changed_tr_page(
+                        url=child_url,
+                        category=child_category,
+                        monitoring_status="new",
+                        existing_regulation_id=None,
+                        soup=child_soup,
+                    )
+                    if doc:
+                        all_docs.append(doc)
+
+            elif stored_hash == EMPTY_HASH:
+                # ── Existing FOLDER child → recurse ──────────────────────────
+                log.info(f"    Recursing into existing folder: {child_url}")
+                time.sleep(self.request_delay)
+                child_soup = _fetch(child_url)
+                if child_soup:
+                    child_category = _detect_book_category(child_soup)
+                    self._handle_folder_change(child_url, child_soup, child_category, all_docs, visited)
+
+            # else: existing leaf → TR reports content changes separately, skip here
+
+        # Deleted children: in DB but no longer in TOC
+        db_urls = set(self.repo.get_child_source_urls(url))
+        deleted = db_urls - set(toc_urls)
+        for deleted_url in deleted:
+            existing_id = self.repo.get_regulation_id_by_source_url(deleted_url)
+            if existing_id:
+                log.info(f"    DELETED child detected: {deleted_url} (reg_id={existing_id})")
+                self.repo.mark_regulation_deleted(existing_id)
+
+    def fetch_documents(self, timeout=None, from_date=None, to_date=None) -> List[RegulatoryDocument]:
+        if from_date is None:
+            from_date = self._get_last_crawl_date()
+        if to_date is None:
+            to_date = date.today()
+        if isinstance(from_date, str):
+            from_date = date.fromisoformat(from_date)
+        if isinstance(to_date, str):
+            to_date = date.fromisoformat(to_date)
         log.info(f"=== CBB MONITORING: {from_date} to {to_date} ===")
+
+        # Initialise smart matcher once per run (loads all regs + cats from DB)
+        if self._smart_matcher is None:
+            from crawler.smart_matcher import SmartMatcher
+            self._smart_matcher = SmartMatcher(self.repo)
 
         all_docs: List[RegulatoryDocument] = []
 
         # ── Part A: Thomson Reuters ───────────────────────────────────────────
         log.info("=== Monitoring Thomson Reuters content ===")
         tr_changes = _get_thomson_reuters_changes(from_date, to_date)
+        visited: set = set()  # track URLs already handled (avoids re-processing in folder recursion)
 
         for item in tr_changes:
             url   = item["url"]
             title = item["title"]
 
-            existing_id = self.repo.get_regulation_id_by_source_url(url)
-            if existing_id:
-                stored_hash        = self.repo.get_cbb_content_hash(existing_id)
-                monitoring_status  = "modified"
-            else:
-                stored_hash        = None
-                monitoring_status  = "new"
+            if url in visited:
+                continue
 
             time.sleep(self.request_delay)
             soup = _fetch(url)
@@ -499,21 +692,58 @@ class CBBMonitoringCrawler:
                 continue
 
             category = _detect_book_category(soup)
-            doc      = _scrape_changed_tr_page(
+
+            # ── Detect folder page or deletion notice (both have empty body) ─
+            content    = _extract_content(soup)
+            page_hash  = hashlib.md5((content["content_text"] or "").encode()).hexdigest()
+
+            if page_hash == EMPTY_HASH:
+                toc_children     = _extract_toc_links(soup)
+                is_deletion_notice = bool(_DELETION_KEYWORDS.search(title)) and not toc_children
+                if is_deletion_notice:
+                    log.info(f"  DELETION NOTICE: {title[:60]} — marking old records deleted")
+                    self._handle_deletion_notice(url, title, visited)
+                else:
+                    log.info(f"  Folder page: {title[:60]} — checking children")
+                    self._handle_folder_change(url, soup, category, all_docs, visited)
+                visited.add(url)
+                continue
+
+            # ── Normal leaf page — smart identity matching ───────────────
+            url_existing_id = self.repo.get_regulation_id_by_source_url(url)
+
+            match = self._smart_matcher.match(
+                title=title,
+                url=url,
+                doc_path=_extract_doc_path_from_page(soup, category),
+                content_text=content["content_text"] or "",
+                soup=soup,
+                url_existing_id=url_existing_id,
+            )
+
+            monitoring_status = match["monitoring_status"]
+            existing_id       = match["existing_id"]
+
+            if monitoring_status == "unchanged":
+                log.info(f"  UNCHANGED [{match['method']}]: {title[:60]}")
+                visited.add(url)
+                continue
+
+            log.info(
+                f"  {monitoring_status.upper()} [{match['method']} "
+                f"conf={match['confidence']:.2f}]: {title[:60]}"
+            )
+
+            doc = _scrape_changed_tr_page(
                 url=url, category=category,
                 monitoring_status=monitoring_status,
                 existing_regulation_id=existing_id,
+                soup=soup,
             )
             if not doc:
                 continue
 
-            # Skip if content unchanged
-            if monitoring_status == "modified" and stored_hash:
-                new_hash = doc.extra_meta.get("content_hash")
-                if new_hash == stored_hash:
-                    log.info(f"  Unchanged (hash match): {title[:60]}")
-                    continue
-
+            visited.add(url)
             all_docs.append(doc)
 
         log.info(f"TR content: {len(all_docs)} changes detected")
@@ -556,9 +786,22 @@ class CBBMonitoringCrawler:
 #  PIPELINE ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def monitor_cbb_changes():
+def monitor_cbb_changes(from_date=None, to_date=None):
+    """
+    Standalone entry point for the CBB monitoring pipeline.
+
+    Parameters
+    ----------
+    from_date : str | date | None
+        Start of the TR revision window (ISO string or date object).
+        Defaults to last crawl date minus 1 day.
+    to_date : str | date | None
+        End of the TR revision window.  Defaults to today.
+    """
     log.info("=" * 80)
     log.info("CBB MONITORING CRAWLER STARTED")
+    if from_date or to_date:
+        log.info(f"  Date override: {from_date} -> {to_date}")
     log.info("=" * 80)
 
     from storage.mssql_repo import MSSQLRepository
@@ -576,7 +819,9 @@ def monitor_cbb_changes():
 
     monitoring_crawler = CBBMonitoringCrawler(repo)
     try:
-        changed_docs = monitoring_crawler.fetch_documents()
+        changed_docs = monitoring_crawler.fetch_documents(
+            from_date=from_date, to_date=to_date
+        )
         if not changed_docs:
             log.info("No changes detected.")
             return {"status": "success", "changes_detected": 0,

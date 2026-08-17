@@ -31,6 +31,15 @@ import requests
 from bs4 import BeautifulSoup, Tag
 
 from models.models import RegulatoryDocument
+from crawler.fingerprint import stamp_content_hashes
+
+# The stored regulator name. Full name then acronym is the house style, and
+# this string is ALSO the first crumb of doc_path, so it is the root folder of
+# SAMA's tree. Changed 2026-08-15: it was the bare acronym "SAMA", while the
+# library already held the full name — a crawl would have created a SECOND
+# regulator beside the 6,101 rows already stored.
+SAMA_REGULATOR = "Saudi Arabian Monetary Authority (SAMA)"
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -438,7 +447,7 @@ class SAMAFullRulebookCrawler:
                 hub_html = self._extract_hub_content(page_soup)
                 if hub_html:
                     hub_doc = RegulatoryDocument(
-                        regulator       = "SAMA",
+                        regulator       = SAMA_REGULATOR,
                         source_system   = "SAMA RULEBOOK",
                         category        = self._sector_name,
                         title           = real_title,
@@ -447,7 +456,7 @@ class SAMAFullRulebookCrawler:
                         file_type       = "HTML",
                         document_html   = hub_html,
                     )
-                    hub_doc.doc_path = ["SAMA", "SAMA RULEBOOK", self._sector_name] + cur_path
+                    hub_doc.doc_path = [SAMA_REGULATOR, "SAMA RULEBOOK", self._sector_name] + cur_path
                     results.append(hub_doc)
                     logger.info(f"{indent}-> hub doc captured (folder page content)")
             for child in children:
@@ -476,7 +485,7 @@ class SAMAFullRulebookCrawler:
             if structured["date_hijri"]:
                 extra_meta["issue_date_hijri"] = structured["date_hijri"]
             doc = RegulatoryDocument(
-                regulator     = "SAMA",
+                regulator     = SAMA_REGULATOR,
                 source_system = "SAMA RULEBOOK",
                 category      = self._sector_name,
                 title         = real_title,
@@ -489,7 +498,7 @@ class SAMAFullRulebookCrawler:
                 extra_meta    = extra_meta,
                 document_html = structured["document_html"],
             )
-            doc.doc_path = ["SAMA", "SAMA RULEBOOK", self._sector_name] + cur_path
+            doc.doc_path = [SAMA_REGULATOR, "SAMA RULEBOOK", self._sector_name] + cur_path
             results.append(doc)
             logger.info(f"{indent}-> structured doc captured")
             return
@@ -500,7 +509,7 @@ class SAMAFullRulebookCrawler:
             hub_html = self._extract_hub_content(page_soup)
             if hub_html:
                 hub_doc = RegulatoryDocument(
-                    regulator       = "SAMA",
+                    regulator       = SAMA_REGULATOR,
                     source_system   = "SAMA RULEBOOK",
                     category        = self._sector_name,
                     title           = real_title,
@@ -509,7 +518,7 @@ class SAMAFullRulebookCrawler:
                     file_type       = "HTML",
                     document_html   = hub_html,
                 )
-                hub_doc.doc_path = ["SAMA", "SAMA RULEBOOK", self._sector_name] + cur_path
+                hub_doc.doc_path = [SAMA_REGULATOR, "SAMA RULEBOOK", self._sector_name] + cur_path
                 results.append(hub_doc)
                 logger.info(f"{indent}-> hub doc captured (full page)")
             for link_title, link_url in body_links:
@@ -522,7 +531,7 @@ class SAMAFullRulebookCrawler:
         text_content = content_div.get_text(strip=True) if content_div else ""
         if text_content:
             doc = RegulatoryDocument(
-                regulator     = "SAMA",
+                regulator     = SAMA_REGULATOR,
                 source_system = "SAMA RULEBOOK",
                 category      = self._sector_name,
                 title         = real_title,
@@ -531,7 +540,7 @@ class SAMAFullRulebookCrawler:
                 file_type     = "HTML",
                 document_html = _absolutify_links(str(content_div)),
             )
-            doc.doc_path = ["SAMA", "SAMA RULEBOOK", self._sector_name] + cur_path
+            doc.doc_path = [SAMA_REGULATOR, "SAMA RULEBOOK", self._sector_name] + cur_path
             results.append(doc)
             logger.info(f"{indent}-> plain content doc captured")
 
@@ -564,7 +573,12 @@ class SAMAFullRulebookCrawler:
             self._process(cat, [], 0, visited, results)
 
         logger.info(f"\nSector '{sector.title}': {len(results)} docs from {len(visited)} pages")
-        return results
+        # Every one of the four RegulatoryDocument branches above omitted
+        # content_hash, so all 6,105 stored SAMA rows had no fingerprint and
+        # would classify `modified` on every run. Stamped here, at the one exit
+        # `fetch_all` also goes through, so a fifth branch cannot reintroduce
+        # the gap. See crawler/fingerprint.py.
+        return stamp_content_hashes(results)
 
     def fetch_all(
         self,

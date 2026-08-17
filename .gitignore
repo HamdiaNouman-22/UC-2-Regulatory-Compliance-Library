@@ -27,3 +27,8 @@ html_output_common/
 Thumbs.db
 .vscode/
 .idea/
+
+# build artefacts
+__pycache__/
+*.pyc
+benchmarks/runs/

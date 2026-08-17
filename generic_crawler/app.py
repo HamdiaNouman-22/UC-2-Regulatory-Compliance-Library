@@ -91,21 +91,45 @@ def run_crawl():
             logs.append(f"🚀 seed={ev['seed']} scope={ev['scope']}")
         elif e == "anchor":
             logs.append(f"📍 section anchor = '{ev['section_anchor']}'")
+        elif e == "blocked":
+            logs.append(f"🛑 BLOCKED: {ev['url']} — {ev.get('reason','')}")
+        elif e == "cap":
+            logs.append(f"✂️  page cap hit at {ev['pages']} pages, "
+                        f"{ev.get('queued', 0)} URLs left unwalked")
         elif e == "done":
-            logs.append(f"🏁 done — {ev['pages']} pages, {ev['documents']} documents")
+            # "done" no longer implies success — say which outcome it was.
+            outcome["status"] = ev.get("status", "ok")
+            outcome["stopped"] = ev.get("stopped", "")
+            logs.append(f"🏁 {outcome['status'].upper()} — {ev['pages']} pages, "
+                        f"{ev['documents']} documents, "
+                        f"{ev.get('blocked_pages', 0)} blocked")
         log_box.code("\n".join(logs[-25:]))
 
     proc.wait()
     return proc.returncode
 
 
+# Filled in from the `done` event so the banner below reports the run's OUTCOME
+# rather than whether the process managed to exit.
+outcome = {"status": "", "stopped": ""}
+
 if start:
     with st.spinner("Crawling…"):
         rc = run_crawl()
-    if rc == 0:
-        st.success("Crawl finished.")
+    status = outcome["status"]
+    if status == "ok":
+        st.success("Crawl finished — OK.")
+    elif status == "incomplete":
+        # Not an error: the rows are worth keeping. But it is not coverage, and
+        # the reason has to be in front of whoever reads the numbers below.
+        st.warning(f"INCOMPLETE — part of the site was not walked. "
+                   f"{outcome['stopped']} The counts below are a floor, not a total.")
+    elif status in ("blocked", "zero"):
+        st.error(f"{status.upper()} — this run cannot be used. "
+                 f"{outcome['stopped'] or 'See the log above.'}")
     else:
-        st.error(f"Crawler exited with code {rc}. See log above.")
+        st.error(f"Crawler exited with code {rc} and reported no outcome. "
+                 "See the log above.")
 
 # ---- show results if present ----
 xlsx = out_dir / "pages.xlsx"

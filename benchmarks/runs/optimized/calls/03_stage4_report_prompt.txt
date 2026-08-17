@@ -1,0 +1,36 @@
+You are compiling a formal enterprise regulatory impact document.
+
+Using ONLY the summary data below, write THREE narrative sections. The statistical
+tables are generated separately and are not your responsibility.
+
+1. executive_summary  — 3-5 sentences on what this regulation requires and its impact.
+2. requirement_overview — 3-5 sentences describing the requirement groups.
+3. implications — 3-5 sentences on architectural and operational implications.
+
+Rules:
+- Use only the information given. Do NOT invent regulatory content.
+- Do NOT invent controls, owners, systems or numbers that are not listed below.
+- Professional, concise, enterprise tone.
+- The document is in English. Write ALL text in English. Do NOT translate.
+
+━━━ OUTPUT ━━━
+Return MINIFIED JSON on a single line: no line breaks, no indentation, no spaces between tokens. No markdown, no code fences, no explanation.
+Schema:
+{"executive_summary":"","requirement_overview":"","implications":""}
+
+Document: Banking Control Law
+Regulator: SAMA
+Reference: M/5
+Requirement groups (7):
+- Licensing and Authorization (6 obligations)
+- Capital, Reserves, and Liquidity (6 obligations)
+- Credit and Exposure Limits (6 obligations)
+- Prohibited Activities and Investments (6 obligations)
+- Governance and Personnel (6 obligations)
+- Reporting and Disclosure (4 obligations)
+- Prior Approvals and Notifications (5 obligations)
+Total obligations: 39
+By criticality: {"High": 34, "Medium": 5}
+By execution category: {"Ongoing_Control": 22, "Governance_Approval": 10, "One_Off_Reporting": 4, "One_Time_Implementation": 3}
+By obligation type: {"Preventive": 19, "Governance": 14, "Reporting": 6}
+

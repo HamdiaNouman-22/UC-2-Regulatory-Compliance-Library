@@ -79,6 +79,18 @@ Everything lands under `--out`:
 - `pages.json` — the complete records, including full HTML + text for every page.
 - `html/<slug>.html` — the full readable HTML of each page, one file each.
 
+### Read `status` before you read any count
+
+`pages.json` and the `done` event both start with the run's outcome, and the exit
+code follows it. A crawl that reached the end is not the same as a crawl of the site.
+
+| status | means | exit |
+|---|---|---|
+| `ok` | pages recorded, nothing blocked, nothing cut short | 0 |
+| `blocked` | a bot-protection wall answered instead of the site — no count from this run means anything, and the challenge page is **not** recorded | 1 |
+| `zero` | no pages recorded. A failed extraction, not an empty site — check shape and scope | 1 |
+| `incomplete` | pages recorded, but the walk was cut short (page cap, dead browser, seed never loaded). **Not** an error: the rows are worth keeping, they are just not coverage. `stopped` says why and `resume` says where | 0 |
+
 > **How this maps to the library:** `section_path` → the library's `category`/structure;
 > `doc_url` → `document_url`; `title`, `type`, `found_on` → the matching library fields.
 > See `CRAWLING_OVERVIEW.md` §2 for the full target schema.
