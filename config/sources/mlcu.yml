@@ -43,13 +43,22 @@ identity: [doc_path, title]
 # doc's first preference. `document_url|title` is the floor, not the rule: the
 # crawler sets content_hash from the text and `stamp_content_hashes` fills only
 # what it left blank, so a document that extracts to nothing falls back on its
-# own. Today that is 18 documents on text and 6 on the fallback, and every row
+# own. Today that is 17 documents on text and 7 on the fallback, and every row
 # records which in extra_meta["content_hash_basis"].
 #
-# The fallback is load-bearing, not tidiness. Six documents here are scanned
-# images and this repo's machine has no tesseract; `content_key("")` is "", so a
-# blanket text rule would have given all six THE SAME hash and reported them
-# `unchanged` straight through a replacement.
+# The fallback is load-bearing, not tidiness. Seven documents here cannot be read
+# without OCR and this repo's machine has no tesseract; `content_key("")` is "",
+# so a blanket text rule would have given all seven THE SAME hash and reported
+# them `unchanged` straight through a replacement.
+#
+# Those seven split two ways, and the row says which in extra_meta["text_origin"]:
+# six are scanned images with no text layer at all (`no-pages-read`), and one —
+# the consumer-finance controls — has a FULL text layer whose fonts carry no
+# ToUnicode map, so every glyph decodes to (cid:NNN) (`unreadable-text-layer`).
+# The crawler discards text containing no Arabic character at all, because for an
+# Arabic-only publisher that is not the document. Page counts alone do not catch
+# it: the extractor's broken-text check flags four of that file's six pages and
+# one page's mojibake passes, so the arithmetic reads "a page was read".
 #
 # WHAT THIS CHANGED, and it is not obvious. Under the old `document_url|title`
 # basis a `_v3` re-upload of IDENTICAL content classified as `modified` and wrote
