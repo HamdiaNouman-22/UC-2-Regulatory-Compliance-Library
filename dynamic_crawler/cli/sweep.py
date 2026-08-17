@@ -59,6 +59,7 @@ from dynamic_crawler.inventory_sweep import (StoredInventorySweep,
                                              WorkbookInventory, load_config,
                                              run_workbook_urls, settings_for,
                                              skip_hosts)
+from dynamic_crawler.sama_feed_signal import SamaFeedSweep, default_window
 from dynamic_crawler.sitemap_signal import DEFAULT_CUT, SitemapLastmodSweep
 from dynamic_crawler.snapshot_articles import SnapshotArticleSweep
 from dynamic_crawler import withdrawal
@@ -179,6 +180,36 @@ def sitemap_sweep(source_system: str, *, regulator: str, sitemap_url=None,
     return _run(signal, f"{regulator}/{source_system}", state_root, dry_run)
 
 
+def sama_feed_sweep(source_system: str, *, regulator: str, since=None, until=None,
+                    repo=None, workbook=None, run_workbook=None,
+                    config_path=None, state_root=None, days: int = 30,
+                    dry_run: bool = False) -> dict:
+    """Read SAMA's own revision feed instead of probing every stored document.
+
+    One request for the whole source, plus one per CHANGED document to turn its
+    slug into the node url the library stores. 6,101 requests become 1 + n.
+
+    It cannot see deletions -- a withdrawn document just stops being listed -- so
+    `stored-inventory` stays SAMA's way of finding removals. Run this daily and
+    that occasionally, not the other way round.
+    """
+    config = load_config(config_path)
+    settings = settings_for(config, regulator, source_system)
+    lo, hi = default_window(days)
+    signal = SamaFeedSweep(
+        f"{regulator}/{source_system}",
+        _tracked_urls(regulator, source_system, repo=repo, workbook=workbook,
+                      run_workbook=run_workbook),
+        since=since or lo, until=until or hi,
+        timeout=float(settings.get("timeout") or 45))
+    report = _run(signal, f"{regulator}/{source_system}", state_root, dry_run)
+    # What the feed itself saw, kept beside the verdicts: an entry that matched
+    # nothing in the library is a DISCOVERY, which a stored-inventory probe
+    # cannot produce, and it should be visible without re-reading the shortlist.
+    report["feed"] = signal.stats
+    return report
+
+
 def gosi_sweep(seed: str, *, regulator: str = "GOSI", config_path=None,
                state_root=None, workers=None, probe_documents: bool = True,
                dry_run: bool = False) -> dict:
@@ -238,11 +269,13 @@ def main() -> int:
         description="Ask a regulator which version it holds of what we store")
     ap.add_argument("--signal", default="stored-inventory",
                     choices=("stored-inventory", "gosi", "snapshot-articles",
-                             "sitemap"),
+                             "sitemap", "sama-feed"),
                     help="stored-inventory: probe every url we already store. "
                          "gosi: one JSON request per seed page. "
                          "snapshot-articles: a saved page, no request at all. "
-                         "sitemap: one request, per-url lastmod")
+                         "sitemap: one request, per-url lastmod. "
+                         "sama-feed: SAMA's own revision page, one request "
+                         "instead of 6,101 probes (cannot see deletions)")
     ap.add_argument("--regulator", default="GOSI",
                     help="as stored in the regulations row, e.g. SDAIA. "
                          "Required for --signal stored-inventory")
@@ -276,6 +309,11 @@ def main() -> int:
     ap.add_argument("--config", help="default: config/change_signals.yml")
     ap.add_argument("--state-root", help="default: output/change_state")
     ap.add_argument("--json", dest="json_out", help="also write the report here")
+    ap.add_argument("--feed-days", type=int, default=30,
+                    help="sama-feed: how far back to ask, in days (default 30). "
+                         "Ignored when --since/--until are given.")
+    ap.add_argument("--since", default=None, help="sama-feed: YYYY-MM-DD")
+    ap.add_argument("--until", default=None, help="sama-feed: YYYY-MM-DD")
     ap.add_argument("--targets", dest="targets_out",
                     help="write the modified documents' urls here, one per "
                          "line, for `formfill run --only-urls`. Modified only: "
@@ -315,6 +353,19 @@ def main() -> int:
                                dry_run=a.dry_run)
         return _emit(report, a.json_out, a.targets_out)
 
+    if a.signal == "sama-feed":
+        if not (a.workbook or a.with_db or a.run_workbook):
+            raise SystemExit("pass --with-db, --workbook or --run-workbook: the "
+                             "feed says what SAMA changed, and the stored "
+                             "inventory is what says whether we already hold it")
+        report = sama_feed_sweep(a.source_system, regulator=a.regulator,
+                                 repo=_repo(a), workbook=a.workbook,
+                                 run_workbook=a.run_workbook,
+                                 config_path=a.config, state_root=a.state_root,
+                                 days=a.feed_days, since=a.since, until=a.until,
+                                 dry_run=a.dry_run)
+        return _emit(report, a.json_out, a.targets_out)
+
     if not a.workbook and not a.with_db:
         raise SystemExit("pass --workbook <xlsx> or --with-db: the sweep reads "
                          "the urls it probes out of the stored inventory")
@@ -325,7 +376,16 @@ def main() -> int:
                    repo=_repo(a), workbook=a.workbook,
                    config_path=a.config, state_root=a.state_root, limit=a.limit,
                    workers=a.workers, dry_run=a.dry_run)
-    return _emit(report, a.json_out)
+    # `a.targets_out` IS PASSED HERE TOO. It was omitted on this branch alone —
+    # the other three signals above all forward it — so `--targets` was silently
+    # ignored on `stored-inventory`, which is the signal every regulator uses.
+    #
+    # The failure was invisible: the report still listed the modified urls under
+    # "targets", the exit code was 0, and nothing warned. Only the FILE was
+    # missing, so anything driving a re-crawl from it read "nothing changed" and
+    # skipped the crawl. Measured 2026-08-15 on SDAIA: 2 documents modified,
+    # 2 targets in the report, 0 written, no crawl.
+    return _emit(report, a.json_out, a.targets_out)
 
 
 if __name__ == "__main__":

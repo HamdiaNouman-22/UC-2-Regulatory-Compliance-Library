@@ -37,7 +37,8 @@ seed_url: "https://sdaia.gov.sa/en/SDAIA/about/Pages/RegulationsAndPolicies.aspx
 shape: list
 scope: prefix
 
-row_selector: "div.file-link-row"
+# The CARD is the row: one instrument, whose PDFs are its parts.
+row_selector: "div.card"
 detail_link_selector: "a[href]"
 
 pagination:
@@ -50,7 +51,7 @@ fields:
   # what makes each one identifiable.
   title:
     from: css
-    selector: "a[href]"
+    selector: "h5.card-title"
     attr: text
   document_url:
     from: css
@@ -68,13 +69,22 @@ section_path:
 
 # Every row is already a PDF link — there is no detail page to open.
 fetch_details: false
+
+# The card is ONE instrument and its PDFs ARE that instrument, so they
+# become one document carrying all of them, and preprocessing
+# concatenates every file's text.
+#   true  -> one document per file: titles were "The law", "Policies"
+#   false -> files are annexures NOT analysed (right for SBP, wrong here)
+attachment_is_document: combined
 notes: "One row per PDF. Cards with several attachments produce several documents."
 # Who this source belongs to. These two lead the folder trail AND the
 # section_path column in the Excel, so the crawler's own output shows the
 # same path the library will use. Defined here only — the pipeline reuses
 # them rather than prepending its own copy.
 library:
-  regulator: "SDAIA"
+  # Full name, then the acronym — house style, and this is doc_path[0] and
+  # therefore the root folder of SDAIA's tree. Changed 2026-08-14.
+  regulator: "Saudi Data and AI Authority (SDAIA)"
   source_system: "Laws and Regulations"
 meta:
   approved: true

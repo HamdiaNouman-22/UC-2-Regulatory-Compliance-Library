@@ -34,6 +34,8 @@ from playwright.sync_api import sync_playwright
 
 from models.models import RegulatoryDocument
 from site_runners import cma_laws
+from dynamic_crawler.formfill.runner import stable_url
+from crawler.fingerprint import stamp_content_hashes
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,27 @@ DEFAULT_TABS = [
 
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+
+def _scrub_urls(doc):
+    """Strip per-request parameters from every url a document carries.
+
+    Applied where the document LEAVES this wrapper, so no code path can bypass
+    it. The earlier fix caught the paged branch only, and 4 rows still reached
+    the library with `csrt=<token>` on them — CMA's CSRF token, which changes per
+    session and would make a multi-attachment row look new on every crawl.
+    """
+    for attr in ("document_url", "source_page_url"):
+        v = getattr(doc, attr, None)
+        if isinstance(v, str) and v:
+            setattr(doc, attr, stable_url(v))
+    meta = getattr(doc, "extra_meta", None)
+    if isinstance(meta, dict):
+        for k, v in list(meta.items()):
+            if isinstance(v, str) and ("http" in v):
+                meta[k] = " | ".join(stable_url(x.strip())
+                                     for x in v.split("|") if x.strip())
+    return doc
 
 
 def _as_doc_list(tab_docs) -> List[dict]:
@@ -170,12 +193,51 @@ class CMACrawler:
 
                     before = len(docs)
                     for d in _as_doc_list(tab_docs):
-                        href = (d.get("doc_url") or "").strip()
-                        if not href or href in seen:
+                        # PER-REQUEST PARAMETERS STRIPPED BEFORE ANYTHING ELSE.
+                        #
+                        # CMA appends `csrt=<digits>` (a CSRF token) and a
+                        # literal `undefined=undefined` from a bug in its own
+                        # page. A row whose document_url is empty is identified
+                        # by doc_path + attachment_links, so a token that moves
+                        # per session makes the row look new on every crawl and
+                        # inserts it again. Measured 2026-08-16: 2 of CMA's 69
+                        # empty-url rows carry one. Ministry of Commerce had the
+                        # same fault with `dt=` and duplicated all 16 of its
+                        # attachment rows before it was found.
+                        href = stable_url((d.get("doc_url") or "").strip())
+                        section_path = d.get("section_path") or ""
+                        attachment_links = " | ".join(
+                            stable_url(x.strip())
+                            for x in str(d.get("attachment_links") or "").split("|")
+                            if x.strip())
+                        # A multi-attachment row DELIBERATELY carries an empty
+                        # document_url — see models.RegulatoryDocument's own
+                        # docstring: "document_url IS LEFT EMPTY" when the
+                        # files live in extra_meta["attachment_links"] instead.
+                        # Requiring a non-empty href here silently dropped
+                        # every such row (Forms' one page with 10 attachments,
+                        # multi-file Public Consultation topics). Only a row
+                        # with NEITHER an href NOR any attachment is the real
+                        # "nothing to identify this by" case worth dropping.
+                        if not href and not attachment_links:
                             continue
-                        seen.add(href)
+                        # Dedup on (url, section_path), matching the identity
+                        # convention this whole system uses -- (document_url,
+                        # doc_path). URL alone silently dropped every register
+                        # part past the first: Financial Market Institutions'
+                        # two parts (Licensed Institutions, Credit Rating
+                        # Agencies) share the tab's one landing-page url and
+                        # differ only by section_path, so the second was read
+                        # as "already seen" and thrown away. When href itself
+                        # is empty (multi-attachment rows), fall back to the
+                        # attachment set so two different empty-url rows in
+                        # the same section still dedup correctly.
+                        dedup_key = (href or attachment_links, section_path)
+                        if dedup_key in seen:
+                            continue
+                        seen.add(dedup_key)
                         docs.append(self._to_document(
-                            d, href, d.get("section_path") or "", label))
+                            d, href, section_path, label))
                         if overall_cap and len(docs) >= overall_cap:
                             break
                     per_tab_counts[label] = len(docs) - before
@@ -212,10 +274,50 @@ class CMACrawler:
                 f"This is a crawler fault, not an empty regulator. "
                 f"First error: {warnings[0] if warnings else 'unknown'}")
 
+        # THE SAME FAULT THROUGH A QUIETER DOOR.
+        #
+        # The guard above counts tabs that RAISED. It does not catch the case
+        # where every handler returns empty without raising — and that is the
+        # normal way these handlers fail. `load()` retries three times and then
+        # returns False, and each handler responds by printing
+        # {"event": "error", "message": "tab page did not load"} and returning
+        # `records, []`. Nothing propagates.
+        #
+        # Measured 2026-08-12T00:43: nine tabs, zero exceptions, zero documents,
+        # verdict PASS. From the wrapper's side that was indistinguishable from a
+        # regulator that publishes nothing, and the completeness gate took the
+        # zero as a valid baseline — exactly the outcome the guard above exists
+        # to prevent.
+        #
+        # CMA publishes hundreds of documents across these nine tabs. Zero is
+        # never a true answer here, so it is reported as a fault. Reading the
+        # runner's own error lines is the way to see WHY (site unreachable,
+        # throttled, markup changed).
+        if self.tabs and not docs:
+            raise RuntimeError(
+                f"CMA returned 0 documents across all {len(self.tabs)} tab(s) "
+                f"with no exception raised. The handlers return empty rather "
+                f"than raising when a page fails to load, so this is a failed "
+                f"run, not an empty regulator. Check the runner's "
+                f'\'"event": "error"\' lines for the cause.')
+
+        # No tabs at all is the third way to reach a clean zero: every requested
+        # tab having an unimplemented shape leaves `self.tabs` empty, the loop
+        # never runs, and neither guard above applies.
+        if not self.tabs:
+            raise RuntimeError(
+                "no CMA tab had an implemented handler, so nothing was crawled. "
+                "This would otherwise report 0 documents and PASS.")
+
         logger.info("CMACrawler finished: %d document(s) across %d tab(s)%s",
                     len(docs), len(per_tab_counts),
                     f", {len(failed_tabs)} tab(s) FAILED" if failed_tabs else "")
-        return docs
+        # Every document leaves through here, so this is the one place a url
+        # can be normalised without a code path bypassing it. The fingerprint is
+        # stamped AFTER scrubbing, so it hashes the cleaned url and does not move
+        # when a tracking parameter does. All 1,979 stored CMA rows had no
+        # fingerprint before this — see crawler/fingerprint.py.
+        return stamp_content_hashes(_scrub_urls(d) for d in docs)
 
     # ------------------------------------------------------------------ #
 
@@ -231,6 +333,38 @@ class CMACrawler:
         if not trail:
             trail = [tab_label]
 
+        # Some shapes (Announcements, Capital Market Law articles, FAQs) have
+        # no downloadable file at all — the page's own text IS the document.
+        # extra_meta["content_text"] is the key orchestrator.py's Tier 1b
+        # reads before trying to download+extract anything, so this is what
+        # lets those rows skip a fetch that would otherwise 404 or re-pull the
+        # tab's landing page.
+        extra_meta = {
+            "crawl_source": tab_label,
+            "found_on": d.get("found_on", ""),
+            "doc_type": d.get("type", ""),
+        }
+        content_text = d.get("content_text")
+        if content_text:
+            extra_meta["content_text"] = content_text
+        # single_page tabs (SIFI, Forms, CPE): the page is the one document,
+        # and whatever PDFs it links are attachments, not separate documents —
+        # see crawl_single_page(). Matches the multi-attachment convention in
+        # models.RegulatoryDocument (extra_meta["attachment_links"]).
+        attachment_links = d.get("attachment_links")
+        if attachment_links:
+            extra_meta["attachment_links"] = attachment_links
+        if not href and attachment_links:
+            # document_url is deliberately empty here (see the docstring in
+            # models.RegulatoryDocument), so the default identity
+            # (document_url, doc_path) would collapse every multi-attachment
+            # row in one folder onto the same ("", doc_path) key. Declare the
+            # per-document override the model already expects.
+            # `title` included for the same reason it is in the default
+            # identity — see changesignal.DEFAULT_IDENTITY (lead, 2026-08-16).
+            extra_meta["identity_fields"] = [
+                "doc_path", "extra_meta.attachment_links", "title"]
+
         return RegulatoryDocument(
             regulator=self.regulator,
             source_system=self.source_system,
@@ -240,9 +374,6 @@ class CMACrawler:
             doc_path=trail,
             published_date=d.get("published_date"),
             reference_no=d.get("reference_no"),
-            extra_meta={
-                "crawl_source": tab_label,
-                "found_on": d.get("found_on", ""),
-                "doc_type": d.get("type", ""),
-            },
+            document_html=d.get("content_html") or None,
+            extra_meta=extra_meta,
         )

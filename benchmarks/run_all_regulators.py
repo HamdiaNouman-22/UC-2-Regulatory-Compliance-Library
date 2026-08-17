@@ -15,8 +15,14 @@ The copy is what keeps them apart. Re-running against the phase-1 workbook
 directly would append a second run's rows to the file you are about to import,
 so the thing you approve would no longer be the thing you read.
 
-SIMAH and Tadawul are excluded: Cloudflare-blocked and headless-blocked
-respectively. Neither is a code problem.
+SIMAH and Ministry of Commerce are excluded, both for source reasons rather than
+code ones: SIMAH is a Cloudflare 1020-class block, and MC's listing page is a
+launcher whose entries all redirect to regulations.mc.gov.sa, which does not
+resolve. Each records why in its own config/sources/*.yml `disabled:` key.
+
+Tadawul IS included as of 2026-08-12, but it needs a visible browser (Akamai
+rejects headless), so an unattended headless run needs Xvfb or it will be the one
+target that harvests nothing.
 
     python benchmarks/run_all_regulators.py                # both phases
     python benchmarks/run_all_regulators.py --phase crawl  # just the crawl
@@ -41,14 +47,19 @@ MON_DIR = RUNS / "monitoring"
 
 # One route per regulator.
 #
-# SAMA IS DELIBERATELY ABSENT. The lead is rebuilding that crawler from scratch,
-# so the existing SAMACombinedCrawler's output is not wanted. It also mattered
-# operationally: SAMA is the largest source by an order of magnitude, the API
-# serializes runs behind one lock, and phase 2 cannot begin until every phase-1
-# target is done — so leaving it in meant a five-hour run standing between the
-# crawl and the monitoring pass, and monitoring never happening overnight.
+# SAMA IS BACK IN, as of 2026-08-12. It was excluded while the rebuild was
+# assumed to come first; the decision since is to take the INITIAL LOAD from the
+# existing SAMACombinedCrawler and use the revision feed for updates afterwards,
+# so the existing crawler's output IS wanted.
 #
-# To put it back: add ("SAMA", "source", "sama").
+# It is LAST on purpose, and the operational reason it was dropped still holds:
+# SAMA is the largest source by an order of magnitude, the API serialises runs
+# behind one lock, and phase 2 cannot start until every phase-1 target is done.
+# Anywhere but the end, a five-hour SAMA run stands between the crawl and the
+# monitoring pass and monitoring never happens overnight.
+#
+# Use `--only SAMA` to run it alone, or `--only AML,MISA,...` to run the rest
+# without waiting for it.
 TARGETS = [
     ("AML",        "form",   "aml.rules"),
     ("MISA",       "form",   "misa.laws"),
@@ -57,10 +68,19 @@ TARGETS = [
     ("MHRSD",      "form",   "mhrsd.regs"),
     ("GOSI-SI",    "form",   "gosi.social_insurance"),
     ("GOSI-Saned", "form",   "gosi.saned"),
-    ("MC",         "source", "mc"),
-    ("ZATCA",      "source", "zatca"),
+    # ZATCA moved from `mode: source` to a FORM 2026-08-13. The generic engine
+    # was pointed at a landing page of three cards and collected 31 assorted
+    # files with no hierarchy, never opening a detail page. Verified 34/34/34.
+    ("ZATCA",      "form",   "zatca.taxes"),
     ("CMA",        "source", "cma"),
     ("MOH",        "source", "moh"),
+    # Tadawul/Saudi Exchange: verified 19/19/19 PASS and approved 2026-08-12. It
+    # declares requires_headed: true because Akamai fingerprints headless
+    # Chromium (403 headless / 200 headful, curl included), so this target OPENS A
+    # VISIBLE BROWSER — it cannot run in an unattended headless sweep without a
+    # virtual display (Xvfb).
+    ("Tadawul",    "form",   "tadawul.rules"),
+    ("SAMA",       "source", "sama"),      # last — see the note above
 ]
 
 # The API serializes runs behind a single threading.Lock, so a request spends
@@ -112,6 +132,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--phase", choices=["crawl", "monitor", "both"], default="both")
     ap.add_argument("--only", default="", help="comma-separated labels")
+    ap.add_argument("--append", action="store_true",
+                    help="compare against the existing crawl workbook instead of "
+                         "starting fresh (change-detection testing)")
     a = ap.parse_args()
 
     targets = TARGETS
@@ -147,6 +170,32 @@ def main():
         print("=" * 78)
         for label, kind, name in targets:
             wb = f"crawl/{label}.xlsx"
+            # START FRESH. Phase 1 passes `workbook=`, which loads the existing
+            # file and compares against it — right for phase 2, wrong here. A
+            # corrective re-crawl must REPLACE the rows: otherwise every document
+            # classifies `unchanged`, nothing is rewritten, and the workbook you
+            # approve still holds the rows you re-crawled to fix. Measured
+            # 2026-08-12: AML/MISA/SDAIA/MOE all came back unchanged=ALL after
+            # their fixes landed, keeping the old doc_path and status.
+            #
+            # The previous file is kept, just moved out of the way.
+            existing = CRAWL_DIR / f"{label}.xlsx"
+            if existing.exists() and not a.append:
+                arc = CRAWL_DIR / "_superseded"
+                arc.mkdir(exist_ok=True)
+                aside = arc / f"{label}.superseded-{time.strftime('%Y%m%d-%H%M%S')}.xlsx"
+                try:
+                    existing.rename(aside)
+                    print(f"  {label:<12} previous workbook -> _superseded/{aside.name}")
+                except PermissionError as e:
+                    # Skip this regulator rather than append to a workbook we
+                    # meant to replace — see run_source_standalone.py.
+                    print(f"  {label:<12} SKIPPED — {existing.name} is locked "
+                          f"(close it in Excel): {e}")
+                    report["crawl"].append({"label": label, "ok": False,
+                                            "error": "workbook locked"})
+                    save()
+                    continue
             t0 = time.time()
             try:
                 d = trigger(kind, name, wb)

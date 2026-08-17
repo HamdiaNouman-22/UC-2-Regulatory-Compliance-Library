@@ -10,7 +10,7 @@
 #   timeout   seconds per probe. A probe measured 21s against one regulator.
 
 defaults:
-  identity: [document_url, doc_path]
+  identity: [document_url, doc_path, title]
   confirm: false
   workers: 4
   timeout: 20
@@ -22,6 +22,23 @@ defaults:
 # `until` is when the block may be REVIEWED, not when it expires. Nothing here
 # unblocks itself on a date -- a person deletes the entry.
 skip_hosts:
+  - host: saudiexchange.sa
+    until: "2026-08-22"
+    why: >-
+      Akamai 403 "Access Denied" to everything, and a headless Chromium is
+      refused exactly as a plain GET is -- so it is the IP being judged, not the
+      User-Agent, and there is nothing to solve by looking more like a browser.
+      MEASURED 2026-08-15: DNS resolves, TCP 443 opens, homepage 403 (374
+      bytes), every stored document 403, and the crawler's own seed page 403.
+      It is NEW: that same seed page crawled cleanly at 18:27 the same day,
+      which is where the 19 stored rows came from. The block appeared within two
+      hours, after a crawl plus repeated probes from one address -- the same
+      pattern the simah.com note records as "triggered by repeated iteration,
+      not volume". Every further attempt risks deepening it, so the sweep stops
+      touching the host entirely. The 19 rows already in the library are
+      unaffected. Retest by hand after the date above; do not let a scheduled
+      run be the thing that retries.
+
   - host: simah.com
     until: "2026-09-04"
     why: >-
@@ -31,16 +48,126 @@ skip_hosts:
       the next scheduled capture.
 
 # source_system is NOT unique across regulators: AML and SIMAH both publish under
-# "Rules and Regulations", SDAIA and MISA both under "Laws and Regulations". Both
-# halves of the pair are required to name a source.
+# "Rules and Regulations", and SDAIA and GOSI both under "Laws and Regulations".
+# Both halves of the pair are required to name a source.
+#
+# (This used to cite MISA as the second "Laws and Regulations" source. MISA moved
+# to "Laws" on 2026-08-13 to match the site's own tab, and it has no entry here —
+# so nothing needed reconciling. Recorded because source_system is an IDENTITY
+# key: change it in a form's library: block and any entry here must move with it,
+# or the sweep and the ingest path keep separate memories of the same documents.
+# MHRSD hit exactly that.)
 sources:
-  - regulator: "SDAIA"
+  # RECONCILED 2026-08-14 with the form, which now stores the full name and the
+  # acronym. Both halves of the pair name the source.
+  - regulator: "Saudi Data and AI Authority (SDAIA)"
     source_system: "Laws and Regulations"
     # 36/36 documents returned an ETag, counters 1-4 across 18 distinct
     # timestamps: a real per-document edit history, so the counter is proof.
     confirm: false
 
-  - regulator: "Anti-Money Laundering Permanent Committee"
+  # SAMA READS ITS OWN REVISION PAGE, not 6,101 probes.
+  #
+  #   https://rulebook.sama.gov.sa/en/view-revision-updates
+  #     ?f_date=on&changed_1[min]=..&changed_1[max]=..&items_per_page=40
+  #
+  # MEASURED 2026-08-15 over 2026-01-01..2026-08-15:
+  #   22 entries for seven and a half months  -- SAMA barely changes
+  #   18 matched documents we already hold
+  #    4 matched nothing: DISCOVERIES, which a stored-inventory probe cannot
+  #      produce because it only re-reads rows we already have
+  #    0 unresolved node urls
+  #
+  # The feed speaks slugs and the library stores /en/node/<id>; the adapter opens
+  # each changed document and reads its canonical node url, which is the step
+  # whose absence invalidated the first test of this feed and left it unused.
+  #
+  # `items_per_page` CAPS AT 40 and a larger value returns an EMPTY page rather
+  # than an error, so asking for more reads as "nothing changed".
+  #
+  # IT CANNOT SEE DELETIONS -- a withdrawn document simply stops being listed.
+  # Run `--signal stored-inventory` against SAMA occasionally (monthly, not
+  # daily) purely to catch removals; that is the only reason left to pay for it.
+  - regulator: "Saudi Arabian Monetary Authority (SAMA)"
+    source_system: "SAMA RULEBOOK"
+    signal: sama-feed
+    feed_days: 30
+    timeout: 45
+    confirm: false
+
+  # MISA'S DOCUMENTS LIVE ON SIX HOSTS, and its `unknown` count is the OTHER
+  # regulators' sites, not a fault of MISA's.
+  #
+  # MEASURED 2026-08-15 over the 89 stored rows:
+  #   misa.gov.sa      64   probe 200, healthy
+  #   laws.boe.gov.sa  16   TCP 443 TIMES OUT (3/3 attempts; DNS resolves to
+  #                         66.9.136.215). Below HTTP, so a browser cannot help.
+  #   mc.gov.sa         5   serves a browser, drops plain HTTP clients — see the
+  #                         Ministry of Commerce entry
+  #   laws.moj.gov.sa   2
+  #   zatca.gov.sa      1
+  #   pr.gov.sa         1
+  #
+  # 16 + 5 = 21, which is EXACTLY the `unknown` count the sweep reported. So the
+  # number is explained and is not degradation: MISA publishes cross-references
+  # to laws held by the Bureau of Experts and other regulators, and those hosts
+  # are what cannot be reached. Nothing here can fix it, and a future sweep
+  # reporting ~21 unknown for MISA is the expected result, not a regression.
+  - regulator: "Ministry of Investment (MISA)"
+    source_system: "Laws"
+    confirm: false
+
+  # MINISTRY OF COMMERCE CANNOT BE PROBED AT ALL. Its monitoring is the CRAWL.
+  #
+  # MEASURED 2026-08-15:
+  #   DNS resolves, TCP 443 opens
+  #   requests.get / .head           -> connection reset, every time, every url
+  #   headless Chromium, same urls   -> 200, listing 144,340 b, document 179,889 b
+  #
+  # So the host serves a browser and drops a plain HTTP client. The sweep probes
+  # with `requests`, which is why all 26 of MC's probeable urls report `unknown`
+  # — 3 on the first sweep, 26 on the second, and the number only looked like a
+  # trend. (The other 16 of its 42 rows are the `Attachments` entries, which
+  # carry no document_url by design and cannot be probed by anything.)
+  #
+  # There is no cheap signal here. MC's monitoring is to RE-RUN ITS CRAWLER,
+  # which drives a browser and works, and let the orchestrator classify what it
+  # returns — the same new/modified/unchanged decision, paid for at crawl price.
+  # No entry can make a probe work, so this one exists to record that and stop
+  # the next person measuring it again.
+  - regulator: "Ministry of Commerce"
+    source_system: "Regulations and Laws"
+    # No probe can work here at all — the host refuses plain HTTP clients. The
+    # crawl IS the signal, and monitor_all reads this key rather than sweeping a
+    # source that can only ever answer `unknown`.
+    signal: crawl
+    confirm: false
+
+  # ZATCA's .aspx PAGES DATE THEMSELVES TO NOW; its PDFs are honest.
+  #
+  # MEASURED 2026-08-15, each url fetched twice a second apart:
+  #   .../Taxes/Documents/Board03en.pdf     SAME     (a real, stable token)
+  #   .../Taxes/Pages/Bonded-Zones.aspx     DIFFER   Last-Modified 17:07:17 -> :20
+  #   .../Taxes/Pages/Business.aspx         DIFFER   17:07:22 -> 17:07:46
+  #   .../Taxes/Pages/ExciseTax2.aspx       DIFFER   17:07:49 -> 17:08:14
+  #
+  # Two sweeps minutes apart both reported the SAME 12 documents modified with
+  # nothing having changed — they are the SharePoint pages, and their
+  # Last-Modified is the moment of the request. Same shape as CMA, same answer:
+  # a content hash decides, taken over the VISIBLE TEXT so the per-request
+  # tokens in the markup do not move it (see StoredInventorySweep.confirm).
+  #
+  # The 34 rows are a mix, so this cannot be settled by url: the PDFs would pass
+  # on their token alone, and confirming them costs a fetch we would otherwise
+  # skip. That is the price of one setting for the source.
+  - regulator: "ZATCA"
+    source_system: "Rules and Regulations"
+    confirm: true
+
+  # RECONCILED 2026-08-14: the form now stores the full name with the acronym in
+  # brackets, so this pair moves with it or the sweep and the ingest path keep
+  # separate memories of the same 11 documents.
+  - regulator: "Anti-Money Laundering Permanent Committee (AML)"
     source_system: "Rules and Regulations"
     # 8/8 documents at version 5, every timestamp inside a three-second window:
     # one bulk re-upload of the whole library, not eight edits. The next one
@@ -63,20 +190,49 @@ sources:
   # The two GOSI forms declare no regulator or source_system yet. When they do,
   # reconcile the name they store with these two, or the sweep and the ingest
   # path will keep separate memories of the same page.
-  - regulator: "GOSI"
-    source_system: "SocialInsurance"
-    # 6 instruments, 45 sections, 6 PDFs on cmsgosi.gosi.gov.sa whose ETag
-    # counters read 22, 12, 3, 3, 3, 3 -- a real per-document history, unlike the
-    # single page date all six instruments share.
+  # RECONCILED 2026-08-12 with the form's library: block, which now stores the
+  # regulator's full name and "Laws and Regulations". If these drift apart the
+  # sweep and the ingest path keep separate memories of the same documents.
+  # ONE entry covers BOTH GOSI forms now, and that is a consequence of the
+  # doc_path the library asked for:
+  #
+  #     General Organization for Social Insurance (GOSI)
+  #       | Laws and Regulations | Social Insurance Law or Saned | <title>
+  #
+  # The branch moved to the THIRD crumb, so `source_system` is "Laws and
+  # Regulations" for both and the (regulator, source_system) pair no longer
+  # separates them. Two entries with the same pair would be ambiguous, so they
+  # are merged. Identity is unaffected — that is (document_url, doc_path), and
+  # doc_path still differs. What a sweep loses is the ability to probe one branch
+  # without the other; it now covers all 8 instruments together, which for two
+  # pages on one host costs nothing.
+  #
+  # Social Insurance: 6 instruments, 45 sections, 6 PDFs on cmsgosi.gosi.gov.sa
+  # whose ETag counters read 22, 12, 3, 3, 3, 3 -- a real per-document history,
+  # unlike the single page date all six instruments share.
+  # Saned: 2 instruments, 51 sections, and NO document links at all — the page
+  # text is the whole of it, so there the page date is the only signal.
+  - regulator: "General Organization for Social Insurance (GOSI)"
+    source_system: "Laws and Regulations"
     workers: 4
     timeout: 20
 
-  # MHRSD is read by --signal sitemap. The form declares no regulator or
-  # source_system either, so the source is named for the form; reconcile it with
-  # whatever a library: block later stores, or the sweep and the ingest path
-  # will keep separate memories of the same 63 documents.
-  - regulator: "MHRSD"
-    source_system: "mhrsd.regs"
+  # MHRSD is read by --signal sitemap.
+  #
+  # RECONCILED 2026-08-12. This used to say `source_system: "mhrsd.regs"` — the
+  # FORM's name — with a note to fix it once the form declared a real one. The
+  # form's library: block now stores "Regulations and procedural guidelines", so
+  # that is what the sweep must look up, or the two would keep separate memories
+  # of the same 63 documents and every sweep would report them all as unknown.
+  #
+  # The form is still FILED as mhrsd.regs; only the stored source_system moved.
+  # RECONCILED AGAIN 2026-08-13: the form now stores the full ministry name
+  # rather than the acronym, so this pair moves with it. Second time this
+  # source has needed reconciling — first the source_system, now the
+  # regulator. Both halves of the pair name the source.
+  # RECONCILED AGAIN 2026-08-14: the acronym was added to the form.
+  - regulator: "Ministry of Human Resource and Social Development (MHRSD)"
+    source_system: "Regulations and procedural guidelines"
     # Measured 2026-08-10 on sitemap.xml?page=7: 1000 urls, 62 of the 63 we
     # track. Over those 62 -- 37 distinct lastmod, and 26 still sharing
     # 2025-05-14, one CMS operation rather than 26 amendments. So the date
@@ -94,16 +250,96 @@ sources:
     # The confirm hash stops here.
     cut_marker: "block-views-block-regulations-and-procedures-related"
 
-  - regulator: "GOSI"
-    source_system: "Saned"
-    # 2 instruments, 51 sections, and no document links at all: the page text is
-    # the whole of it, so here the page date is the only signal there is.
-    workers: 4
-    timeout: 20
+  # RECONCILED 2026-08-12: source_system read off config/sources/cma.yml
+  # (init_kwargs.source_system = "CMA-RULES", set in crawler/cma_crawler_wrapper.py).
+  # Runs through site_runners/cma_laws.py -- ten tabs, six page shapes, one
+  # RegulatoryDocument.source_system for all of them, so one entry covers the
+  # whole regulator the same way GOSI's one entry covers both its forms.
+  #
+  # confirm: false — CMA's counters (2-5 across four distinct months, measured
+  # pre-2026-08-12) read as a real per-document edit history, not a bulk
+  # re-upload; identity stays the (document_url, doc_path) default, which is
+  # 100% present and unique across every shape here: PDF/DOCX links, per-Article
+  # chapter urls, per-Q&A FAQ fragments, and per-announcement detail pages.
+  # RECONCILED 2026-08-15: the stored regulator became the full name with the
+  # acronym when CMA was loaded into uc2-db. A sweep looks the source up by
+  # (regulator, source_system), so while this said "CMA" it matched nothing and
+  # every one of the 1,979 stored documents was invisible to monitoring.
+  - regulator: "Capital Market Authority (CMA)"
+    source_system: "CMA-RULES"
+    # CMA'S TOKEN IS NOISE, AND A CONTENT HASH HAS TO DECIDE.
+    #
+    # MEASURED 2026-08-15, the same article fetched twice one second apart:
+    #   Last-Modified   16:58:55 -> 16:58:58   (it is the CURRENT TIME)
+    #   Content-Length  51976    -> 51960      (wobbles by a few bytes)
+    #   raw body hash   differs                (per-request digests)
+    #   VISIBLE TEXT    identical, 4,299 chars both times
+    #
+    # A second sweep reported 1,134 of 1,979 documents modified with nothing
+    # having changed — 57% of the source, and every one of them would have
+    # pulled a pointless re-crawl. `confirm` fetches and hashes before believing
+    # the token, and `StoredInventorySweep.confirm` hashes an HTML page on its
+    # visible text rather than its bytes, which is what makes the hash stable
+    # here at all. Raw bytes would have confirmed the phantom change.
+    #
+    # BUT CONFIRMING CMA DOES NOT SCALE, and that is the real conclusion.
+    #
+    # MEASURED 2026-08-15:
+    #   one confirm          ~9s, a full 125 KB page fetch
+    #   --limit 60           60 confirmed, 0 unknown -- works
+    #   all 1,979            1,136 UNKNOWN in 361s -- the confirms never
+    #                        completed; the host throttles under sustained load
+    #
+    # 1,136 confirms at 9s is about an hour. The sweep took six minutes, so most
+    # were refused. The phantom `modified` became `unknown`, which is safer -- it
+    # pulls no re-crawl -- but it is not knowledge.
+    #
+    # So for CMA a probe that can be believed costs a FULL PAGE FETCH PER
+    # DOCUMENT, which is what a crawl costs. The probe buys nothing. Treat CMA
+    # like Ministry of Commerce: monitor it by RE-CRAWLING and letting the
+    # orchestrator classify, and use this sweep only against a slice
+    # (`--limit`), never the whole source.
+    #
+    # `signal: crawl` says exactly that, and monitor_all reads it: no probe is
+    # attempted, the crawler runs, and the orchestrator decides what changed.
+    # Left `confirm: true` because a DELIBERATE `--signal stored-inventory
+    # --limit N` against a slice is still worth doing, and it needs the hash.
+    # AND THE CRAWL DOES NOT FIT IN A MONITORING WINDOW EITHER.
+    #
+    # MEASURED 2026-08-16: the crawl-as-signal run hit the 5400s (90 minute)
+    # timeout with 1,979 documents and produced nothing. CMA is the most
+    # expensive source in the library on every axis — its token is noise, a
+    # confirm costs a full page fetch and the host throttles before finishing,
+    # and a full crawl exceeds an hour and a half.
+    #
+    # So CMA is not a source that can be monitored on a daily loop at all. It
+    # wants its own long, scheduled crawl with a raised --crawl-timeout, run
+    # nightly or weekly, not a slot in a run that walks every regulator.
+    #
+    # MEASURED 2026-08-16, a full crawl through the production wrapper:
+    #   10,121s -- 2 HOURS 49 MINUTES. The 5400s default is not close; a
+    #   scheduled CMA job needs --crawl-timeout 14400 or it will be killed and
+    #   (before the restore-on-exit fix) take its workbook with it.
+    #
+    # AND IT CAME BACK SHORT, which is the more important finding:
+    #
+    #   section                              stored   crawled
+    #   Announcements                          1053       300   <-- 71% missing
+    #   every other section                     926       926   exact
+    #
+    # Announcements is 3,299 items over 550 pages and CMA throttles hard against
+    # it; site_runners/cma_laws.py says in as many words that the full backfill
+    # must run through the RESUMABLE CLI (checkpoints every 100 records), not the
+    # production wrapper's single monolithic call. The wrapper stopped at 50
+    # pages of six and reported success.
+    #
+    # A PARTIAL CRAWL IS DANGEROUS HERE, not merely incomplete: 753 stored
+    # announcements absent from a crawl are ruled `disappeared` and become
+    # withdrawal proposals. So a scheduled CMA job must either exclude the
+    # announcements tab or run it through the resumable CLI — never a plain
+    # wrapper call whose short return looks like a clean run.
+    signal: crawl
+    confirm: true
 
 # Not listed, deliberately:
-#   CMA     its counters (2-5 across four distinct months) earn confirm: false,
-#           but it runs through site_runners/cma_laws.py and its stored
-#           source_system is unverified from here. It takes `defaults` until
-#           someone reads the real value off the library.
 #   MOH x2  same shape as MOE; both forms are still approved=false.

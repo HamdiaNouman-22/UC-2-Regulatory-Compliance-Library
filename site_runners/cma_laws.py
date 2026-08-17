@@ -40,10 +40,12 @@ which produced it.
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
 import pathlib
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -115,6 +117,34 @@ TABS = {
         "url": f"{BASE}/en/MediaCenter/NEWS/Pages/default.aspx",
         "section": "Media Center", "label": "Announcements",
         "shape": "cards_paged", "detail": True,
+        # Most announcements are plain-text press releases with no attached
+        # PDF, so keying `documents` on attachments alone (the default for
+        # this shape) dropped ~92% of them. Here the article page IS the
+        # regulatory content, so crawl_paged() also emits the page itself as
+        # a document. See the note beside its use in crawl_paged().
+        "text_as_document": True,
+        # Full history is 3,299 items over 550 pages -- 1.5+ hours and CMA
+        # throttles hard against it. Ran the 12-month window (365) first,
+        # 2026-08-12/13. FULL BACKFILL requested 2026-08-13: since_days
+        # removed below so the cutoff never fires and the whole 3,299 gets
+        # walked in one pass, via the resumable CLI (checkpoints every 100
+        # records) rather than the production wrapper, since a run this long
+        # losing all progress to one crash or one bad throttle is a real risk
+        # the wrapper's single monolithic call does not protect against.
+        # MONITORING READS A WINDOW, NOT THE HISTORY.
+        #
+        # None means "walk all 3,299 over 550 pages" — right for the one-off
+        # backfill, wrong for a scheduled run: measured 2026-08-16 that walk took
+        # 2h49m and STILL returned 300 of the 1,053 announcements we hold, which
+        # would rule the other 753 `disappeared` and raise them as withdrawal
+        # proposals.
+        #
+        # Announcements are ordered NEWEST FIRST, so monitoring only needs to
+        # reach the newest one already stored — a page or two. CMA_SINCE_DAYS
+        # sets that window (jobs/monitor_jobs.monitor_cma passes it); leave it
+        # unset for the full backfill.
+        "since_days": int(os.environ["CMA_SINCE_DAYS"])
+                      if os.environ.get("CMA_SINCE_DAYS") else None,
     },
 
     # ---------------- Capital Market ----------------
@@ -219,6 +249,34 @@ def chapter_folder(link_text: str, url: str) -> str:
     is one more thing to maintain and to disagree with the source about.
     """
     return re.sub(r"\s+", " ", link_text or "").strip()
+
+
+_REF_NO_RE = re.compile(r"/([^/]+)\.aspx$", re.I)
+
+
+def _reference_no_from_url(url: str) -> str:
+    """CMA's detail pages are named after the reference itself,
+    e.g. '.../CMA_N_4088.aspx' -> 'CMA_N_4088'. Empty when the url is not
+    that shape (a chapter/article page, a bare tab url as fallback, etc.)."""
+    m = _REF_NO_RE.search(url or "")
+    return m.group(1) if m else ""
+
+
+def _one_or_many(file_hrefs, fallback_url=""):
+    """document_url / attachment_links for one item's attached files, per the
+    convention in models.RegulatoryDocument: one file names the document
+    directly; more than one leaves document_url empty and lists them in
+    extra_meta["attachment_links"] instead, because naming a multi-file item
+    by whichever file happened to be listed first makes the item's identity
+    depend on the site's ordering. `fallback_url` is used only when there is
+    no file at all -- the page/card's own url, so the row still identifies.
+    """
+    hrefs = list(dict.fromkeys(h for h in file_hrefs if h))    # de-dup, order kept
+    if len(hrefs) == 1:
+        return hrefs[0], ""
+    if len(hrefs) > 1:
+        return "", " | ".join(hrefs)
+    return fallback_url, ""
 
 
 # ---------------------------------------------------------------------------
@@ -529,11 +587,16 @@ def load(page, url, wait_ms=1500, tries=3):
 
 
 def crawl_single_page(page, tab, trail_root):
-    """A tab that is ONE page: some prose and usually an attached PDF.
+    """A tab that is ONE page: some prose and usually attached PDFs.
 
-    SIFI, Forms and CPE. The page itself is the document, and any PDF on it is a
-    document in its own right — Forms in particular is nothing but prose plus a
-    pile of attachments.
+    SIFI, Forms and CPE. THE PAGE ITSELF IS THE DOCUMENT — one row, identified
+    by the tab's own url, carrying the page's full text/html. Forms in
+    particular is nothing but prose plus a pile of attachments (10 of them);
+    those attachments are not separate documents in their own right, they are
+    what the one page links to, so they go in extra_meta["attachment_links"]
+    (pipe-joined) on that single row rather than exploding into 10 rows whose
+    title is just whatever text the link happened to use ("link", "Click
+    Here" ...) instead of the actual page title.
     """
     records, documents = [], {}
     if not load(page, tab["url"]):
@@ -565,12 +628,15 @@ def crawl_single_page(page, tab, trail_root):
         # Site stamp, not a document date — see PAGE_STAMP_FIELD.
         PAGE_STAMP_FIELD: d["last_modified"],
     })
-    for x in d["docs"]:
-        documents[(x["href"], " > ".join(trail))] = {
-            "title": x["title"] or d["title"] or tab["label"],
-            "doc_url": x["href"], "type": "PDF",
-            "found_on": tab["url"], "section_path": " > ".join(trail),
-        }
+    title = (d["title"] or tab["label"]).strip()
+    doc_url, attachment_links = _one_or_many(
+        [x["href"] for x in d["docs"]], fallback_url=tab["url"])
+    documents[(doc_url or tab["url"], " > ".join(trail))] = {
+        "title": title, "doc_url": doc_url, "type": tab["label"],
+        "found_on": tab["url"], "section_path": " > ".join(trail),
+        "content_text": d["text"], "content_html": d["html"],
+        "attachment_links": attachment_links,
+    }
     print(json.dumps({"event": "single_page", "tab": tab["label"],
                       "chars": len(d["text"]), "pdfs": len(d["docs"]),
                       "last_modified": d["last_modified"]}, ensure_ascii=False),
@@ -896,7 +962,14 @@ def crawl_regs(page, tab, trail_root, limit=None):
             documents[(f["href"], " > ".join(trail))] = {
                 "title": title, "doc_url": f["href"], "type": "PDF",
                 "found_on": url, "section_path": " > ".join(trail),
-                "published_date": published, PAGE_STAMP_FIELD: last_mod}
+                "published_date": published, PAGE_STAMP_FIELD: last_mod,
+                # The Details page (opened above into `text`/`html`) is what
+                # carries the regulation's actual body -- the card alone is
+                # just a title and a date. Without this, every one of these
+                # rows had a PDF link and NOTHING ELSE for the orchestrator to
+                # analyse from, despite the detail page having already been
+                # fetched and thrown away.
+                "content_text": text, "content_html": html}
         if i % 10 == 0:
             print(json.dumps({"event": "progress", "tab": tab["label"],
                               "done": i, "of": len(cards)}), flush=True)
@@ -989,11 +1062,23 @@ def crawl_consult(page, tab, trail_root, limit=None):
             trail + [title], title, url, text=text, html=html, files=files,
             parent=CONSULT_INNER, row_text=r["title"], page_title=detail_title,
             expiry_date=expiry, **{PAGE_STAMP_FIELD: last_mod}))
-        for f in files:
-            documents[(f["href"], " > ".join(trail))] = {
-                "title": title, "doc_url": f["href"], "type": "PDF",
-                "found_on": url, "section_path": " > ".join(trail),
-                "expiry_date": expiry}
+        # One document per CONSULTATION, not per file. Keyed on trail+[title]
+        # (not just trail): two consultations under the same Active/Expired
+        # label can share a file -- CMA_N_2739 announces both the Investment
+        # Funds and the Real Estate amendments -- and keying on the shared
+        # href with no title in the path let the second overwrite the first
+        # in this dict outright, which is how a real consultation went
+        # missing from the workbook entirely rather than merely losing an
+        # attachment. Multi-attachment convention: models.RegulatoryDocument.
+        full_trail = trail + [title]
+        doc_url, attachment_links = _one_or_many(
+            [f["href"] for f in files], fallback_url=url)
+        documents[(doc_url or url, " > ".join(full_trail))] = {
+            "title": title, "doc_url": doc_url,
+            "type": "PDF" if doc_url or attachment_links else "Consultation",
+            "found_on": url, "section_path": " > ".join(full_trail),
+            "expiry_date": expiry, "content_text": text, "content_html": html,
+            "attachment_links": attachment_links}
         if i % 10 == 0:
             print(json.dumps({"event": "progress", "tab": tab["label"],
                               "done": i, "of": len(todo)}), flush=True)
@@ -1056,13 +1141,23 @@ def crawl_faqs(page, tab, trail_root, limit=None):
 
     if limit:
         items = items[:limit]
+    documents = {}
     for x in items:
+        url = f"{tab['url']}#flush-collapse{x['id']}"
+        section_path = " > ".join(trail_root + [x["q"]])
         records.append(mk_record(
-            trail_root + [x["q"]], x["q"],
-            f"{tab['url']}#flush-collapse{x['id']}",
+            trail_root + [x["q"]], x["q"], url,
             text=x["a"], html=x["html"], parent=tab["url"], row_text=x["q"],
             cma_id=x["id"]))
-    return records, []
+        # One document per Q&A pair — each is an independent statement of the
+        # regulator's position (see the docstring above), so it gets its own
+        # row rather than being folded into a 418-question blob.
+        documents[(url, section_path)] = {
+            "title": x["q"], "doc_url": url, "type": "FAQ",
+            "found_on": tab["url"], "section_path": section_path,
+            "content_text": x["a"], "content_html": x["html"],
+        }
+    return records, list(documents.values())
 
 
 def check_faq_filter(page, n_items) -> bool:
@@ -1421,7 +1516,7 @@ def wait_for_cards(page, tries=10, gap_ms=900):
     return last
 
 
-def walk_pages(page, cap=0, read=JS_CARDS):
+def walk_pages(page, cap=0, read=JS_CARDS, cutoff_date=None):
     """Collect a whole list by following the .nxtbtn CURSOR, chunk by chunk.
 
     Each load brings 30-60 rows and a fresh next-URL. This replaced clicking the
@@ -1434,16 +1529,44 @@ def walk_pages(page, cap=0, read=JS_CARDS):
     Following the cursor makes every chunk an independent page load: nothing
     accumulates, nothing races, and a missed hop cannot masquerade as the end of
     the list. Falls back to the pager click for lists with no .nxtbtn.
+
+    `cutoff_date`, when given, stops the walk once the list has clearly moved
+    past it — the list is newest-first, so nothing further out can be newer.
+
+    A SINGLE chunk is not trusted as that evidence. The DOM window quirk
+    described below means a chunk can bring as few as one or two genuinely
+    fresh rows, sitting right at the edge of the window rather than at the
+    front of the list — and one stray old date among two, mistaken for "this
+    chunk's newest row", stopped a 365-day request at 6 weeks in on its first
+    measurement (32 documents instead of several hundred). Fixed by requiring
+    BOTH a real sample (>=5 dated rows) AND that sample missing the cutoff
+    TWICE IN A ROW before believing it. A tab with no dates on its cards at
+    all never accumulates that evidence and never stops early.
     """
-    seen, rows, chunks, barren = set(), [], 0, 0
+    seen, rows, chunks, barren, stale_streak = set(), [], 0, 0, 0
     while True:
         chunks += 1
         fresh = 0
+        fresh_dates = []
         for c in page.evaluate(read):
             key = c["data"].get("id") or c["title"] or c["text"][:80]
             if key in seen:
                 continue
             seen.add(key); rows.append(c); fresh += 1
+            d = _card_date(c.get("text", ""))
+            if d:
+                fresh_dates.append(d)
+        if cutoff_date:
+            if len(fresh_dates) >= 5 and max(fresh_dates) < cutoff_date:
+                stale_streak += 1
+            elif fresh_dates:
+                # Any real sample with something newer than cutoff resets it —
+                # a genuinely-past-cutoff list does not un-age.
+                stale_streak = 0
+            if stale_streak >= 2:
+                print(json.dumps({"event": "walk_stop", "reason": "stale_streak",
+                                  "chunks": chunks, "rows": len(rows)}), flush=True)
+                break
         # BARREN CLICKS ARE NORMAL HERE, and getting this number wrong is what
         # capped Prospectuses at 60 rows.
         #
@@ -1456,16 +1579,26 @@ def walk_pages(page, cap=0, read=JS_CARDS):
         # well above the window size.
         barren = barren + 1 if not fresh else 0
         if (cap and chunks >= cap) or barren >= 10:
+            print(json.dumps({"event": "walk_stop",
+                              "reason": "cap" if (cap and chunks >= cap) else "barren",
+                              "chunks": chunks, "rows": len(rows), "barren": barren}),
+                  flush=True)
             break
         st = page.evaluate(JS_PAGER_STATE)
         if st and st["nextDisabled"]:
+            print(json.dumps({"event": "walk_stop", "reason": "nextDisabled",
+                              "chunks": chunks, "rows": len(rows), "pager_state": st}),
+                  flush=True)
             break
         if PACE["page_ms"]:
             page.wait_for_timeout(PACE["page_ms"])
         before = page.evaluate(JS_PAGE_SIG)
         try:
             page.click(NEXT_SEL, timeout=10000)
-        except Exception:
+        except Exception as e:
+            print(json.dumps({"event": "walk_stop", "reason": "click_exception",
+                              "chunks": chunks, "rows": len(rows),
+                              "message": str(e)[:200]}), flush=True)
             break
         # WAIT FOR THE CONTENT TO CHANGE, not for a fixed delay.
         #
@@ -1476,10 +1609,17 @@ def walk_pages(page, cap=0, read=JS_CARDS):
         # one run and the full 266 on another, from identical code. Polling for
         # the change makes the walk depend on the site's response, not on a
         # guess about it.
+        changed = False
         for _ in range(16):
             page.wait_for_timeout(500)
             if page.evaluate(JS_PAGE_SIG) != before:
+                changed = True
                 break
+        if not changed:
+            print(json.dumps({"event": "click_no_change", "chunks": chunks,
+                              "why": "content did not change within 8s of the click "
+                                     "-- next chunk read is likely the same page again"}),
+                  flush=True)
     return rows, chunks
 
 
@@ -1588,15 +1728,34 @@ def crawl_paged(page, tab, trail_root, max_pages=None, limit=None):
                       "wants_detail": bool(tab.get("detail"))},
                      ensure_ascii=False), flush=True)
 
+    # since_days: a deliberate, PARTIAL walk of a newest-first list — see
+    # TABS["announcements"]. Not a completeness problem, so it must not trip
+    # the coverage_gap check below the way a truncated crawl should.
+    cutoff = (datetime.now() - timedelta(days=tab["since_days"])
+              if tab.get("since_days") else None)
+
     # Follow the cursor. `max_pages` is now a CHUNK cap, and a chunk is 30-60
     # rows rather than the pager's 6-12, so the same number goes much further.
-    rows, walked = walk_pages(page, max_pages or 0, JS_CARDS)
+    rows, walked = walk_pages(page, max_pages or 0, JS_CARDS, cutoff_date=cutoff)
+
+    if cutoff:
+        # walk_pages() can only stop AFTER a chunk that is already past the
+        # cutoff, so that chunk's own earlier rows are still in `rows`.
+        # Trim them; an undated row is kept rather than risk losing content.
+        before_n = len(rows)
+        rows = [c for c in rows
+                if (_card_date(c.get("text", "")) or cutoff) >= cutoff]
+        print(json.dumps({"event": "since_window", "tab": tab["label"],
+                          "since_days": tab["since_days"],
+                          "cutoff": cutoff.date().isoformat(),
+                          "kept": len(rows), "trimmed": before_n - len(rows)}),
+              flush=True)
 
     print(json.dumps({"event": "paged_done", "tab": tab["label"],
                       "chunks_walked": walked, "stated_pages": stated,
                       "rows": len(rows), "source_list_count": src},
                      ensure_ascii=False), flush=True)
-    if src and len(rows) != src:
+    if src and len(rows) != src and not cutoff:
         print(json.dumps({"event": "coverage_gap", "tab": tab["label"],
                           "rows": len(rows), "source_list_count": src,
                           "why": "row count differs from the SharePoint list"}),
@@ -1641,12 +1800,27 @@ def crawl_paged(page, tab, trail_root, max_pages=None, limit=None):
         if prior:
             # Already fetched in a previous run — do not spend a request on it.
             records.append(prior)
-            for f in (prior.get("pdf_links") or "").split(" | "):
-                if f:
-                    documents[(f, prior["section_path"])] = {
-                        "title": prior["title"], "doc_url": f, "type": "PDF",
-                        "found_on": prior["url"],
-                        "section_path": prior["section_path"]}
+            pdf_links = [f for f in (prior.get("pdf_links") or "").split(" | ") if f]
+            if tab.get("text_as_document") and prior.get("text"):
+                # ONE row for the announcement, not one for the text plus one
+                # per attachment -- see the live-fetch branch below for why.
+                documents[(prior["url"], prior["section_path"])] = {
+                    "title": prior["title"], "doc_url": prior["url"],
+                    "type": tab["label"].rstrip("s"), "found_on": tab["url"],
+                    "section_path": prior["section_path"],
+                    "published_date": prior.get("published_date", ""),
+                    "content_text": prior["text"], "content_html": prior.get("html", ""),
+                    "reference_no": _reference_no_from_url(prior["url"]),
+                    "attachment_links": " | ".join(pdf_links),
+                }
+            else:
+                doc_url, attachment_links = _one_or_many(
+                    pdf_links, fallback_url=prior["url"])
+                if doc_url or attachment_links:
+                    documents[(doc_url or prior["url"], prior["section_path"])] = {
+                        "title": prior["title"], "doc_url": doc_url, "type": "PDF",
+                        "found_on": prior["url"], "section_path": prior["section_path"],
+                        "attachment_links": attachment_links}
             continue
         if tab.get("detail") and c["detail"] and PACE["detail_ms"]:
             page.wait_for_timeout(PACE["detail_ms"])
@@ -1690,11 +1864,42 @@ def crawl_paged(page, tab, trail_root, max_pages=None, limit=None):
             parent=tab["url"], row_text=c["text"],
             published_date=published, **{PAGE_STAMP_FIELD: last_mod},
             body_source=body_source, cma_id=c["data"].get("id", "")))
-        for f in files:
-            documents[(f["href"], " > ".join(trail))] = {
-                "title": title, "doc_url": f["href"], "type": "PDF",
-                "found_on": url, "section_path": " > ".join(trail),
-                "published_date": published}
+        if tab.get("text_as_document") and text:
+            # Most Announcements are plain-text press releases with no
+            # attached file. Keying only on `files` dropped ~92% of them —
+            # measured 87/1049 documents on a full run. The article page
+            # itself IS the regulatory content here, so it becomes the
+            # document: content_text/content_html flow through extra_meta and
+            # document_html (see cma_crawler_wrapper._to_document) so the
+            # orchestrator's Tier 1b reads it directly instead of trying to
+            # download and extract a file that does not exist.
+            #
+            # ONE row per announcement, not one for the text plus one more
+            # per attachment: any PDFs are secondary to the announcement's
+            # own text (the regulatory content), so they go in
+            # attachment_links rather than spawning their own PDF-typed rows
+            # under the same section_path -- the earlier version did exactly
+            # that and duplicated every attached announcement.
+            documents[(url, " > ".join(trail))] = {
+                "title": title, "doc_url": url,
+                "type": tab["label"].rstrip("s"), "found_on": tab["url"],
+                "section_path": " > ".join(trail), "published_date": published,
+                "content_text": text, "content_html": html,
+                "reference_no": _reference_no_from_url(url),
+                "attachment_links": " | ".join(dict.fromkeys(f["href"] for f in files)),
+            }
+        else:
+            # Prospectuses / Shareholder Circulars: no detail page, the
+            # file(s) ARE the record. Multi-attachment convention applies
+            # here too -- one file names the document, more than one leaves
+            # document_url empty with attachment_links holding the set.
+            doc_url, attachment_links = _one_or_many(
+                [f["href"] for f in files], fallback_url=url)
+            if doc_url or attachment_links:
+                documents[(doc_url or url, " > ".join(trail))] = {
+                    "title": title, "doc_url": doc_url, "type": "PDF",
+                    "found_on": url, "section_path": " > ".join(trail),
+                    "published_date": published, "attachment_links": attachment_links}
         if tab.get("detail") and i % 25 == 0:
             print(json.dumps({"event": "progress", "tab": tab["label"],
                               "details": i, "of": len(rows)}), flush=True)
@@ -1733,15 +1938,28 @@ PAGE_STAMP_FIELD = "page_last_modified"
 
 # "05-August-2026" on a card — the announcement's own date.
 #
-# NO TRAILING . The card runs the date straight into the title with no space:
+# NO TRAILING \b. The card runs the date straight into the title with no space:
 #   "14-July-2026Change the name of Pinnacle Capital Company"
-# and there is no word boundary between "6" and "C", so a trailing  refused to
+# and there is no word boundary between "6" and "C", so a trailing \b refused to
 # match. That silently cost published_date on 814 of 1,050 announcements — and
 # published_date is part of a document's identity, so the pipeline would have
 # deduped two different announcements that happen to share a title. Forty-four
 # titles in this tab are shared by more than one announcement.
-CARD_DATE = re.compile(r"(\d{1,2}-[A-Za-z]{3,9}-\d{4})")
+CARD_DATE = re.compile(r"\b(\d{1,2}-[A-Za-z]{3,9}-\d{4})")
 CARD_DATE_LEAD = re.compile(r"^\s*\d{1,2}-[A-Za-z]{3,9}-\d{4}\s*")
+
+
+def _card_date(text: str):
+    """Parse the card's own "05-August-2026" date, or None. Used for the
+    `since_days` cutoff below -- separate from the published_date string
+    stored on the record, which stays the raw text."""
+    m = CARD_DATE.search(text or "")
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%d-%B-%Y")
+    except ValueError:
+        return None
 
 
 def expand_groups(page, batch=8, settle_ms=1200, rounds=60):
@@ -1862,8 +2080,22 @@ def render_register(trail, label, cols, entries, source_url):
     it shows an article of the Saudi Central Bank Law. A register has no such
     body, so this builds one: a plain table with the site's own column names,
     plus each entity's nested rows underneath it where there are any.
+
+    `cols` is the TABLE-shaped register's header row and is empty for a
+    CARD-shaped one (Financial Market Institutions has no <table> at all) --
+    entries there carry `fields = {"text": ..., **card_data}` instead of one
+    key per column. Falling back to a hardcoded `["value"]` header when cols
+    is empty rendered every cell blank, since nothing in a card entry is keyed
+    "value" -- 238 institutions became a 289-character empty table. Derive the
+    header from what the entries actually carry instead.
     """
-    cols = cols or ["value"]
+    if not cols:
+        seen_keys = []
+        for e in entries[:50]:
+            for k in (e.get("fields") or {}):
+                if k not in seen_keys:
+                    seen_keys.append(k)
+        cols = seen_keys or ["value"]
     head = "".join(f"<th>{_esc(c)}</th>" for c in cols)
     body, lines = [], []
     for e in entries:
@@ -2061,8 +2293,22 @@ def crawl_register(page, tab, trail_root, max_chunks=None, limit=None):
         # One record per register, not per entity: 1,298 single-row documents
         # would bury the real regulations in the tree, and a row is not a rule.
         # record_type keeps the 4-stage extraction off it.
+        #
+        # It also becomes ONE document row -- render_register() already builds
+        # exactly this (a table of every entity, meant for the frontend's
+        # Description pane per its own docstring), it just never reached
+        # `documents` before. Decided 2026-08-13: a combined row per register,
+        # not one row per entity -- browsable and approvable as a single
+        # directory entry, not searchable per institution. That trade only
+        # matters if this register ever needs per-entity filtering later.
         if entries:
-            records.append(render_register(trail, label, cols, entries, tab["url"]))
+            rec = render_register(trail, label, cols, entries, tab["url"])
+            records.append(rec)
+            documents[(tab["url"], " > ".join(trail))] = {
+                "title": label, "doc_url": tab["url"], "type": "Register",
+                "found_on": tab["url"], "section_path": " > ".join(trail),
+                "content_text": rec["text"], "content_html": rec["html"],
+            }
 
         REGISTERS.append({"register": label, "section_path": " > ".join(trail),
                           "columns": cols, "source_url": tab["url"],
@@ -2140,18 +2386,14 @@ def crawl_tab(ctx, tab_key: str, max_chapters=None, max_articles=None):
             return records, documents
 
         chapters = page.evaluate(JS_CHAPTER_LINKS, tab["chapter_re"].pattern)
-        # The full-law PDF sits on the tab page and belongs to the tab, not to a
-        # chapter — it is the whole law in one file.
-        for a in page.evaluate(
-                "()=>Array.from(document.querySelectorAll('a[href$=\".pdf\" i]'))"
-                ".map(x=>({t:(x.innerText||'').trim(), h:x.href}))"):
-            documents[(a["h"], " > ".join(trail_root))] = {
-                "title": a["t"] or "Full version (PDF)", "doc_url": a["h"],
-                "type": "PDF", "found_on": tab["url"],
-                "section_path": " > ".join(trail_root),
-            }
+        # The tab page also links the whole law as one PDF. NOT its own document
+        # row: every article inside it already gets one below, and the PDF is the
+        # same text again under one undifferentiated title — a duplicate of the
+        # law, not a document in its own right.
+        n_pdfs_on_page = page.evaluate(
+            "()=>document.querySelectorAll('a[href$=\".pdf\" i]').length")
         print(json.dumps({"event": "chapters", "found": len(chapters),
-                          "pdfs": len(documents)}), flush=True)
+                          "pdfs_on_page_not_captured": n_pdfs_on_page}), flush=True)
         if max_chapters:
             chapters = chapters[:max_chapters]
 
@@ -2214,6 +2456,18 @@ def crawl_tab(ctx, tab_key: str, max_chapters=None, max_articles=None):
                     # "Chapter One Definitions - Article Two".
                     "page_title": body["title"],
                 })
+                # One row per Article, so a single-article amendment can be
+                # approved/versioned on its own instead of only through the
+                # whole-law PDF above. Keyed on (url, section_path) like every
+                # other document dict in this file — the chapter's open
+                # article shares the chapter's own url, which is fine: it is
+                # still unique once paired with its section_path.
+                documents[(url, " > ".join(ch_trail + [art["name"]]))] = {
+                    "title": art["name"], "doc_url": url, "type": "Article",
+                    "found_on": ch["href"],
+                    "section_path": " > ".join(ch_trail + [art["name"]]),
+                    "content_text": body["text"], "content_html": body["html"],
+                }
     finally:
         page.close()
     return records, list(documents.values())

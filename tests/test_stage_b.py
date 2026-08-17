@@ -161,9 +161,14 @@ class FakeRepo:
 
 
 class FakeCrawler:
-    def __init__(self, docs=None, source_system="SRC"):
+    def __init__(self, docs=None, source_system="SRC", hints_path=None):
         self.docs = docs or []
         self.source_system = source_system
+        # Only a FORM crawler has one. Its presence is what makes the run's
+        # history key per-form; a source config or hand-written wrapper has no
+        # hints_path and keeps the bare source name.
+        if hints_path is not None:
+            self.hints_path = hints_path
 
     def fetch_documents(self):
         return list(self.docs)
@@ -289,11 +294,53 @@ def test_disappeared_is_empty_when_the_run_saw_everything():
 #  configurable identity                                                       #
 # --------------------------------------------------------------------------- #
 
-def test_identity_defaults_to_url_and_path():
+def test_identity_defaults_to_url_and_path_and_title():
+    """`title` joined the default tuple deliberately (2026-08-16).
+
+    Two documents can share a url and a folder and still be different
+    instruments — MC publishes a law, its implementing regulation and its
+    attachments under one folder, and the three are told apart by title alone.
+    The url lookup still takes url and path only; title narrows the result.
+    """
     o = build(FakeRepo())
-    assert o.identity == ("document_url", "doc_path")
+    assert o.identity == ("document_url", "doc_path", "title")
     o.classify_documents([Doc(document_url="u", doc_path=["A", "B"])])
-    assert o.repo.named("find_by_identity")[0][1:] == ("u", "A > B")
+    # Three fields no longer match the two-column fast path in
+    # changesignal.find_existing, so the lookup goes through the generic
+    # field-based finder rather than find_by_identity(url, path).
+    assert o.repo.named("find_by_identity") == []
+    fields = o.repo.named("find_by_identity_fields")[0][1]
+    assert fields["document_url"] == "u" and fields["doc_path"] == "A > B"
+
+
+def test_each_form_keeps_its_own_baseline():
+    """One regulator, several forms of different sizes, one baseline each.
+
+    ZATCA publishes through five forms. They all reported under the bare
+    regulator name, so each run overwrote the previous form's baseline and the
+    next form was measured against a count belonging to a different page:
+    `count moved 98 -> 4 (95.9%)` — QUARANTINED, on every run, forever.
+    """
+    guidelines = build(FakeRepo(), FakeCrawler(
+        hints_path="/x/hints/zatca.ie_guidelines.yml"), source_name="ZATCA")
+    circulars = build(FakeRepo(), FakeCrawler(
+        hints_path="/x/hints/zatca.ie_circulars.yml"), source_name="ZATCA")
+
+    assert guidelines._run_key == "ZATCA/zatca.ie_guidelines"
+    assert circulars._run_key == "ZATCA/zatca.ie_circulars"
+    assert guidelines._run_key != circulars._run_key, (
+        "two forms sharing a key is the whole bug — one overwrites the other")
+
+
+def test_a_crawler_without_a_form_keeps_the_bare_source_name():
+    """The re-key must not touch source configs and hand-written wrappers.
+
+    Their stored baselines are keyed on the bare name, and changing it would
+    make every one of them run unchecked once for no reason. Only forms pay.
+    """
+    o = build(FakeRepo(), FakeCrawler(), source_name="Ministry of Health")
+    assert o._run_key == "Ministry of Health"
+    assert o._history_key("Ministry of Health") == "Ministry of Health"
 
 
 def test_a_configured_identity_changes_the_lookup():
@@ -311,8 +358,9 @@ def test_a_configured_identity_changes_the_lookup():
 
 def test_identity_accepts_a_bare_string():
     assert NewOrchestrator._clean_identity("page") == ("page",)
-    assert NewOrchestrator._clean_identity([]) == ("document_url", "doc_path")
-    assert NewOrchestrator._clean_identity(None) == ("document_url", "doc_path")
+    # The empty/None default follows DEFAULT_IDENTITY, which gained `title`.
+    assert NewOrchestrator._clean_identity([]) == ("document_url", "doc_path", "title")
+    assert NewOrchestrator._clean_identity(None) == ("document_url", "doc_path", "title")
 
 
 def test_a_repo_that_cannot_honour_the_config_says_so():
@@ -424,7 +472,8 @@ def _seed_streak(root):
     _absent_run(change_root=root).run_for_regulator("REG")
     from dynamic_crawler import crawl_absence as ca
     st = ca.store_for("src", root=root)
-    st.records["document_url=gone|doc_path="].update(
+    # Key format follows the identity tuple, which gained `title` on 2026-08-16.
+    st.records["document_url=gone|doc_path=|title=Gone"].update(
         {"signal": ca.SIGNAL, "misses": 1,
          "first_missed": "2020-01-01T00:00:00Z",
          "last_missed": "2020-01-01T00:00:00Z"})
@@ -472,7 +521,7 @@ def test_the_early_exit_still_writes_the_streak_memory():
     assert "skipped" in report
     from dynamic_crawler import crawl_absence as ca
     st = ca.store_for("src", root=root)
-    assert st.records["document_url=a|doc_path=X"]["signal"] == ca.SIGNAL
+    assert st.records["document_url=a|doc_path=X|title="]["signal"] == ca.SIGNAL
 
 
 def test_the_default_streak_memory_is_the_crawls_own_directory():

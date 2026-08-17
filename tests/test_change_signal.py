@@ -181,17 +181,24 @@ def test_the_sweep_and_the_orchestrator_build_the_same_key():
     doc = Doc(document_url="https://x/a?b=1", doc_path=["A", "B"])
     assert (cs.identity_key(o._identity_fields_of(doc))
             == cs.observation_for(doc, o.DEFAULT_IDENTITY).key
-            == "document_url=https://x/a?b=1|doc_path=A > B")
+            == "document_url=https://x/a?b=1|doc_path=A > B|title=a document")
 
 
 def test_the_inventory_hash_is_the_one_already_stored():
     """Pinned to literal keys: every stored inventory_hash was written by the
     previous implementation, and changing it makes every source miss its early
-    exit and insert a run_history row on the next run."""
+    exit and insert a run_history row on the next run.
+
+    That cost was PAID ONCE, deliberately, on 2026-08-16: `title` joined the
+    default identity, so these keys gained a `|title=` segment and every source
+    reconciled once on its next run. Re-pinned to the new literals. Anyone
+    changing them again is buying the same one-run reconciliation for every
+    source — do it knowingly, not as a side effect of touching the tuple.
+    """
     o = NewOrchestrator(crawler=_Any(), repo=_Any(), source_name="source:TEST")
     docs = [Doc(document_url="https://x/a?b=1", doc_path=["A", "B"]),
             Doc(reference_no="C-1", extra_meta={"identity_fields": ["reference_no"]})]
-    keys = sorted(["document_url=https://x/a?b=1|doc_path=A > B",
+    keys = sorted(["document_url=https://x/a?b=1|doc_path=A > B|title=a document",
                    "reference_no=C-1"])
     expected = hashlib.md5("\n".join(keys).encode("utf-8")).hexdigest()[:12]
     assert o._inventory_hash(docs) == expected

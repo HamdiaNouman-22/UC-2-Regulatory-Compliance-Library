@@ -46,12 +46,16 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import date
+from pathlib import Path
 from typing import Dict, List, Optional
 
-from orchestrator.orchestrator import MIN_TEXT_LEN, Orchestrator
+from orchestrator.orchestrator import BaseOrchestrator, MIN_TEXT_LEN
 
 from dynamic_crawler import crawl_absence
-from dynamic_crawler.changesignal import clean_fields, fields_of, identity_key
+from dynamic_crawler.changesignal import (clean_fields, fields_of,
+                                          find_existing as _shared_find_existing,
+                                          identity_for as _shared_identity_for,
+                                          identity_key)
 from dynamic_crawler.formfill.textinput import decide_for_document
 
 logger = logging.getLogger(__name__)
@@ -60,10 +64,41 @@ logger = logging.getLogger(__name__)
 COUNT_TOLERANCE_PCT = 5.0
 
 
-class NewOrchestrator(Orchestrator):
+def _text(v) -> str:
+    """A stripped string from anything a workbook cell can hold.
+
+    `(v or "").strip()` is the obvious way to write this and it is WRONG for
+    values that came back from Excel. pandas represents an empty cell as
+    `float("nan")`, and **NaN is truthy** — so `or ""` never fires and `.strip()`
+    is called on a float:
+
+        run failed: 'float' object has no attribute 'strip'
+
+    That one line blocked every GOSI and MOH re-run. It only bites on the SECOND
+    pass, when a workbook written earlier is read back, which is exactly the
+    change-detection path — the crawl works, the comparison against stored rows
+    dies.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, float):        # NaN, and any stray numeric cell
+        return "" if v != v else str(v).strip()
+    return str(v).strip()
+
+
+class NewOrchestrator(BaseOrchestrator):
     def __init__(self, crawler, repo, downloader=None, *,
                  source_name: str = "unknown",
-                 identity: tuple = ("document_url", "doc_path"),
+                 # None, not a literal tuple: a literal here is a SECOND copy of
+                 # the default that _clean_identity can never fall through to, so
+                 # it silently outranks DEFAULT_IDENTITY. That is exactly what
+                 # happened when `title` was added on 2026-08-16 — the constant
+                 # gained the field, this line did not, and every orchestrator
+                 # built without an explicit identity kept keying on two fields
+                 # while the sweep and promote keyed on three. The two then built
+                 # different absence keys, so streaks recorded by one side were
+                 # invisible to the other and no withdrawal could ever accumulate.
+                 identity: Optional[tuple] = None,
                  version_key: Optional[str] = "reference_no",
                  analyse: bool = False,
                  limit: Optional[int] = None,
@@ -94,7 +129,9 @@ class NewOrchestrator(Orchestrator):
     #  IDENTITY + CLASSIFICATION                                          #
     # ------------------------------------------------------------------ #
 
-    DEFAULT_IDENTITY = ("document_url", "doc_path")
+    # Kept in step with changesignal.DEFAULT_IDENTITY, which is where the
+    # reasoning lives. Title added 2026-08-16 by the lead's decision.
+    DEFAULT_IDENTITY = ("document_url", "doc_path", "title")
 
     @staticmethod
     def _clean_identity(identity) -> tuple:
@@ -112,9 +149,11 @@ class NewOrchestrator(Orchestrator):
 
         One run can mix sources, so the fields come from the source that produced
         the document when it declared any, and from the run default otherwise.
+
+        Delegated to `changesignal.identity_for` so `promote` resolves identity
+        identically — the two used to have separate copies and they drifted.
         """
-        declared = (getattr(doc, "extra_meta", None) or {}).get("identity_fields")
-        return self._clean_identity(declared) if declared else self.identity
+        return _shared_identity_for(doc, self.identity)
 
     def _identity_fields_of(self, doc) -> dict:
         """The configured identity of one document, as {field: value}."""
@@ -160,17 +199,7 @@ class NewOrchestrator(Orchestrator):
         lookup, and a repo that does not offer one cannot honour the config —
         say so rather than silently classifying everything as new.
         """
-        fields = self._identity_fields_of(doc)
-        if tuple(fields) == self.DEFAULT_IDENTITY:
-            return self.repo.find_by_identity(fields["document_url"],
-                                              fields["doc_path"])
-        finder = getattr(self.repo, "find_by_identity_fields", None)
-        if not callable(finder):
-            raise NotImplementedError(
-                f"{type(self.repo).__name__} cannot look up on "
-                f"identity={list(fields)}; it only supports "
-                f"{list(self.DEFAULT_IDENTITY)}")
-        return finder(fields)
+        return _shared_find_existing(self.repo, doc, self.identity)
 
     @staticmethod
     def _set_status(doc, monitoring_status: str) -> None:
@@ -191,14 +220,26 @@ class NewOrchestrator(Orchestrator):
         it moves to extra_meta["regulator_status"] and `status` becomes ours
         alone. Anything already in `status` from a form field is preserved there
         rather than being silently overwritten.
+
+        A FOURTH MEANING, AND THE ONE THAT WINS
+        ---------------------------------------
+        `status` is the HUMAN REVIEW decision — active or reject — and it governs
+        whether a crawled row is promoted into the main system. Nothing automated
+        may write it, or the pipeline would be approving its own output.
+
+        So the monitoring state goes to extra_meta["monitoring_status"] ONLY, and
+        `status` is left EMPTY for a person to fill. Writing "new" here made a
+        machine-generated value sit in the column a reviewer's decision belongs
+        in, with no way to tell the two apart afterwards.
         """
         meta = doc.extra_meta = dict(getattr(doc, "extra_meta", None) or {})
-        site_status = (getattr(doc, "status", "") or "").strip()
+        site_status = _text(getattr(doc, "status", ""))
         if site_status and site_status.lower() not in (
                 "new", "modified", "unchanged", "active", "inactive", "withdrawn"):
             meta.setdefault("regulator_status", site_status)
-        meta["monitoring_status"] = monitoring_status      # kept for the CBB path
-        doc.status = monitoring_status
+        meta["monitoring_status"] = monitoring_status
+        # Empty, not the monitoring state: a human sets active/reject here.
+        doc.status = ""
 
     def classify_documents(self, docs: List) -> Dict[str, List]:
         """new / modified / unchanged / disappeared / not_reread.
@@ -233,7 +274,7 @@ class NewOrchestrator(Orchestrator):
                 for u in (getattr(doc, "document_url", ""),
                           getattr(doc, "source_page_url", "")):
                     if u:
-                        not_reread_pages.add(str(u).strip().rstrip("/"))
+                        not_reread_pages.add(_text(u).rstrip("/"))
                 if existing is not None:
                     seen_ids.add(existing.get("id"))
                 buckets["not_reread"].append(doc)
@@ -255,8 +296,8 @@ class NewOrchestrator(Orchestrator):
                 continue
 
             seen_ids.add(existing.get("id"))
-            old_hash = (existing.get("content_hash") or "").strip()
-            new_hash = (getattr(doc, "content_hash", "") or "").strip()
+            old_hash = _text(existing.get("content_hash"))
+            new_hash = _text(getattr(doc, "content_hash", ""))
             doc.extra_meta = dict(getattr(doc, "extra_meta", None) or {})
             doc.extra_meta["existing_regulation_id"] = existing.get("id")
 
@@ -293,7 +334,7 @@ class NewOrchestrator(Orchestrator):
             if r.get("id") in seen_ids:
                 continue
             if not_reread_pages and any(
-                    str(r.get(k) or "").strip().rstrip("/") in not_reread_pages
+                    _text(r.get(k)).rstrip("/") in not_reread_pages
                     for k in ("source_page_url", "document_url")):
                 self._not_reread_stored += 1
                 continue
@@ -332,7 +373,7 @@ class NewOrchestrator(Orchestrator):
         are the strings that get written to the row — a display name that differs
         by a word would scope the lookup to nothing.
         """
-        names = {str(getattr(d, "regulator", "") or "").strip()
+        names = {_text(getattr(d, "regulator", ""))
                  for d in (docs or [])} - {""}
         return names.pop() if len(names) == 1 else None
 
@@ -384,7 +425,7 @@ class NewOrchestrator(Orchestrator):
                         found.append(r)
             return found
 
-        rows = rows_for(regulator)
+        rows = self._within_crawled_folders(rows_for(regulator), docs)
         if regulator and not rows:
             # An empty bucket is the safe answer — nothing can be withdrawn from
             # it — but it must not be a silent one. Say whether the source really
@@ -398,11 +439,68 @@ class NewOrchestrator(Orchestrator):
                     len(unscoped), sources, regulator)
         return rows
 
+    @staticmethod
+    def _parent_folder(doc_path) -> tuple:
+        """The folder a document sits in: its doc_path minus its own leaf."""
+        if isinstance(doc_path, str):
+            try:
+                doc_path = json.loads(doc_path)
+            except Exception:
+                return ()
+        return tuple(str(x) for x in (doc_path or [])[:-1])
+
+    def _within_crawled_folders(self, rows: List[dict], docs) -> List[dict]:
+        """Keep only stored rows sitting in a folder THIS RUN actually walked.
+
+        `source_system` is not fine-grained enough to scope `disappeared`. This
+        is the third time that has bitten (see _stored_for_source's docstring for
+        the first two). ZATCA is the third: its five forms all publish under
+        regulator ZATCA + source_system "Rules and Regulations", so each form
+        compared itself against the whole 151-document corpus and declared its
+        four siblings withdrawn:
+
+            taxes          34 found + 117 "disappeared"
+            agreements     98 found +  53 "disappeared"
+            ie_circulars   11 found + 140 "disappeared"      151 = all of ZATCA
+
+        The folder a document sits in IS the form, and the run knows its own
+        folders without anything having to be stored: ZATCA's forms land under
+        "Zakat, Tax and Customs Regulations", "Tax and Customs Agreements" and
+        the three "Information Exchange Portal/..." folders respectively.
+
+        NOT a fixed doc_path depth. The three Information Exchange forms separate
+        at crumb 4, but for the other two forms crumb 4 is already the document's
+        own title — so any fixed depth is wrong for one group or the other.
+        Parent-of-leaf is right for both because it is relative to each document.
+
+        Fails SAFE in every direction: a run that returns nothing, or is limited,
+        or skips a folder, narrows this set and therefore proposes FEWER
+        withdrawals. The failure mode this replaces — proposing a sibling form's
+        entire library as withdrawn — is the one that loses documents.
+        """
+        folders = {self._parent_folder(getattr(d, "doc_path", None))
+                   for d in (docs or [])}
+        folders.discard(())
+        if not folders:
+            # Nothing to scope by: either the run found nothing, or this crawler
+            # does not build doc_paths. Leave the caller's rows alone rather than
+            # silently emptying the bucket — the completeness gate handles the
+            # empty-run case, and this must not become a second, quieter place
+            # where `disappeared` disappears.
+            return rows
+        kept = [r for r in rows if self._parent_folder(r.get("doc_path")) in folders]
+        if len(kept) != len(rows):
+            logger.info("disappeared scope: %d of %d stored row(s) are in the "
+                        "%d folder(s) this run walked", len(kept), len(rows),
+                        len(folders))
+        return kept
+
     # ------------------------------------------------------------------ #
     #  THE FOLDER TREE — folders are "F", the document's own node is "R"   #
     # ------------------------------------------------------------------ #
 
-    def _get_or_create_compliance_category(self, hierarchy: list) -> int:
+    def _get_or_create_compliance_category(self, hierarchy: list,
+                                           for_regulation_id=None) -> int:
         """Same walk as the parent, but it types the nodes.
 
         `compliancecategory.type` is what the frontend uses to tell a folder from
@@ -418,9 +516,9 @@ class NewOrchestrator(Orchestrator):
         Intermediate nodes are folders; the last segment is the regulation.
         """
         with self._folder_lock:
-            return self._walk_folders(hierarchy)
+            return self._walk_folders(hierarchy, for_regulation_id)
 
-    def _walk_folders(self, hierarchy: list) -> int:
+    def _walk_folders(self, hierarchy: list, for_regulation_id=None) -> int:
         parent_id = None
         last_index = len(hierarchy) - 1
 
@@ -432,8 +530,18 @@ class NewOrchestrator(Orchestrator):
 
             # Leaf rule, unchanged from the parent: never hand one document's node
             # to another. A same-named sibling is created instead.
+            #
+            # UNLESS THE OCCUPANT IS THIS DOCUMENT. The rule cannot otherwise
+            # tell "someone else's leaf" from "the leaf of the very document I am
+            # re-processing", so on a re-run EVERY stored document tripped it and
+            # took a fresh folder: measured 2026-08-16, one AML run added 11
+            # duplicate leaves, and it would have added 11 more every run for
+            # ever. Invisible until now because the workbook path resolves
+            # folders in `promote`, not here — this walk only runs when the
+            # orchestrator writes to the database directly.
             if folder_id is not None and i == last_index:
-                if self.repo.regulation_exists_for_category(folder_id):
+                occupied = self.repo.regulation_exists_for_category(folder_id)
+                if occupied and not self._leaf_belongs_to(folder_id, for_regulation_id):
                     folder_id = None
 
             if folder_id is None:
@@ -442,6 +550,20 @@ class NewOrchestrator(Orchestrator):
             parent_id = folder_id
 
         return parent_id
+
+    def _leaf_belongs_to(self, folder_id: int, regulation_id) -> bool:
+        """Is the regulation sitting in this leaf the one we are re-processing?
+
+        Answered from the stored row rather than by trusting the caller: a
+        document that has moved folders must still get a new leaf.
+        """
+        if not regulation_id:
+            return False
+        row = self.repo.get_regulation_by_id(regulation_id) or {}
+        try:
+            return int(row.get("compliancecategory_id") or 0) == int(folder_id)
+        except (TypeError, ValueError):
+            return False
 
     # ------------------------------------------------------------------ #
     #  THE COMPLETENESS GATE                                             #
@@ -468,11 +590,37 @@ class NewOrchestrator(Orchestrator):
             groups.setdefault(label, []).append(d)
         return groups
 
+    @property
+    def _run_key(self) -> str:
+        """The run_history key for THIS run — per FORM, not per regulator.
+
+        One regulator can publish through several forms of very different sizes.
+        ZATCA has five, and they all reported under the bare regulator name, so
+        each run overwrote the previous form's baseline and the next form was
+        measured against a number belonging to a different page:
+
+            agreements     98 documents  -> writes baseline 98
+            ie_guidelines   4 documents  -> "count moved 98 -> 4 (95.9%)"
+                                            QUARANTINED, every single run
+
+        Nothing was wrong. The counts were never comparable. Worse, the gate
+        never settled: whichever form ran last set the baseline the next one
+        failed against, so the check was permanent noise rather than a signal —
+        and a check people learn to ignore is worse than no check.
+
+        Only FORM runs are re-keyed. A crawler with no `hints_path` (a source
+        config, a hand-written wrapper) keeps the bare source name, so its stored
+        baseline still matches and it pays no reconciliation.
+        """
+        form = Path(str(getattr(self.crawler, "hints_path", "") or "")).stem
+        return f"{self.source_name}/{form}"[:200] if form else self.source_name
+
     def _history_key(self, label: str) -> str:
         """run_history is per source. `run_history.source` is NVARCHAR(200) and
         record_run logs its own failures, so an overflow would cost the gate its
         baseline quietly — truncate here instead."""
-        key = label if label == self.source_name else f"{self.source_name}/{label}"
+        base = self._run_key
+        key = base if label == self.source_name else f"{base}/{label}"
         return key[:200]
 
     def _last_good(self, key: str) -> Optional[dict]:
@@ -540,7 +688,9 @@ class NewOrchestrator(Orchestrator):
             if "capped" in w.lower() or "stopped at page" in w.lower():
                 problems.append(w[:120])
 
-        last = self._last_good(self.source_name)
+        # `_run_key`, not `source_name`: the "total" check is what produced
+        # "count moved 98 -> 4" by measuring one form against another's baseline.
+        last = self._last_good(self._run_key)
         if last and last.get("row_count"):
             self._note_count("total", last["row_count"], len(docs), problems)
 
@@ -654,7 +804,11 @@ class NewOrchestrator(Orchestrator):
     def _process_single_doc(self, idx, doc, regulator_name):
         try:
             if isinstance(getattr(doc, "doc_path", None), list):
-                doc.compliancecategory_id = self._get_or_create_compliance_category(doc.doc_path)
+                # The stored row for THIS document, so the leaf rule can tell
+                # "my own folder" from "someone else's".
+                existing = self._find_existing(doc) or {}
+                doc.compliancecategory_id = self._get_or_create_compliance_category(
+                    doc.doc_path, for_regulation_id=existing.get("id"))
             else:
                 doc.compliancecategory_id = None
         except Exception as e:
@@ -682,6 +836,7 @@ class NewOrchestrator(Orchestrator):
             # replacing it. Parent does this at orchestrator/orchestrator.py:803.
             old_version_id = self.repo.insert_regulation_version(
                 regulation_id=existing_id,
+                regulator=getattr(doc, "regulator", "") or "",
                 content_text=(old.get("extra_meta") or {}).get("content_text", "")
                              if isinstance(old.get("extra_meta"), dict) else "",
                 content_html=old.get("document_html") or "",
@@ -690,6 +845,7 @@ class NewOrchestrator(Orchestrator):
                 change_summary=f"archived {date.today().isoformat()}")
             version_id = self.repo.insert_regulation_version(
                 regulation_id=existing_id,
+                regulator=getattr(doc, "regulator", "") or "",
                 content_text=meta.get("content_text", ""),
                 content_html=getattr(doc, "document_html", "") or "",
                 content_hash=new_hash, updated_date=date.today(), status="active",
@@ -697,13 +853,22 @@ class NewOrchestrator(Orchestrator):
             self.repo.archive_current_analysis(existing_id, old_version_id)
             self.repo.update_regulation(existing_id, **self._modified_row_fields(doc, new_hash))
             regulation_id = existing_id
+            # `or ""` is not belt-and-braces. dict.get returns its default only
+            # when the key is ABSENT; a row fetched from SQL always has the key,
+            # carrying None for a NULL column. Every regulation crawled before
+            # content_hash was populated is exactly that case, so this slice
+            # raised `'NoneType' object is not subscriptable` for all 370
+            # documents of the 2026-08-16 batch — after the writes, so the data
+            # was correct and only the logging died.
             self._log_step(regulation_id, "version", "SUCCESS",
-                           f"new version {version_id} (was {old.get('content_hash','')[:8]})")
+                           f"new version {version_id} "
+                           f"(was {(old.get('content_hash') or '')[:8]})")
         else:
             regulation_id = self.repo._insert_regulation(doc)
             doc.id = regulation_id
             version_id = self.repo.insert_regulation_version(
                 regulation_id=regulation_id,
+                regulator=getattr(doc, "regulator", "") or "",
                 content_text=meta.get("content_text", ""),
                 content_html=getattr(doc, "document_html", "") or "",
                 content_hash=new_hash, updated_date=date.today(), status="active",
@@ -741,7 +906,16 @@ class NewOrchestrator(Orchestrator):
         the hash no longer described its own row. Empty values are dropped — a
         crawl that returns no title must not blank the stored one.
         """
-        fields = {"content_hash": new_hash}
+        # An EMPTY hash must never overwrite a stored one — the same rule the
+        # loop below applies to every other column, which content_hash was
+        # silently exempt from. A crawler that omits content_hash (MOHCrawler
+        # did) makes every document `modified`, and this line then wrote the
+        # empty value back, so the next run could not match either. That is what
+        # turned one missing field into a permanent re-versioning loop: 83 MOH
+        # documents re-versioned every run, two rows each.
+        fields = {}
+        if new_hash:
+            fields["content_hash"] = new_hash
         for column in ("title", "document_html", "published_date",
                        "reference_no", "category"):
             value = getattr(doc, column, None)
@@ -796,7 +970,10 @@ class NewOrchestrator(Orchestrator):
         buckets = self.classify_documents(docs)
         tokens_stored = self._apply_token_backfill()
 
-        last = self._last_good(self.source_name)
+        # `_run_key` again: read the early-exit baseline from the same place the
+        # run writes it, or a form matches a sibling's inventory hash (it never
+        # will) and re-does the whole crawl every time.
+        last = self._last_good(self._run_key)
         if (last and last.get("inventory_hash") == inv
                 and not any(buckets[k] for k in ("new", "modified", "disappeared"))):
             # This logged "nothing to do" and then did everything anyway.
@@ -849,7 +1026,7 @@ class NewOrchestrator(Orchestrator):
         withdrawals = self._withdrawals(buckets, groups, problems)
         gate = self._source_gate(groups, problems)
         if hasattr(self.repo, "record_run"):
-            self.repo.record_run(self.source_name, len(docs), inv, verdict,
+            self.repo.record_run(self._run_key, len(docs), inv, verdict,
                                  "; ".join(problems)[:400])
             # One row per source too, each with the verdict its OWN problems
             # earn. Stamping the run's verdict here froze a healthy source's

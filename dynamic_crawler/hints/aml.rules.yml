@@ -54,7 +54,14 @@ notes: "Hand-written from the inspect digest. Two h3 groups, no wrappers."
 # same path the library will use. Defined here only — the pipeline reuses
 # them rather than prepending its own copy.
 library:
-  regulator: "Anti-Money Laundering Permanent Committee"
+  # FULL NAME, then the acronym in brackets — the house style for every
+  # regulator (GOSI already reads "General Organization for Social Insurance
+  # (GOSI)"). This string is not just a column: it is the FIRST CRUMB of
+  # doc_path and therefore the ROOT FOLDER of this regulator's tree in
+  # compliancecategory, so the three have to be changed together. Changed
+  # 2026-08-14; config/change_signals.yml moved with it, because
+  # (regulator, source_system) is how a sweep names this source.
+  regulator: "Anti-Money Laundering Permanent Committee (AML)"
   source_system: "Rules and Regulations"
 meta:
   approved: true

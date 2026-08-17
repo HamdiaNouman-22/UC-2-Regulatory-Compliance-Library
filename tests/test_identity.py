@@ -160,7 +160,12 @@ def orch(repo, crawler=None, **kw):
 
 
 def stored(**kw):
+    # `title` matches Doc's default deliberately: it joined the identity tuple on
+    # 2026-08-16, and a stored row without one does not exist in the real
+    # library — every crawler sets a title. Omitting it here made the fixture,
+    # not the code, the reason a document failed to match.
     row = {"id": 1, "document_url": "", "doc_path": [], "content_hash": "H",
+           "title": "a document",
            "reference_no": None, "source_system": "SRC", "extra_meta": {}}
     row.update(kw)
     return row
@@ -484,11 +489,20 @@ def test_every_shipped_config_lists_sources_or_says_why_not():
             f"{path.name} has neither sources nor a `disabled:` reason")
 
 
-def test_simah_is_the_disabled_one_and_keeps_its_review_date():
+def test_simah_cannot_reach_a_host_we_are_blocked_from():
+    """SIMAH was enabled on 2026-08-13; `disabled:` is gone and a source exists.
+
+    So the guarantee moved. It is no longer "nothing is configured" — it is
+    `allow_live: false`, which makes the crawler provably incapable of
+    generating traffic whatever its snapshot clock says. simah.com is still
+    Cloudflare 1020-blocked and in change_signals.yml skip_hosts until
+    2026-09-04; flipping this is a decision about the block, not a code change.
+    """
     cfg = _shipped_configs()[SOURCES_DIR / "simah.yml"]
-    assert cfg.get("sources") == []
-    assert "2026-09-04" in cfg["disabled"], (
-        "the review date is the only thing that gets this file looked at again")
+    sources = cfg.get("sources") or []
+    assert len(sources) == 1, "enabled, so the source must be present"
+    assert sources[0]["init_kwargs"]["allow_live"] is False, (
+        "allow_live is the only thing stopping traffic to a blocked host")
 
 
 if __name__ == "__main__":

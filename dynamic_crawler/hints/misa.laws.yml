@@ -35,8 +35,13 @@ notes: Unsure if the row_selector scoped to div.showLawItems will capture all la
 # same path the library will use. Defined here only — the pipeline reuses
 # them rather than prepending its own copy.
 library:
-  regulator: "MISA"
-  source_system: "Laws and Regulations"
+  # FULL NAME, then the acronym — the house style, and this string is also the
+  # FIRST CRUMB of doc_path, so it is the root folder of MISA's tree in
+  # compliancecategory. Changed 2026-08-14 from the bare acronym "MISA".
+  regulator: "Ministry of Investment (MISA)"
+  # "Laws", not "Laws and Regulations" — the site's own tab is "Laws", and this
+  # crumb is what the library shows. Corrected 2026-08-13.
+  source_system: "Laws"
 meta:
   proposed_by: default (see llm_client.DEFAULT_MODEL)
   proposed_at: '2026-08-02T10:29:35+00:00'

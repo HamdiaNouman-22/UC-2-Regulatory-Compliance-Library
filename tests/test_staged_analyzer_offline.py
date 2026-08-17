@@ -166,4 +166,19 @@ check("parse_json returns {} on garbage", a._parse_json("not json") == {})
 check("parse_json strips fences", a._parse_json('```json\n{"a":1}\n```') == {"a": 1})
 
 print("\n" + ("ALL PASSED" if not fails else f"{len(fails)} FAILURE(S): {fails}"))
-sys.exit(1 if fails else 0)
+
+
+def test_offline_checks_pass():
+    """Exposes the checks above to pytest.
+
+    They run at import, which is fine — they touch no network and no database.
+    What is NOT fine is calling sys.exit() at import: pytest imports every test
+    module during collection, so a bare sys.exit aborted the ENTIRE run with
+    `INTERNALERROR ... SystemExit: 0` and silently took the other ~314 tests
+    with it. Hence the __main__ guard below.
+    """
+    assert not fails, f"{len(fails)} offline check(s) failed: {fails}"
+
+
+if __name__ == "__main__":
+    sys.exit(1 if fails else 0)

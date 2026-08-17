@@ -131,8 +131,13 @@ class FakeRepo:
 
 
 def stored(**kw):
+    # `title` matches Doc's default: it joined the identity tuple on 2026-08-16,
+    # and a stored row without one does not exist in the real library. Without it
+    # the fixture — not the code — is why a document fails to match its row, and
+    # every unmatched row then lands in `disappeared`.
     row = {"id": 1, "document_url": "", "source_page_url": "", "doc_path": [],
            "content_hash": "H", "reference_no": None, "source_system": "SRC",
+           "title": "a document",
            "regulator": "REG", "extra_meta": {}}
     row.update(kw)
     return row

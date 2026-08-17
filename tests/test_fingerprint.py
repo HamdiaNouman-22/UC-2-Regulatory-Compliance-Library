@@ -120,6 +120,18 @@ class FakeRepo:
                 return dict(r)
         return None
 
+    def find_by_identity_fields(self, fields):
+        """The generic lookup. Required since `title` joined the default identity
+        on 2026-08-16: three fields no longer fit the two-column shortcut, so
+        without this every lookup raises NotImplementedError rather than
+        exercising the token logic these tests are about."""
+        def norm(v):
+            return " > ".join(v) if isinstance(v, (list, tuple)) else str(v or "")
+        for r in self.rows:
+            if all(norm(r.get(k)) == norm(v) for k, v in fields.items()):
+                return dict(r)
+        return None
+
     def find_by_reference(self, ref):
         return None
 

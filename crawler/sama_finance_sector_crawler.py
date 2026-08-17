@@ -44,6 +44,15 @@ import requests
 from bs4 import BeautifulSoup, Tag
 
 from models.models import RegulatoryDocument
+from crawler.fingerprint import stamp_content_hashes
+
+# The stored regulator name. Full name then acronym is the house style, and
+# this string is ALSO the first crumb of doc_path, so it is the root folder of
+# SAMA's tree. Changed 2026-08-15: it was the bare acronym "SAMA", while the
+# library already held the full name — a crawl would have created a SECOND
+# regulator beside the 6,101 rows already stored.
+SAMA_REGULATOR = "Saudi Arabian Monetary Authority (SAMA)"
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -393,7 +402,7 @@ class SAMAFinanceSectorCrawler:
                 extra_meta['issue_date_hijri'] = structured['date_hijri']
 
             doc = RegulatoryDocument(
-                regulator="SAMA",
+                regulator=SAMA_REGULATOR,
                 source_system="SAMA RULEBOOK",
                 category=self.sector_name,
                 title=real_title,
@@ -406,7 +415,7 @@ class SAMAFinanceSectorCrawler:
                 extra_meta=extra_meta,
                 document_html=structured['document_html'],
             )
-            doc.doc_path = ["SAMA", "SAMA RULEBOOK", self.sector_name] + cur_path
+            doc.doc_path = [SAMA_REGULATOR, "SAMA RULEBOOK", self.sector_name] + cur_path
             results.append(doc)
             logger.info(f"{indent}-> structured document captured")
             return
@@ -428,7 +437,7 @@ class SAMAFinanceSectorCrawler:
         text_content = content_div.get_text(strip=True) if content_div else ""
         if text_content:
             doc = RegulatoryDocument(
-                regulator="SAMA",
+                regulator=SAMA_REGULATOR,
                 source_system="SAMA RULEBOOK",
                 category=self.sector_name,
                 title=real_title,
@@ -437,7 +446,7 @@ class SAMAFinanceSectorCrawler:
                 file_type="HTML",
                 document_html=_absolutify_links(str(content_div)),
             )
-            doc.doc_path = ["SAMA", "SAMA RULEBOOK", self.sector_name] + cur_path
+            doc.doc_path = [SAMA_REGULATOR, "SAMA RULEBOOK", self.sector_name] + cur_path
             results.append(doc)
             logger.info(f"{indent}-> plain content document captured")
 
@@ -495,7 +504,10 @@ class SAMAFinanceSectorCrawler:
                 self._close_driver()
 
         logger.info(f"\nDone: {len(results)} documents captured from {len(visited)} pages visited")
-        return results
+        # Neither RegulatoryDocument branch in this file sets content_hash, so
+        # without this every document classifies `modified` on every run and
+        # collects a version row each time. See crawler/fingerprint.py.
+        return stamp_content_hashes(results)
 
     def save_to_json(self, documents: List[RegulatoryDocument], filename: str = "sama_finance_sector_test.json"):
         import json

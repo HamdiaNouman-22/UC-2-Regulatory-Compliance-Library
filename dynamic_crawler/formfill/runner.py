@@ -90,6 +90,14 @@ def content_key(text: str) -> str:
 # row. On a 30-row page that is the difference between 1 round trip and 150.
 # --------------------------------------------------------------------------- #
 
+# Whether JS_ROWS returns EVERY link in a row or only the first. Set once per
+# run() from `attachment_is_document: "combined"`, and read inside _harvest,
+# which has five call sites that have no other reason to know about it.
+#
+# A dict rather than a bare bool so it is rebindable from the nested scope
+# without `global`, matching the PACE pattern used elsewhere in this codebase.
+COLLECT_ROW_LINKS = {"on": False}
+
 JS_ROWS = r"""(cfg) => {
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
   // innerText returns "" for anything inside a hidden tab, because it reports
@@ -176,10 +184,33 @@ JS_ROWS = r"""(cfg) => {
       else if (f.attr === 'src')  fields[f.target] = el.src || '';
       else                        fields[f.target] = el.getAttribute(f.attr) || '';
     }
+    // EVERY link in the row, not just the first — only when the form asks.
+    //
+    // A row is normally one document, so `a` above is the whole answer. But a
+    // card that groups an instrument with its implementing regulation carries
+    // several PDFs, and taking the first silently drops the rest: SDAIA's 36
+    // files collapse to 29 that way, and the result looks complete.
+    //
+    // Off by default. Reading every link for a listing that genuinely has one
+    // per row would turn sibling navigation links into phantom documents.
+    let allLinks = [];
+    if (cfg.collectLinks) {
+      let els = [];
+      try { els = Array.from(row.querySelectorAll(cfg.linkSel || 'a[href]')); }
+      catch (e) { els = []; }
+      const seenHref = new Set();
+      for (const el of els) {
+        const h = el.href || '';
+        if (!h || seenHref.has(h)) continue;
+        seenHref.add(h);
+        allLinks.push({ href: h, text: txt(el).slice(0, 300) });
+      }
+    }
     out.push({
       row_text: txt(row).slice(0, 4000),
       href: a ? a.href : '',
       link_text: a ? txt(a).slice(0, 400) : '',
+      all_links: allLinks,
       section,
       ff_row: ffRow,
       fields
@@ -254,7 +285,7 @@ JS_IN_PAGE_DETAIL = r"""(sel) => {
   return {html: clone.innerHTML, text: (clone.textContent || '').trim(), links};
 }"""
 
-JS_DETAIL = r"""(strip) => {
+JS_DETAIL = r"""([strip, extract]) => {
   // querySelector with a comma list returns the first match in DOCUMENT ORDER, not
   // the first selector that matches: hrsd.gov.sa's stray <div class="content"> (7
   // chars) beat <main class="main-content"> (3,639). Take the LONGEST candidate;
@@ -290,7 +321,18 @@ JS_DETAIL = r"""(strip) => {
   const src = pick || document.body || document.documentElement;
   if (!src) return {html:'', text:'', links:[]};
   const clone = src.cloneNode(true);
-  clone.querySelectorAll('script,style,noscript,nav,aside,header,footer').forEach(n=>n.remove());
+  // iframe/object/embed are removed EVERYWHERE, for every site.
+  //
+  // Their contents belong to another document and are never captured, so what
+  // survives into document_html is an empty element that renders as a bare
+  // 300x150 bordered box at the end of the regulation. ZATCA carried one on all
+  // 32 of its html rows (2026-08-14). An inline `display: none` does not save
+  // us: anything that reads the stored html without applying inline styles —
+  // a preview pane, a paste into a document — shows the box anyway.
+  //
+  // Nothing is lost. If an embed ever IS the instrument, it has to be captured
+  // by following its src, which this never did.
+  clone.querySelectorAll('script,style,noscript,nav,aside,header,footer,iframe,object,embed').forEach(n=>n.remove());
   // <form> is UNWRAPPED, not removed. SharePoint / ASP.NET WebForms wrap the entire
   // page in <form id="aspnetForm">, so removing forms deleted SIMAH's whole law:
   // 8,182 characters of articles became 0, with a 444-character husk of markup left
@@ -300,6 +342,18 @@ JS_DETAIL = r"""(strip) => {
     while (f.firstChild) f.parentNode.insertBefore(f.firstChild, f);
     f.remove();
   });
+  // THE PRICE OF UNWRAPPING THE FORM, PAID BACK.
+  //
+  // Unwrapping keeps everything the <form> contained — including ASP.NET's own
+  // plumbing. On SharePoint that is __VIEWSTATE, __REQUESTDIGEST, __EVENTTARGET
+  // and a wall of MSO* hidden inputs inside div.aspNetHidden. Measured on ZATCA
+  // 2026-08-13: 178,991 characters of stored HTML carrying 4,111 characters of
+  // text, nearly all of it scaffolding.
+  //
+  // A hidden input is never document content on any site, so this is safe to do
+  // unconditionally. VISIBLE controls are left alone — a form deliberately
+  // unwrapped may legitimately contain them.
+  clone.querySelectorAll('input[type="hidden"], .aspNetHidden').forEach(n => n.remove());
   // The form's content.strip: the regulator's own furniture around the
   // document. Removed from the CLONE only, and after the link harvest
   // below reads `src`, so stripping the "Download Original PDF" button
@@ -307,13 +361,108 @@ JS_DETAIL = r"""(strip) => {
   for (const sel of (strip || [])) {
     try { clone.querySelectorAll(sel).forEach(n => n.remove()); } catch (e) {}
   }
+  // content.extract: LIFTED OUT rather than deleted. The block is removed from the
+  // stored document_html — so what remains is the instrument itself — and its own
+  // markup is handed back to be filed in extra_meta under the key that named it.
+  //
+  // MHRSD is the case: 68-92% of a detail page's text is an eight-card "related
+  // regulations" view (config/change_signals.yml measured it, and cuts its confirm
+  // hash at the same block). Left in, that block IS the document as far as any
+  // reader or analyser is concerned, and it changes whenever the ministry
+  // publishes anything at all.
+  const extracted = {};
+  for (const key of Object.keys(extract || {})) {
+    const spec = extract[key];
+    const sel  = (typeof spec === 'string') ? spec : (spec && spec.selector);
+    const pairs = (typeof spec === 'string') ? null : (spec && spec.pairs);
+    // `text: true` — store the block's TEXT, not its markup. For a one-value
+    // block (ZATCA's "Last Update: 25 Feb 2026 02:25 PM Saudi Arabia Time")
+    // outerHTML would put a div, a container class and a <p> into extra_meta
+    // around a single date, which is no more readable than leaving it in the
+    // document. Neither markup nor label/value pairs fit a lone value.
+    const asText = (typeof spec === 'string') ? false : !!(spec && spec.text);
+    if (!sel) continue;
+    let nodes = [];
+    try { nodes = Array.from(clone.querySelectorAll(sel)); } catch (e) { continue; }
+    if (!nodes.length) continue;
+
+    if (pairs && pairs.label && pairs.value) {
+      // A LABELLED BLOCK, read as data rather than kept as markup. MHRSD's
+      // sidebar is Drupal field markup — .field__label / .field__item — holding
+      // "Resolution Number 137440", "Release Date 23-Shawwal-1446-21-April-2025"
+      // and so on. Storing that as a slab of HTML in extra_meta would be no more
+      // readable than leaving it in the document; storing it as pairs makes each
+      // value addressable.
+      const got = {};
+      nodes.forEach(n => {
+        let labels = [];
+        try { labels = Array.from(n.querySelectorAll(pairs.label)); } catch (e) {}
+        labels.forEach(lab => {
+          const name = (lab.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!name) return;
+          // The value is the labelled sibling, or the nearest one inside the
+          // same field wrapper — Drupal nests them together.
+          // EVERY value under this label, not the first. A label can head a
+          // LIST: MHRSD's "Beneficiaries" is seven separate .field__item nodes
+          // (Businessmen, Individuals, Job seekers, localization, Women, recent
+          // graduates, youths), and taking querySelector alone stored just
+          // "Businessmen ," — a truncation that looks like a complete value.
+          let holder = lab.parentElement, vals = [];
+          for (let i = 0; i < 3 && holder && !vals.length; i++) {
+            try { vals = Array.from(holder.querySelectorAll(pairs.value)); } catch (e) {}
+            if (!vals.length) holder = holder.parentElement;
+          }
+          const parts = vals
+            .map(v => (v.textContent || '').replace(/\s+/g, ' ').trim())
+            // The site prints the separator INSIDE each item ("Businessmen ,"),
+            // so it has to come off or every value carries a trailing comma.
+            .map(v => v.replace(/^[,;|،\s]+/, '').replace(/[,;|،\s]+$/, ''))
+            .filter(Boolean)
+            // A wrapper and its child both match, so the same text arrives twice.
+            .filter((v, i, a) => a.indexOf(v) === i)
+            // Separator-only nodes: the site renders the commas as their own elements
+            .filter(v => !/^[,;|،\s]+$/.test(v));
+          const text = parts.join(' | ');
+          if (text) got[name] = text;
+        });
+      });
+      if (Object.keys(got).length) extracted[key] = got;
+    } else {
+      extracted[key] = asText
+        ? nodes.map(n => (n.innerText || n.textContent || '')
+                          .replace(/\s+/g, ' ').trim())
+               .filter(Boolean).join(' | ')
+        : nodes.map(n => n.outerHTML).join('');
+    }
+    nodes.forEach(n => n.remove());
+  }
+  // A LINK INSIDE A STRIPPED REGION IS NOT AN ATTACHMENT.
+  //
+  // `strip` was applied to the clone only, so it shaped document_html and left
+  // the link harvest untouched — and the harvest is what becomes pdf_docs. If a
+  // form declared a block "not the content", a PDF inside it is site chrome, not
+  // this instrument's file.
+  //
+  // Measured on ZATCA 2026-08-14: one footer link (ZATCA-Glossary.pdf, inside
+  // div#footerContent.footer-main) and one megamenu copy of it (a.dropdown-item
+  // inside div.dropdown-menu) attached themselves to 32 of 34 regulations.
+  // Neither sits in a semantic <footer> or <nav>, so the tag filter below could
+  // not see them. On the 8 pages that have no real attachment of their own the
+  // Glossary became the whole of document_url, giving 8 different regulations
+  // one identical url.
+  const stripSel = (strip || []).filter(Boolean).join(', ');
   const links = Array.from(src.querySelectorAll('a[href]'))
     .filter(a => !a.closest('header, footer, nav, [role="banner"], [role="contentinfo"]'))
+    .filter(a => !stripSel || !a.closest(stripSel))
     .map(a => ({href:a.href, text:(a.innerText||'').replace(/\s+/g,' ').trim().slice(0,200)}));
   // The clone is detached, so it has no layout and innerText is unreliable on it —
   // another reason textContent has to be the fallback here.
+  // Returned as-is. Tidying happens in Python (_tidy_html), never here:
+  // an escape sequence written into this snippet through a heredoc can
+  // arrive as a REAL control character, which silently turns the whole
+  // thing into a syntax error. Measured twice on 2026-08-13.
   return {html: clone.innerHTML,
-          text:(clone.innerText || clone.textContent || '').trim(), links};
+          text:(clone.innerText || clone.textContent || '').trim(), links, extracted};
 }"""
 
 JS_HREFS = "() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href)"
@@ -539,7 +688,16 @@ JS_TAB_LABELS = r"""(sel) => {
 }"""
 
 
-def _walk_tabs(page, tabs_cfg: dict, harvest, section_prefix) -> list[dict]:
+#: Fingerprint of what a tab is currently showing — the row hrefs, in order.
+#: Compared across clicks to tell "this tab really filtered" from "the click has
+#: not taken effect yet".
+JS_ROW_FINGERPRINT = r"""(sel) => Array.from(document.querySelectorAll(sel))
+  .map(e => { const a = e.querySelector('a[href]'); return a ? a.getAttribute('href') : ''; })
+  .join('|')"""
+
+
+def _walk_tabs(page, tabs_cfg: dict, harvest, section_prefix,
+               row_sel: str = "") -> list[dict]:
     """Click each tab in turn and harvest the rows it reveals.
 
     The tab's LABEL is the point. MOE renders all 119 documents in one flat
@@ -549,6 +707,29 @@ def _walk_tabs(page, tabs_cfg: dict, harvest, section_prefix) -> list[dict]:
 
     Tabs are re-queried by index on every iteration because clicking one usually
     re-renders the list, which invalidates any element handles held across it.
+
+    A CLICK THAT HAS NOT LANDED YET LOOKS EXACTLY LIKE A SHARED DOCUMENT
+    -------------------------------------------------------------------
+    This used to click, wait a fixed `wait_ms`, and harvest whatever was on
+    screen. When the site had not re-filtered yet, the PREVIOUS tab's rows were
+    harvested and filed under the NEW tab's label — a real document with a
+    category it does not have, which is worse than a missing one because nothing
+    downstream can tell it is wrong.
+
+    Measured on MOE 2026-08-12: 20 such rows. "Scholarship Procedures" and
+    others appeared under both `Scholarship Program` (true) and `Special
+    Education` (false). The tab strip needs 14s to render, but the per-tab
+    settle was 1500ms.
+
+    Pagination has had this guard for a long time — it stops on "rows unchanged
+    after click" (a disabled Next re-harvests page 1 forever). Tabs never got
+    it. Now the row fingerprint is compared across clicks: unchanged means wait
+    longer and retry, and if it is STILL unchanged the tab is recorded as
+    `unchanged-after-click` and NOT harvested.
+
+    Two tabs CAN legitimately share documents, and that is preserved — what is
+    rejected is a row set byte-identical to the previous tab's, which on a
+    16-tab site is a failed click rather than a coincidence.
     """
     sel = tabs_cfg["selector"]
     skip = {s.strip().lower() for s in (tabs_cfg.get("skip_labels") or [])}
@@ -561,7 +742,16 @@ def _walk_tabs(page, tabs_cfg: dict, harvest, section_prefix) -> list[dict]:
         emit({"event": "tabs_error", "error": str(e)[:200]})
         return []
 
+    def _fingerprint() -> str:
+        if not row_sel:
+            return ""                     # no selector: behave as before
+        try:
+            return page.evaluate(JS_ROW_FINGERPRINT, row_sel)
+        except Exception:
+            return ""
+
     log = []
+    prev_fp = _fingerprint()              # what the page shows before any click
     for i, label in enumerate(labels):
         if not label or label.strip().lower() in skip:
             # "All" is skipped by default on most sites: it repeats every other
@@ -576,6 +766,58 @@ def _walk_tabs(page, tabs_cfg: dict, harvest, section_prefix) -> list[dict]:
             log.append({"tab": label, "matched": 0, "new": 0, "status": "click-failed"})
             continue
         page.wait_for_timeout(wait_ms)
+
+        # Did the list actually change? If not, give it one more (longer) go
+        # before concluding the click did not land.
+        fp = _fingerprint()
+        if row_sel and fp and fp == prev_fp:
+            page.wait_for_timeout(max(wait_ms * 2, 3000))
+            fp = _fingerprint()
+
+        if row_sel and fp and fp == prev_fp:
+            # UNCHANGED HAS TWO CAUSES AND ONLY ONE IS A FAULT.
+            #
+            #   (a) the click has not landed  -> harvesting files the PREVIOUS
+            #       tab's rows under this label. Must skip.
+            #   (b) this tab was ALREADY the active one -> the rows on screen
+            #       are genuinely its own, and skipping loses them.
+            #
+            # (b) is the normal state of the FIRST tab: a site renders its
+            # default tab on load, so clicking it changes nothing. Treating that
+            # as a failure cost MOE its entire "General" section — 4 real
+            # documents, 136 -> 132, while every other tab was untouched.
+            #
+            # Ask the DOM which tab is selected rather than inferring it from the
+            # rows: aria-selected and the active class are what a tab strip uses
+            # to say so.
+            try:
+                is_active = page.evaluate(
+                    "(a)=>{const e=document.querySelectorAll(a[0])[a[1]];"
+                    " if(!e) return false;"
+                    " const s=e.getAttribute('aria-selected');"
+                    " if(s==='true') return true;"
+                    " const c=((e.className||'')+' '+((e.parentElement||{}).className||''))"
+                    "   .toString().toLowerCase();"
+                    " return /(^|\s)(active|selected|current)(\s|$)/.test(c);}",
+                    [sel, i])
+            except Exception:
+                is_active = False
+
+            if not is_active:
+                # Harvesting here would file the PREVIOUS tab's rows under this
+                # label. Skip, and say so loudly enough to be fixed in the hints —
+                # the usual cause is tabs.wait_ms being too short for the site.
+                log.append({"tab": label, "matched": 0, "new": 0,
+                            "status": "unchanged-after-click"})
+                emit({"event": "tab_unchanged", "label": label,
+                      "hint": "rows identical to the previous tab after clicking; "
+                              "raise tabs.wait_ms"})
+                continue
+            emit({"event": "tab_already_active", "label": label,
+                  "note": "rows unchanged because this tab was already selected; "
+                          "harvesting them as its own"})
+
+        prev_fp = fp
         res = harvest(list(section_prefix) + [label])
         log.append({"tab": label, "matched": res["matched"], "new": res["new"],
                     "status": "ok"})
@@ -595,7 +837,7 @@ JS_NEXT_STATE = r"""(sel) => {
   const cs = getComputedStyle(el);
   return {
     found: true,
-    disabled: /disabled/i.test(cls)
+    disabled: /\bdisabled\b/i.test(cls)
               || el.getAttribute('aria-disabled') === 'true'
               || el.hasAttribute('disabled'),
     hidden: r.width < 2 || r.height < 2 || cs.display === 'none' || cs.visibility === 'hidden',
@@ -667,8 +909,19 @@ def _click_through(page, pagination: dict, row_sel: str, link_sel: str,
                              "walked. Check it against `formfill inspect`.")
             break
 
+        # A click gets AT LEAST as long as the form says the page needs to
+        # render. CLICK_SETTLE_MS alone is a fixed 8s, and on a site slower than
+        # that the row set has simply not changed yet when the poll gives up —
+        # the walk then stops at page 1 and reports "rows unchanged after click",
+        # which reads like a wrong selector rather than a race.
+        #
+        # Measured on MHRSD 2026-08-12: the same form and selector returned 122
+        # rows on one run and 18 on the next, deciding on how fast the site
+        # happened to respond. A form that declares `wait_ms: 14000` is stating
+        # that this page needs 14s; a pagination click on it cannot need less.
+        settle_ms = max(CLICK_SETTLE_MS, int(wait_ms or 0))
         changed, waited = False, 0
-        while waited < CLICK_SETTLE_MS:
+        while waited < settle_ms:
             page.wait_for_timeout(CLICK_POLL_MS)
             waited += CLICK_POLL_MS
             if _row_signature(page, row_sel, link_sel) != sig_before:
@@ -844,6 +1097,11 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
     # and harvested nothing. The site was fine; the run simply looked too early.
     wait_ms = int(hints.get("wait_ms") or wait_ms)
 
+    # Only `attachment_is_document: "combined"` wants every link in a row, and
+    # it is the only mode that can consume them. Tying the two together means
+    # there is no way to collect the links and then quietly drop them.
+    COLLECT_ROW_LINKS["on"] = (hints.get("attachment_is_document") == "combined")
+
     started = time.time()
     pagination = dict(hints.get("pagination") or {"mode": "none"})
     if max_pages:
@@ -858,6 +1116,9 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
     targeted = {_url_key(u) for u in only_urls} if only_urls is not None else None
 
     strip_sels = list((hints.get("content") or {}).get("strip") or [])
+    # {extra_meta key: css selector} — moved OUT of document_html and INTO
+    # extra_meta, rather than deleted like content.strip.
+    extract_map = dict((hints.get("content") or {}).get("extract") or {})
     lib = hints.get("library") or {}
 
     sp = hints.get("section_path") or {}
@@ -1036,7 +1297,8 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                                     seed, rows, seen, trail, section_levels,
                                     dedupe_scope=trail[-1] if trail else "")
 
-                tab_log = _walk_tabs(page, tabs_cfg, _tab_harvest, section_prefix)
+                tab_log = _walk_tabs(page, tabs_cfg, _tab_harvest, section_prefix,
+                                     row_sel=row_sel)
                 page_log.extend([{"url": f"{seed}#{t['tab']}", **t} for t in tab_log])
                 plan_note = {"mode": "tabs", "tabs_walked": len(tab_log)}
                 if not rows:
@@ -1309,7 +1571,7 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                                 f"BLOCKED BY BOT PROTECTION at {r['href']}: {reason!r}")
                         continue
                     try:
-                        d = dp.evaluate(JS_DETAIL, strip_sels)
+                        d = dp.evaluate(JS_DETAIL, [strip_sels, extract_map])
                     except Exception:
                         records.append(_record(r, section, seed))
                         continue
@@ -1318,6 +1580,36 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                         # document, which is loaded once for every such row.
                         if in_page_ready is None:
                             in_page_ready = _prepare_in_page()
+
+                        # THE STAMPS DO NOT SURVIVE THE NAVIGATION ABOVE.
+                        #
+                        # These rows are addressed as `seed#fragment`, and the
+                        # `_load` at the top of this loop goes there. On a
+                        # JavaScript app that is a FULL RELOAD, not a same-document
+                        # jump — measured on GOSI 2026-08-12: after stamping two
+                        # panels, `goto(seed + "#1")` leaves
+                        # `document.querySelectorAll('[data-ff-panel]').length == 0`.
+                        #
+                        # So every row after the first found nothing. Row 1 worked
+                        # only by accident of ordering: for it `in_page_ready` was
+                        # still None, so _prepare_in_page() ran AFTER the navigation
+                        # and re-stamped. From row 2 the flag was cached True and
+                        # nothing re-stamped, which is why five of six GOSI Social
+                        # Insurance instruments and one of two Saned instruments
+                        # stored NO html while the first row held the whole page.
+                        #
+                        # Re-prepare whenever the stamp this row needs is absent.
+                        # Checking the selector rather than tracking navigations
+                        # means it does not matter WHY the stamps went away.
+                        if in_page_ready:
+                            try:
+                                present = dp.evaluate(
+                                    "(s) => !!document.querySelector(s)", r["in_page"])
+                            except Exception:
+                                present = False
+                            if not present:
+                                in_page_ready = _prepare_in_page()
+
                         if not in_page_ready:
                             records.append(_record(r, section, seed))
                             continue
@@ -1326,8 +1618,10 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                         except Exception:
                             d = None
                         if not d:
-                            warnings.append(f"panel content not found again for "
-                                            f"{r['title']!r} ({r['in_page']})")
+                            warnings.append(
+                                f"panel content not found for {r['title']!r} "
+                                f"({r['in_page']}) even after re-preparing the seed "
+                                f"— the panel selector may no longer match")
                             records.append(_record(r, section, seed))
                             continue
                     else:
@@ -1359,7 +1653,7 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                                     f"BLOCKED BY BOT PROTECTION at {r['href']}: {reason!r}")
                             continue
                         try:
-                            d = dp.evaluate(JS_DETAIL)
+                            d = dp.evaluate(JS_DETAIL, [strip_sels, extract_map])
                         except Exception:
                             records.append(_record(r, section, seed))
                             continue
@@ -1427,7 +1721,8 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                             # a generic button label falls back to the row title —
                             # "Download Original PDF" is not a document name.
                             _add_document(documents, h,
-                                          _doc_title(l.get("text"), r["title"]),
+                                          _doc_title(l.get("text"), r["title"],
+                                                     l.get("href") or ""),
                                           r["href"], row_path, declared=False)
                     records.append(_record(r, section, seed, {
                         "n_pdfs": len(doc_links),
@@ -1439,7 +1734,12 @@ def run(hints: dict, out_dir: str | Path, headless: bool = True, wait_ms: int = 
                         "pdf_docs": doc_files,
                         "text_len": len(d.get("text") or ""),
                         "text": d.get("text") or "",
-                        "html": d.get("html") or "",
+                        "html": _tidy_html(d.get("html") or ""),
+                        # Blocks lifted out by content.extract, keyed by the name
+                        # the form gave them. The pipeline files each under that
+                        # key in extra_meta, so nothing captured is lost — it is
+                        # simply no longer part of the document.
+                        "extracted": d.get("extracted") or {},
                     }))
                     if i % 25 == 0 or i == len(targets):
                         emit({"event": "detail_page", "done": i, "of": len(targets)})
@@ -1638,7 +1938,11 @@ def _harvest(page, row_sel, link_sel, css_fields, rx_fields, page_url, rows, see
                                       "cssFields": css_fields,
                                       "sectionLevels": list(section_levels),
                                       "rootSel": root_sel, "rootLabel": root_label,
-                                      "stampBase": stamp_base})
+                                      "stampBase": stamp_base,
+                                      # Set once per run from the hints, rather
+                                      # than threaded through five _harvest call
+                                      # sites that do not otherwise care.
+                                      "collectLinks": COLLECT_ROW_LINKS["on"]})
     except Exception as e:
         emit({"event": "harvest_error", "url": page_url, "error": str(e)[:200]})
         return {"matched": 0, "new": 0}
@@ -1686,6 +1990,10 @@ def _harvest(page, row_sel, link_sel, css_fields, rx_fields, page_url, rows, see
             "found_on": page_url,
             "section_trail": trail,
             "fields": fields,
+            # Only populated when the form asked for every link (see
+            # COLLECT_ROW_LINKS). _record turns these into pdf_docs so the
+            # pipeline can treat one row as an instrument with several files.
+            "all_links": raw.get("all_links") or [],
         }
         if raw.get("ff_row") is not None and not href:
             row["in_page"] = f"[data-ff-row=\"{raw['ff_row']}\"]"
@@ -1735,6 +2043,12 @@ def _record(r: dict, section: str, seed: str, extra: dict | None = None) -> dict
     # " > " is generic_crawler's separator (crawler.py::doc_section_path), so a
     # path from either engine reads the same downstream.
     path = " > ".join(trail) if trail else section
+    # Empty unless the form asked for every link in the row. One link is left
+    # empty on purpose: `url` already carries it, and listing it here as well
+    # would make the pipeline explode a one-file row into a duplicate.
+    _all = [f for f in (r.get("all_links") or [])
+            if (f.get("href") or "").startswith("http")]
+    _row_files = _all if len(_all) > 1 else []
     rec = {
         "section_path": path,
         "title": r["title"],
@@ -1743,15 +2057,19 @@ def _record(r: dict, section: str, seed: str, extra: dict | None = None) -> dict
         "linked_from_title": r["title"],
         "parent_page_url": r.get("found_on") or seed,
         "status": "",
-        "n_pdfs": 0,
-        "pdf_links": "",
+        # A listing row used to hardcode these empty, because one row was one
+        # file and its url was already `href`. A row that groups several files
+        # has to carry them, or everything after the first is lost before the
+        # pipeline ever sees it.
+        "n_pdfs": len(_row_files),
+        "pdf_links": " | ".join(f["href"] for f in _row_files),
         "text_len": 0,
         "html_file": "",
         "text": "",
         "html": "",
         "breadcrumb": trail or ([section] if section else []),
         "row_text": r.get("row_text", ""),
-        "pdf_docs": [],
+        "pdf_docs": _row_files,
         # The form's extracted fields, kept alongside so the orchestrator adapter
         # can map them onto RegulatoryDocument without re-parsing anything.
         "fields": r.get("fields", {}),
@@ -1775,17 +2093,47 @@ def _fill_rates(rows: list[dict], hints: dict) -> dict:
             for t in targets}
 
 
+#: Anchor text that names an ACTION rather than a document. "Press Here" is the
+#: one that reached the library — GOSI Social Insurance stored a whole
+#: regulation under the title `Press Here` because the pattern below listed
+#: "click here" but not "press here". ZATCA produced a `More` for the same
+#: reason. These read as real titles in a library and are impossible to search.
 _GENERIC_LINK_TEXT = re.compile(
-    r"^(download(\s+(the\s+)?(original\s+)?(pdf|file|document))?|pdf|view|open"
-    r"|click here|here|read more|more|link|attachment)\.?$", re.I)
+    r"^((press|click|tap)(\s+(here|now))?"
+    r"|download(\s+(the\s+)?(original\s+)?(pdf|file|document|here|now))?"
+    r"|pdf|view|view\s+more|open|see\s+more|show\s+more|read(\s+more)?"
+    r"|here|more|details?|link|attachment|file|document"
+    r"|اضغط\s*هنا"          # "press here"
+    r"|تحميل"                            # "download"
+    r"|المزيد)\.?$",              # "more"
+    re.I)
 
 
-def _doc_title(link_text: str, row_title: str) -> str:
-    """Prefer the row's title when the link's own text says nothing."""
+def _filename_title(url: str) -> str:
+    """A readable name from the file itself — the last resort before storing an
+    action word as a title. `.../tra00856_en-b-d-altrjmt.pdf` beats "Press Here"
+    because it is at least specific to this document."""
+    from urllib.parse import unquote, urlparse
+    stem = unquote((urlparse(url or "").path or "").rsplit("/", 1)[-1])
+    stem = re.sub(r"\.(pdf|docx?|xlsx?|pptx?|zip)$", "", stem, flags=re.I)
+    stem = re.sub(r"[-_+]+", " ", stem)
+    stem = re.sub(r"\s{2,}", " ", stem).strip()
+    return stem
+
+
+def _doc_title(link_text: str, row_title: str, url: str = "") -> str:
+    """Prefer the row's title when the link's own text says nothing.
+
+    Order: a meaningful link text, else the row/panel title, else the filename,
+    and only if all three are empty does the action word stand.
+    """
     t = (link_text or "").strip()
-    if not t or _GENERIC_LINK_TEXT.match(t):
-        return (row_title or "").strip() or t
-    return t
+    if t and not _GENERIC_LINK_TEXT.match(t):
+        return t
+    row = (row_title or "").strip()
+    if row:
+        return row
+    return _filename_title(url) or t
 
 
 def _add_document(documents: dict, url: str, title: str, found_on: str, section: str,
@@ -1858,9 +2206,91 @@ def _scraped_doc_title(link: dict, fallback: str) -> str:
     return title_from_slug(link.get("href") or "") or fallback
 
 
+_BLANK_RUN_RE = re.compile(r"(?:[ \t]*\r?\n){2,}")
+
+
+def _tidy_html(html: str) -> str:
+    """Trim the template indentation that makes a full cell look empty.
+
+    innerHTML keeps the page template's own whitespace, and an ASP.NET master
+    page opens with dozens of blank lines. Measured on ZATCA: every
+    document_html began with 133 whitespace characters containing 37 newlines,
+    so Excel rendered the cell as EMPTY while it held 11,927 characters and the
+    workbook read as a failed crawl.
+
+    Done in PYTHON rather than inside JS_DETAIL deliberately. The JS version
+    needs escaped tab and newline inside a regex literal; written through a
+    heredoc those became REAL control characters, the regex literal spanned a
+    line, the whole snippet turned into a syntax error, and every evaluate()
+    threw — all 34 rows silently stored no HTML at all.
+
+    Content is never touched: only runs of blank lines collapse, and a document
+    containing <pre> is returned with its whitespace intact.
+    """
+    if not isinstance(html, str) or not html:
+        return html or ""
+    if "<pre" in html.lower():
+        return html.strip()
+    return _BLANK_RUN_RE.sub("\n", html).strip()
+
+
+
+#: Query parameters that change between requests for the SAME file, and so must
+#: never reach a stored url.
+#
+# A url is not just a link here: for a multi-attachment row it is part of the
+# IDENTITY (doc_path + extra_meta.attachment_links), so a parameter that moves
+# per request makes the row look new on every crawl. That has now been measured
+# on two regulators:
+#
+#   Ministry of Commerce  dt=<DDMMYYYYHHMMSS>  the moment of the crawl.
+#                         Duplicated all 16 attachment rows on one re-crawl,
+#                         and would have added 16 more every run after that.
+#   CMA                   csrt=<digits>        a CSRF token, plus a literal
+#                         `undefined=undefined` from a bug in their page.
+#
+# Verified on MC before removing anything: with and without `dt` the endpoint
+# returned the same 261,632-byte PDF. These are cache-busters and session
+# tokens, not content selectors — `attId`, `lawId` and the like are NOT here and
+# must never be added, because those DO name the document.
+_VOLATILE_PARAMS = re.compile(
+    r"[?&](?:dt|csrt|_|ts|nonce|sid|session|token|undefined)=[^&]*", re.I)
+
+
+def stable_url(url: str) -> str:
+    """A url with per-request parameters removed, safe to store and compare."""
+    if not url:
+        return url
+    out = _VOLATILE_PARAMS.sub("", str(url))
+    # The first surviving parameter has to start the query again.
+    if "?" not in out and "&" in out:
+        out = out.replace("&", "?", 1)
+    return out.replace("?&", "?", 1).rstrip("?&")
+
+
 def _is_doc(url: str) -> bool:
+    """Is this link a FILE rather than a page?
+
+    Three ways a site can say so, and a document endpoint often has no file
+    extension at all:
+
+      1. an extension            .../law.pdf
+      2. a download PATH         .../download/123, .../document/abc, wpdmdl=
+      3. a download PARAMETER    /regapis?...&op=Download&attId=<guid>
+
+    (3) was missing, and Ministry of Commerce is built entirely on it: every one
+    of its 144 files is a `regapis` endpoint with no extension and no download
+    path segment. Under the old test none of them counted as a document, so
+    moving MC to a form produced 20 correctly-named laws carrying ZERO files —
+    while the generic engine, whose is_document_link() checks the query string,
+    had been finding all 144.
+
+    Matched on the PARAMETER, not on the substring "download" anywhere in the
+    url, so a page that merely mentions the word is not mistaken for a file.
+    """
     return bool(_DOC_EXT_RE.search(url)) or bool(
-        re.search(r"wpdmdl=|/document/|/download/", url, re.I))
+        re.search(r"wpdmdl=|/document/|/download/", url, re.I)) or bool(
+        re.search(r"[?&](?:op|action|mode|type)=download(?:&|$)|[?&]download=", url, re.I))
 
 
 def _ext_type(url: str) -> str:

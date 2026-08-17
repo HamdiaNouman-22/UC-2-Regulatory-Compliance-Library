@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 MIN_TEXT_LEN = 200
 
 
-class Orchestrator:
+class BaseOrchestrator:
     """
     Central pipeline controller.
 
@@ -102,6 +102,57 @@ class Orchestrator:
         FOR CBB: If regulation_id is provided, fetch from regulation_versions first.
         """
         extra_meta = getattr(doc, "extra_meta", {}) or {}
+
+        # ── TIER 0: an instrument published as SEVERAL files ──────────────
+        #
+        # SDAIA's "Personal Data Protection Law and The implementing Regulation"
+        # attaches three PDFs — the law, its implementing regulation and the
+        # transfer regulation. All three ARE the instrument, so all three have to
+        # reach the analyzer. Reading only document_url would analyse one and
+        # silently drop the regulatory text of the other two.
+        #
+        # Each file is delimited by a header naming it. The analyzer records a
+        # `source_reference` per obligation, so with markers present an obligation
+        # can still say WHICH file it came from — without them a combined row
+        # loses attribution between the law and its implementing regulation.
+        #
+        # Only for genuinely multi-file rows: one url falls through to the tiers
+        # below, unchanged.
+        #
+        # Read from extra_meta["attachment_links"], which is where the files live.
+        # This used to read a `document_urls` list field on the document; that
+        # field was removed 2026-08-12 in favour of extra_meta, so a multi-file
+        # instrument now survives into the database with no schema change at all.
+        # `document_url` is EMPTY on these rows, so without this tier they would
+        # reach the analyzer with no text whatsoever.
+        urls = [u.strip() for u in
+                str(extra_meta.get("attachment_links") or "").split("|") if u.strip()]
+        if len(urls) > 1:
+            logger.info(f"  TIER 0: instrument carries {len(urls)} files")
+            titles = [t.strip() for t in
+                      str(extra_meta.get("file_titles") or "").split("|")]
+            parts, got = [], 0
+            for i, u in enumerate(urls):
+                label = (titles[i] if i < len(titles) and titles[i]
+                         else u.rsplit("/", 1)[-1])
+                piece = self._download_and_extract_pdf(u, regulation_id)
+                if not piece or len(piece) < MIN_TEXT_LEN:
+                    # Recorded, not fatal. A row that loses one of three files is
+                    # still worth analysing, but the gap must be visible in the
+                    # text rather than inferred from a short document.
+                    logger.warning(f"    file {i+1}/{len(urls)} yielded no text: {u[:70]}")
+                    parts.append(f"=== FILE {i+1}/{len(urls)}: {label} | {u} ===\n"
+                                 f"[no text could be extracted from this file]")
+                    continue
+                got += 1
+                parts.append(f"=== FILE {i+1}/{len(urls)}: {label} | {u} ===\n{piece}")
+
+            if got:
+                combined = "\n\n".join(parts)
+                logger.info(f"  TIER 0: {got}/{len(urls)} files -> "
+                            f"{len(combined):,} chars combined")
+                return combined, "pdf_text"
+            logger.warning("  TIER 0: no file yielded text; falling through")
 
         # ── CBB VERSIONED CONTENT: Fetch from regulation_versions ──
         if regulation_id:
@@ -547,8 +598,14 @@ class Orchestrator:
                     fut.result()
                     logger.info(f"  [{done}/{total}] done: {str(doc.title)[:60]}")
                 except Exception as e:
-                    # One bad document must not abort the batch.
+                    # One bad document must not abort the batch — but the message
+                    # alone is not diagnosable. `'NoneType' object is not
+                    # subscriptable` told us nothing about WHICH call failed and
+                    # cost a whole debugging pass on 2026-08-16; the traceback
+                    # goes to debug so it is there when needed and silent when not.
                     logger.error(f"  [{done}/{total}] FAILED: {str(doc.title)[:60]} — {e}")
+                    logger.debug("document that failed: %s", str(getattr(doc, "document_url", ""))[:120],
+                                 exc_info=True)
         gc.collect()
 
     def run_for_cbb(self, mode: str = "auto", from_date=None, to_date=None, skip_analysis: bool = False):
@@ -1132,3 +1189,33 @@ class Orchestrator:
     # Keep old method names as aliases — they delegate to the unified method
     def _extract_and_analyze_versioned(self, doc, regulation_id: int, version_id: int):
         self._extract_and_analyze(doc, regulation_id, version_id=version_id)
+
+# --------------------------------------------------------------------------- #
+#  ONE ORCHESTRATOR                                                            #
+# --------------------------------------------------------------------------- #
+#
+# `Orchestrator` is no longer this class. It resolves to the MERGED class —
+# `dynamic_crawler.formfill.orch.NewOrchestrator`, which is BaseOrchestrator plus
+# the identity, classification, versioning and folder-tree logic.
+#
+# WHY THIS AND NOT A FLATTENED FILE
+#
+# The two were never rivals: NewOrchestrator subclasses this one and overrides
+# exactly five methods, with a single `super()` call between them. The
+# inheritance IS the merge. What was actually wrong is that callers could still
+# reach the BASE, and four of them did — jobs/run_regulator.py, jobs/sama_job.py,
+# jobs/sbp_job.py and crawler/cbb_monitoring_crawler.py all constructed it
+# directly, so those runs had NO change classification, NO version rows and NO
+# compliancecategory tree. They looked like they were working.
+#
+# Rebinding the name fixes that for every caller at once, without moving 2,130
+# lines of working code between files and hoping nothing shifted.
+#
+# The import is LAZY (PEP 562 module __getattr__) because orch.py imports this
+# module — doing it at the top would be a cycle. Anything that genuinely wants
+# the pre-merge behaviour asks for `BaseOrchestrator` by name and thereby says so.
+def __getattr__(name):
+    if name == "Orchestrator":
+        from dynamic_crawler.formfill.orch import NewOrchestrator
+        return NewOrchestrator
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

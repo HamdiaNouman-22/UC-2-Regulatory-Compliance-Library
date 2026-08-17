@@ -41,6 +41,8 @@ from urllib.parse import urljoin
 import requests
 
 from models.models import RegulatoryDocument
+from dynamic_crawler.formfill.runner import _ext_type, _is_doc
+from generic_crawler.crawler import content_key
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ class MOHCrawler:
     def __init__(
         self,
         regulator: str = "Ministry of Health",
-        source_system: str = "MOH-RULES",
+        source_system: str = "Rules and Regulations",
         category: str = "Regulations",
         timeout: int = 45,
     ):
@@ -139,10 +141,33 @@ class MOHCrawler:
                 category=self.category,
                 title=title,
                 document_url=url,
-                doc_path=[self.category],
+                # regulator > source_system > title, matching every other
+                # source. It used to be [category] alone, which rendered as a
+                # bare "Regulations" with no regulator above it.
+                doc_path=[self.regulator, self.source_system, title],
+                # DERIVED, never left unset. This crawler named no file_type at
+                # all, so all 83 MOH rows stored NULL — and every one of them is
+                # a PDF under /Ministry/Rules/Documents/. A NULL here reads as
+                # "we do not know what this document is", which is worse than
+                # wrong: it is invisible to any filter on document type.
+                # Same rule the generic wrapper uses, so MOH agrees with the rest
+                # of the library.
+                file_type=_ext_type(url) if _is_doc(url) else "HTML",
                 # `Modified` is the CMS's own last-changed stamp: the published
                 # date we have, and the change signal for a later sweep.
                 published_date=(it.get("Modified") or "")[:10] or None,
+                # NEVER LEAVE THIS UNSET. The classifier reads an absent hash as
+                # "cannot match", which is `modified`, and the modify path then
+                # wrote the empty hash back over the stored one — so every run
+                # re-modified all 83 documents and added two version rows each.
+                # Ten MOH documents reached five versions of identical content
+                # before this was caught on 2026-08-16.
+                #
+                # Hashed from FileRef + Modified rather than url + title: the
+                # generic crawler's url|title cannot move when a PDF is replaced
+                # behind an unchanged link, whereas SharePoint's `Modified` is
+                # the CMS's own answer to "did this document change".
+                content_hash=content_key(f"{file_ref}|{it.get('Modified') or ''}"),
                 extra_meta={
                     "crawl_source": self.category,
                     "moh_modified": it.get("Modified"),

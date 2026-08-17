@@ -6,7 +6,17 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 from bs4 import BeautifulSoup
 from typing import List, Optional, Dict
 from dataclasses import dataclass, field
+
+from crawler.fingerprint import stamp_content_hashes
 from datetime import datetime
+
+# The stored regulator name. Full name then acronym is the house style, and
+# this string is ALSO the first crumb of doc_path, so it is the root folder of
+# SAMA's tree. Changed 2026-08-15: it was the bare acronym "SAMA", while the
+# library already held the full name — a crawl would have created a SECOND
+# regulator beside the 6,101 rows already stored.
+SAMA_REGULATOR = "Saudi Arabian Monetary Authority (SAMA)"
+
 
 # Configure logging
 logging.basicConfig(
@@ -67,6 +77,12 @@ class RegulatoryDocument:
     published_date: Optional[str] = None
     reference_no: Optional[str] = None
     fingerprint: Optional[str] = None
+    # A real FIELD, not an attribute stamped on later: this is a dataclass and
+    # `asdict()` — which save_to_json and the wrapper both use — copies fields
+    # only, so a stamped-on attribute would be silently dropped between the
+    # crawl and the database. Distinct from `fingerprint` above, which nothing
+    # reads; `content_hash` is what change detection actually compares.
+    content_hash: Optional[str] = None
 
     # ---- Folder / compliance category ----
     compliancecategory_id: Optional[int] = None
@@ -481,7 +497,7 @@ class SAMARulebookCrawler:
 
                     # Create RegulatoryDocument
                     doc = RegulatoryDocument(
-                        regulator="SAMA",
+                        regulator=SAMA_REGULATOR,
                         source_system="SAMA RULEBOOK",
                         category="SAMA Circulars",
                         title=row['title'],
@@ -536,7 +552,10 @@ class SAMARulebookCrawler:
         finally:
             self._close_driver()
 
-        return documents
+        # The only exit that can carry rows — the early `return documents` above
+        # fires before anything is appended. Without a fingerprint every circular
+        # classifies `modified` on every run; see crawler/fingerprint.py.
+        return stamp_content_hashes(documents)
 
     def save_to_json(self, documents: List[RegulatoryDocument], filename: str = "sama_circulars.json"):
         """Save documents to JSON file"""

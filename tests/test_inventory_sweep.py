@@ -294,6 +294,13 @@ def test_a_bulk_republish_is_not_a_change(probed, tmp_path, monkeypatch):
 
 def test_confirm_hashes_the_bytes_and_refuses_a_partial_read(monkeypatch):
     class Response:
+        # `headers` and `encoding` are read by confirm(): since the CMA work it
+        # hashes VISIBLE TEXT for html and raw BYTES for everything else, and
+        # Content-Type is how it tells the two apart. This url is a .pdf, so the
+        # stub declares one and takes the byte path the assertion below expects.
+        headers = {"Content-Type": "application/pdf"}
+        encoding = "utf-8"
+
         def __init__(self, chunks):
             self.chunks = chunks
 
@@ -354,10 +361,18 @@ def test_an_unlisted_source_takes_the_defaults():
 
 
 def test_the_shipped_config_parses_and_says_what_was_measured():
+    """Regulator names are "Full Name (ACRONYM)" — house style since 2026-08-16.
+
+    These MUST be the strings the config uses, because `settings_for` falls back
+    to the file's defaults when a name does not match, and the default is
+    `confirm: false`. A stale name here does not raise; it silently asserts the
+    default and stops testing the measurement it was written to protect.
+    """
     config = iv.load_config()
-    aml = iv.settings_for(config, "Anti-Money Laundering Permanent Committee",
+    aml = iv.settings_for(config, "Anti-Money Laundering Permanent Committee (AML)",
                           "Rules and Regulations")
-    sdaia = iv.settings_for(config, "SDAIA", "Laws and Regulations")
+    sdaia = iv.settings_for(config, "Saudi Data and AI Authority (SDAIA)",
+                            "Laws and Regulations")
     assert aml["confirm"] is True        # every document at version 5, 3s apart
     assert sdaia["confirm"] is False     # counters 1-4, 18 distinct timestamps
     assert "simah.com" in iv.skip_hosts(config)

@@ -41,6 +41,8 @@ import logging
 import os
 import sys
 from pathlib import Path
+
+from dynamic_crawler.changesignal import find_existing
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -49,8 +51,70 @@ SHEETS = ("compliancecategory", "regulations", "regulation_versions",
           "compliance_analysis", "requirement_mappings")
 
 
+def _find_existing(repo, row: dict, url, path):
+    """Is this row already in the library?
+
+    THE ORCHESTRATOR'S IMPLEMENTATION, not a second one. This function used to
+    reimplement identity here, and every promote bug found on 2026-08-15 was a
+    rule `orch` already had and this copy did not — most damagingly, a row with
+    an empty document_url skipped the check entirely and was re-inserted on
+    every run. An empty document_url is not an edge case: it is the
+    multi-attachment convention.
+
+    `changesignal.find_existing` reads a workbook ROW (a dict) exactly as it
+    reads a crawled DOCUMENT (an object), so there is one answer to "is this the
+    same document?" for both paths.
+    """
+    return find_existing(repo, row)
+
+
+def _nan_to_none(v):
+    """NaN out, None in — `df.where(df.notna(), None)` above is not enough.
+
+    A column that is empty on every row is read as float64, and float64 CANNOT
+    HOLD None: pandas coerces the None straight back to NaN. The value then
+    reaches pyodbc as a Python float, which binds it as SQL float, and the
+    server rejects it before looking at the column's real type:
+
+        Parameter 10 (""): The supplied value is not a valid instance of data
+        type float ... (8023)
+
+    Parameter 10 is `year`, which is nvarchar and would have taken NULL happily.
+    All 11 AML rows failed on it, 2026-08-14, and the message names float rather
+    than the column, so it reads like a schema mismatch instead of an empty cell.
+    """
+    if isinstance(v, float) and v != v:      # NaN is the only value != itself
+        return None
+    # pandas NaT for an all-empty date column, same mechanism.
+    if v is not None and type(v).__name__ in ("NaTType", "NAType"):
+        return None
+    return v
+
+
 def _read(path: Path) -> Dict[str, list]:
+    """Every sheet, with oversized cells restored to full length.
+
+    A cell tops out at 32,767 characters, so ExcelRepo parks anything longer in a
+    `.fulltext.json` sidecar and leaves a marker. Reading the cell alone would
+    copy the PREVIEW into MSSQL and make the truncation permanent — a 92,995
+    character GOSI instrument would arrive as 32,028, its text stopping mid-way
+    through Article 26.
+    """
     import pandas as pd
+    from dynamic_crawler.formfill.excel_repo import resolve_overflow
+
+    sidecar = {}
+    sc = path.with_suffix(".fulltext.json")
+    if sc.exists():
+        try:
+            sidecar = json.loads(sc.read_text(encoding="utf-8"))
+            logger.info("loaded %d oversized value(s) from %s", len(sidecar), sc.name)
+        except Exception as e:
+            # Promoting truncated content silently is the failure this whole
+            # mechanism exists to prevent, so say so rather than carrying on.
+            logger.error("could not read the fulltext sidecar %s: %s — long "
+                         "values would be promoted TRUNCATED", sc, e)
+
     out = {}
     for s in SHEETS:
         try:
@@ -58,8 +122,11 @@ def _read(path: Path) -> Dict[str, list]:
         except Exception:
             out[s] = []
             continue
-        out[s] = [r for r in df.where(df.notna(), None).to_dict("records")
-                  if any(v not in (None, "") for v in r.values())]
+        rows = [r for r in df.where(df.notna(), None).to_dict("records")
+                if any(v not in (None, "") for v in r.values())]
+        out[s] = [{k: _nan_to_none(resolve_overflow(v, sidecar))
+                   for k, v in r.items()}
+                  for r in rows]
     return out
 
 
@@ -89,6 +156,14 @@ class _Doc:
         for k, v in row.items():
             setattr(self, str(k), v)
         self.doc_path = _as_list(row.get("doc_path"))
+        # EMPTY STATUS IS A DECISION NOBODY HAS MADE YET, and it must survive
+        # the trip into MSSQL. `_insert_regulation` reads None as "this code path
+        # never set it" and substitutes "active"; it keeps "" as-is. An empty
+        # Excel cell arrives as NaN and _nan_to_none turns it into None, which
+        # lands it on the wrong side of that test — all 11 AML rows were stored
+        # `active` on 2026-08-14, which is the state that decides whether a row
+        # moves into the main system database. So it is pinned back to "".
+        self.status = "" if row.get("status") in (None, "") else row.get("status")
         self.extra_meta = {}
         raw = row.get("extra_meta")
         if isinstance(raw, str) and raw.strip().startswith("{"):
@@ -155,7 +230,7 @@ def promote(xlsx: Path, repo, dry_run: bool = False) -> dict:
             # holds, not what the database would do with it. Pass --with-db to
             # make the number real: every write below is gated on dry_run, so a
             # dry run holding a repo only ever reads.
-            existing = repo.find_by_identity(url, path) if (repo and url) else None
+            existing = _find_existing(repo, row, url, path) if repo else None
             if existing:
                 # Already in the library. Promoting the same workbook twice must
                 # not duplicate it, and must not silently overwrite it either.
@@ -180,16 +255,63 @@ def promote(xlsx: Path, repo, dry_run: bool = False) -> dict:
     # ---- versions and analysis ------------------------------------------- #
     versions = analyses = mappings = 0
     if not dry_run:
+        # The regulator per workbook regulation id, so a version row can name its
+        # own source without re-reading the regulations sheet each time.
+        reg_regulator = {_int(r.get("id")): (r.get("regulator") or "")
+                         for r in regs if _int(r.get("id")) is not None}
         for v in data["regulation_versions"]:
-            rid = reg_map.get(_int(v.get("regulation_id")))
+            wb_id = _int(v.get("regulation_id"))
+            rid = reg_map.get(wb_id)
             if rid is None:
                 continue
             try:
+                # A SNAPSHOT THAT IS ALREADY STORED IS NOT A NEW VERSION.
+                #
+                # Nothing here checked, so promoting the same workbook twice
+                # wrote the same snapshot twice: measured 2026-08-14, MHRSD came
+                # to 121 versions for 62 regulations, every one of them `active`,
+                # which makes "the current version" ambiguous for 59 of them.
+                # Promote is supposed to be idempotent, and its own report says
+                # so — it reported `skipped_already_present: 62` on the very run
+                # that duplicated the versions.
+                #
+                # content_hash is the snapshot's identity: same hash, same bytes,
+                # nothing to record. A genuinely changed document arrives with a
+                # different hash and still gets its new row.
+                h = (v.get("content_hash") or "").strip()
+                prior = repo.get_regulation_versions(rid)
+                if h and any((x.get("content_hash") or "") == h for x in prior):
+                    continue
+                # ONE ACTIVE VERSION PER REGULATION.
+                #
+                # A new snapshot supersedes the one before it, so the previous
+                # rows have to stop claiming to be current. Without this a
+                # modified document ends up with two rows both marked `active`
+                # and nothing says which is the live one — measured 2026-08-15
+                # on the AML versioning test, where the edited document came out
+                # with v1 and v8678 both active.
+                #
+                # `insert_regulation_version` defaults new rows to active, so
+                # this runs FIRST and only when there is something to supersede.
+                if prior:
+                    repo.mark_all_versions_inactive(rid)
+                # EVERY argument is passed. This call used to name only three,
+                # and `regulator`, `updated_date` and `change_summary` have no
+                # defaults — so all 11 AML versions failed with a TypeError that
+                # promote caught and logged per row, leaving `regulations`
+                # populated and `regulation_versions` empty.
                 repo.insert_regulation_version(
                     rid,
-                    content_text=v.get("content_text") or "",
+                    regulator=reg_regulator.get(wb_id, ""),
                     content_html=v.get("content_html") or "",
-                    content_hash=v.get("content_hash") or "")
+                    content_text=v.get("content_text") or "",
+                    content_hash=v.get("content_hash") or "",
+                    updated_date=v.get("updated_date"),
+                    change_summary=v.get("change_summary") or "",
+                    # A version's status is the SNAPSHOT's lifecycle (active /
+                    # inactive), which the repo manages — not the regulation's
+                    # human approve/reject flag, which stays empty.
+                    status=v.get("status") or "active")
                 versions += 1
             except Exception as e:
                 logger.error("version insert failed (reg %s): %s", rid, e)

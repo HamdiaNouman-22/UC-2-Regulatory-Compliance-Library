@@ -25,7 +25,11 @@ sources:
     mode: generic
     seed_url: "https://zatca.gov.sa/en/RulesRegulations/Pages/rules.aspx"
     scope: prefix
-    source_system: "ZATCA-RULES"
+    source_system: "Rules and Regulations"
     category: "Laws and Regulations"
     max_pages: 150
     max_depth: 8
+    # The landing page renders its links client-side. At the engine default it
+    # reads back text_len=22 and queues NOTHING, so the crawl stops at the seed.
+    # Measured 2026-08-12.
+    wait_ms: 6000

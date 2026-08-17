@@ -100,3 +100,77 @@ jobs:
 # Twice daily (8 AM and 8 PM):
 #   Create two separate jobs with different hours
 # ============================================================
+
+  # ==========================================================
+  # KSA MONITORING
+  # ==========================================================
+  # Grouped by what each regulator's site will actually answer, because that —
+  # not the regulator's importance — decides how often and how expensively it
+  # can be checked. The measurements behind each grouping are in
+  # jobs/monitor_jobs.py and config/change_signals.yml.
+  #
+  # All four write STRAIGHT TO MSSQL and leave `status` EMPTY. "What arrived
+  # overnight and nobody has judged" is `WHERE status = ''`; a person sets
+  # active/reject through POST /update-status/regulations. Nothing here approves
+  # its own output.
+  #
+  # DISABLED BY DEFAULT. Turning these on is a server decision, not a repo one.
+  # ----------------------------------------------------------
+
+  # MOE, MOH, SDAIA, AML, MHRSD, ZATCA — one request per stored document,
+  # about a minute for all six. Crawls only what actually moved.
+  monitor_cheap_probes:
+    enabled: false
+    trigger: cron
+    schedule:
+      hour: 3
+      minute: 0
+
+  # SAMA's own "what changed" page: ~3 seconds instead of 6,101 probes. This is
+  # also the only signal that DISCOVERS documents missing from the library.
+  monitor_sama:
+    enabled: false
+    trigger: cron
+    schedule:
+      hour: 3
+      minute: 15
+
+  # mc.gov.sa refuses plain HTTP clients, so no probe can answer and the crawl
+  # IS the signal. ~16 minutes, so weekly rather than daily.
+  monitor_mc:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 4
+      minute: 0
+
+  # CMA cannot be probed (its Last-Modified is the current time) and cannot be
+  # confirmed at scale. Weekly, and the announcements tab MUST run as a recent
+  # window — a full walk measured 2h49m and still returned 300 of the 1,053
+  # announcements we hold, which would rule the other 753 `disappeared`.
+  # CMA_SINCE_DAYS controls that window.
+  monitor_cma:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 5
+      minute: 0
+
+  # ----------------------------------------------------------
+  # NO JOB FOR Saudi Exchange OR SIMAH — deliberately.
+  #
+  # Both hosts block us, and both blocks were caused by automated access from
+  # this one address: saudiexchange.sa went from crawling cleanly at 18:27 to
+  # Akamai 403 within two hours on 2026-08-15, and simah.com's note records its
+  # Cloudflare block as "triggered by repeated iteration, not volume".
+  #
+  # A scheduled retry is therefore not a way out of either block — it is the
+  # thing that made them, and it would deepen them. config/change_signals.yml
+  # `skip_hosts` already stops a sweep touching the hosts; giving them no job
+  # means nothing can schedule its way past that either.
+  #
+  # The `until` dates there are REVIEW dates, not expiries: a person retests by
+  # hand and deletes the entry. Nothing unblocks itself.
+  # ----------------------------------------------------------
