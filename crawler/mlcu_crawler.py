@@ -233,7 +233,14 @@ class MLCUCrawler:
             # so importing this crawler stays cheap for anything that only parses.
             from processor.Text_Extractor import OCRProcessor
             text, meta = OCRProcessor.extract_text_from_pdf_smart(pdf_path=str(path))
-            ocr_ok = OCRProcessor.is_ocr_available()
+            # NOT `is_ocr_available()`. That is true when ANY traineddata is
+            # present, so a box with only `eng` reports OCR as working and then
+            # OCRs Arabic pages with an English model. MLCU publishes only in
+            # Arabic, so the question that matters here is whether `ara` is
+            # installed — measured on this machine before the fix: is_ocr_available
+            # said True while installed_languages() was ['eng', 'osd'].
+            ocr_langs = OCRProcessor.ocr_langs()
+            ocr_ok = "ara" in ocr_langs.split("+")
         except Exception as e:
             logger.warning("MLCU text extraction failed %s: %s", url[:80], e)
             return "", "extract-failed", {}
@@ -249,7 +256,7 @@ class MLCUCrawler:
         # subtract those to get the number of pages actually read.
         usable = good - (0 if ocr_ok else ocred)
         info = {"pages": total, "ocr_pages": ocred, "ocr_available": ocr_ok,
-                "pages_read": max(usable, 0)}
+                "ocr_langs": ocr_langs, "pages_read": max(usable, 0)}
 
         # NFKC first. Four of the six 1065 documents extract as Arabic
         # PRESENTATION FORMS (U+FB50-FEFF) rather than ordinary Arabic
@@ -310,6 +317,7 @@ class MLCUCrawler:
                 doc.extra_meta["text_pages_read"] = info["pages_read"]
                 doc.extra_meta["text_ocr_pages"] = info["ocr_pages"]
                 doc.extra_meta["text_ocr_available"] = info["ocr_available"]
+                doc.extra_meta["text_ocr_langs"] = info.get("ocr_langs", "")
 
             # Hash the words, not the link. `content_key("")` is "" — falsy — so
             # `stamp_content_hashes` fills in the `document_url|title` fallback for
