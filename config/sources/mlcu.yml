@@ -6,19 +6,19 @@
 # impossible — here because a headless Chromium is REFUSED by the site's F5
 # BIG-IP ASM WAF while a plain desktop-UA GET returns 200.
 #
-#   Measured 2026-08-17 over 13 requests, all cached in UC-2-Scratch/mlcu_cache/.
+#   Measured 2026-08-17 over 13 requests, cached in UC-2-Scratch/MLCU/mlcu_cache/.
 #   24 documents across five leaves: 1066 (10), 1065 (6), 3142 (4), 3143 (2),
 #   3144 (2). Selector `ul.news-linksLargIcon li a` returns the same count as
 #   `a.AutoDownload` on all five.
 #
 # THE HOST HAS ALREADY REFUSED THIS ADDRESS ONCE. Re-run against
-# UC-2-Scratch/mlcu_cache/ via `snapshot_dir` before running live, and never
-# reach for a browser here. See the access rule in UC-2-Scratch/MLCU_TASKS.md.
+# UC-2-Scratch/MLCU/mlcu_cache/ via `snapshot_dir` before running live, and never
+# reach for a browser here. Access rule: UC-2-Scratch/MLCU/MLCU_TASKS.md.
 #
-# NO ETag, NO Last-Modified, and sitemap.xml carries NO <lastmod> — so
-# `signal: sitemap` is out and a stored-inventory probe has no honest token to
-# read. The change signal is still open (T8); nothing is wired into
-# change_signals.yml or the scheduler yet, deliberately.
+# NO ETag, NO Last-Modified, no sitemap <lastmod>, and `3145 اخبار` carries no
+# dates and no document links — every cheap signal was measured and ruled out, so
+# this source is `signal: crawl`. Wired in change_signals.yml and monitor_jobs.py;
+# its scheduler slot is `enabled: false` until a person has read the workbook.
 
 regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
 owner: ai.team
@@ -43,22 +43,21 @@ identity: [doc_path, title]
 # doc's first preference. `document_url|title` is the floor, not the rule: the
 # crawler sets content_hash from the text and `stamp_content_hashes` fills only
 # what it left blank, so a document that extracts to nothing falls back on its
-# own. Today that is 17 documents on text and 7 on the fallback, and every row
-# records which in extra_meta["content_hash_basis"].
+# own. Since tesseract was installed (2026-08-17) that is ALL 24 ON TEXT, none on
+# the fallback; extra_meta["content_hash_basis"] records which per row.
 #
-# The fallback is load-bearing, not tidiness. Seven documents here cannot be read
-# without OCR and this repo's machine has no tesseract; `content_key("")` is "",
-# so a blanket text rule would have given all seven THE SAME hash and reported
-# them `unchanged` straight through a replacement.
+# DO NOT REMOVE THE FALLBACK BECAUSE IT IS UNUSED. `content_key("")` is "", so on
+# a machine without the `ara` traineddata every unreadable document would share
+# ONE hash and report `unchanged` through any replacement. Seven were in that
+# state until the engine arrived — six scanned images (`no-pages-read`) and the
+# consumer-finance controls, whose fonts carry no ToUnicode map so every glyph
+# decodes to (cid:NNN) (`unreadable-text-layer`).
 #
-# Those seven split two ways, and the row says which in extra_meta["text_origin"]:
-# six are scanned images with no text layer at all (`no-pages-read`), and one —
-# the consumer-finance controls — has a FULL text layer whose fonts carry no
-# ToUnicode map, so every glyph decodes to (cid:NNN) (`unreadable-text-layer`).
-# The crawler discards text containing no Arabic character at all, because for an
-# Arabic-only publisher that is not the document. Page counts alone do not catch
-# it: the extractor's broken-text check flags four of that file's six pages and
-# one page's mojibake passes, so the arithmetic reads "a page was read".
+# The crawler also discards text with NO Arabic character in it: for an
+# Arabic-only publisher that is not the document. Page counts alone miss that —
+# the broken-text check flags four of that file's six pages and one page's
+# mojibake passes, so the arithmetic reads "a page was read". This guard is what
+# kept 1,290 characters of garbage from being stored and fingerprinted.
 #
 # WHAT THIS CHANGED, and it is not obvious. Under the old `document_url|title`
 # basis a `_v3` re-upload of IDENTICAL content classified as `modified` and wrote
@@ -66,14 +65,18 @@ identity: [doc_path, title]
 # `unchanged` — same words, same fingerprint. That is the better answer (a
 # re-upload is not an amendment, and a version row for identical content is the
 # noise content_hash exists to prevent), but it means the two halves of this
-# source now treat a pure re-upload differently: the 6 fallback documents still
-# version on it. A genuine amendment is caught either way.
+# source would treat a pure re-upload differently if anything were still on the
+# fallback. Nothing is. A genuine amendment is caught either way.
 #
-# REVISIT WHEN TESSERACT + THE `ara` TRAINEDDATA ARE INSTALLED. Extraction is
-# deterministic today — the same bytes hashed identically across three exports —
-# but the six scanned documents contribute nothing until OCR exists, and
-# installing it will change their text and re-version them once. Expect that; it
-# is not a fault.
+# THE REVISIT THIS ASKED FOR HAS HAPPENED. Measured 2026-08-17, tesseract 5.4.0
+# with `ara` from tessdata_best: all 24 extract Arabic (58-76% Arabic chars), 107
+# pages OCR'd, and the re-export moved EXACTLY the seven hashes that were on the
+# fallback while the seventeen already-readable ones stayed byte-identical.
+#
+# `ara.traineddata` needs admin to sit in Program Files, so it lives in a
+# user-owned folder with TESSDATA_PREFIX set in `.env`. A machine without that
+# falls back on those seven and re-versions them once when fixed — expected, not
+# a fault.
 #
 # The crawler also NFKC-normalises before hashing. Four 1065 documents extract as
 # Arabic presentation forms (U+FB50-FEFF) rather than ordinary Arabic, which
