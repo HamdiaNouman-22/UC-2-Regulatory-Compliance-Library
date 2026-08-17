@@ -62,3 +62,11 @@ fields:
 
 fetch_details: true
 notes: "Hand-written from the inspect digest; verify before approving."
+
+# Who this source belongs to. These two lead the folder trail AND the
+# section_path column in the Excel, so the crawler's own output shows the
+# same path the library will use. Defined here only — the pipeline reuses
+# them rather than prepending its own copy.
+library:
+  regulator: "SBP"
+  source_system: "Circulars"

@@ -1,0 +1,78 @@
+# SIMAH — Saudi Credit Bureau
+#
+# ⚠ DISABLED ON PURPOSE. Uncomment the source below only when BOTH are true:
+#     1. a snapshot exists            (formfill snapshot dynamic_crawler/hints/simah.rules.yml)
+#     2. a human has approved the form after seeing a real capture
+#   Until then this file documents the intent and nothing runs — the same pattern
+#   as SAMA's disabled generic sources in sama.yml.
+#
+# WHY THIS SOURCE IS `mode: custom` WHEN A FORM ALREADY DESCRIBES THE PAGE
+#
+#   The page is easy: dynamic_crawler/hints/simah.rules.yml reads it in twelve
+#   fields. What a form cannot express is HOW OFTEN WE MAY ASK. simah.com sits
+#   behind a Cloudflare firewall rule that returns "Sorry, you have been blocked"
+#   (a 1020-class block, not a challenge — there is nothing to solve), and on
+#   2026-07-30 that page was stored as 1,054 characters of "law".
+#
+#   So crawler/simah_wrapper.py owns the FETCH POLICY only — snapshot-first, at
+#   most one live navigation per run, never a retry after a block, exponential
+#   backoff (6h/24h/72h/7d/14d), and a hard refusal once the snapshot is past its
+#   grace period. Extraction still comes from the form and mapping from
+#   FormfillCrawler, so no selectors and no mapping logic live in that file.
+#
+# WHAT WE KNOW (2026-08-04)
+#   * A full run of this form is TWO loads of one URL, so volume never tripped the
+#     rule — repeated ITERATION did.
+#   * The blocked IP was residential (TELUS fibre, BC), not a datacentre range, so
+#     this is not a blanket hosting-ASN ban. Untested: whether a headed browser
+#     profile passes, which is what `formfill snapshot` exists to find out in one
+#     request.
+#   * The same two instruments are on SAMA's rulebook in BETTER shape — the Law as
+#     17 articles and the Implementing Regulations as 55 articles with a reference
+#     number and Hijri date, rather than one opaque PDF. If SIMAH stays blocked,
+#     that is the route, and SAMA is the issuing regulator anyway.
+
+regulator: SIMAH
+owner: ai.team
+
+# Read by build_regulator_crawler, which refuses rather than composing an empty
+# crawl. Delete this key to enable, once both gates at the top of this file are
+# met — an empty `sources:` list on its own cannot say any of this.
+# Plain ASCII on purpose: this string is raised and logged, and a console on
+# cp1252 has killed a run over a non-ASCII character before.
+# ENABLED 2026-08-13. The two gates the previous note asked for are now met:
+# the form is approved (forced, on snapshot evidence — see the hints file), and
+# the snapshot is present and verified byte-for-byte against its manifest
+# (sha256 f1efcac3..., captured 2026-08-05).
+#
+# THE BLOCK IS STILL ACTIVE. simah.com remains Cloudflare 1020-blocked and is in
+# change_signals.yml skip_hosts until 2026-09-04. `allow_live: false` below is
+# what keeps this source incapable of generating traffic; do not flip it without
+# a decision about the block.
+sources:
+  - name: "Rules and Regulations"
+    mode: custom
+    crawler_class: "crawler.simah_wrapper.SimahCrawler"
+    init_kwargs:
+      # Full name then acronym — house style. This is doc_path[0] and the
+      # root folder of SIMAH's tree, so it must match the form's
+      # library: block. Changed 2026-08-14.
+      regulator: "Saudi Credit Bureau (SIMAH)"
+      source_system: "Rules and Regulations"
+      category: "Rules and Regulations"
+      # TRUE now, unlike the draft below it replaced: the form carries a real
+      # approval stamp, so the gate is meaningful again rather than something to
+      # bypass.
+      require_approved: true
+      # Refresh the snapshot after this many days; refuse to publish past grace.
+      max_age_days: 30
+      grace_days: 90
+      # FALSE, and this is the important line. It makes the crawler provably
+      # incapable of generating traffic whatever the snapshot clock says. The
+      # draft had `true`; leaving it that way would have let a routine run reach
+      # a host we are blocked from and earn a longer block.
+      #
+      # Flip it only when someone has decided the block is over — that is the
+      # 2026-09-04 review, not a code change.
+      allow_live: false
+      headed: true

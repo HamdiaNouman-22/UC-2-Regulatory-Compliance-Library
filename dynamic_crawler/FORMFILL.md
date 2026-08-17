@@ -483,6 +483,161 @@ file no longer matches what was verified. Without that the gate is decorative.
   most heavily, because nav items never point at a PDF and document rows usually
   do.
 
+**Saudi Exchange (Tadawul) — Exchange Rules And Procedures**
+(`li:has(div.lngDownload)`, WebSphere Portal). Added 2026-08-02.
+**The first bilingual site.**
+
+- 3 full runs: **19 / 19 / 19, 0% spread. PASS.** Awaiting human approval.
+- Fill rates: title 100%, document_url 100%, **arabic_url 100%**,
+  **last_updated_date 100%**.
+- Section paths:
+  `Saudi Exchange > Exchange Rules And Procedures > Rules` (10) and
+  `… > Procedures` (9). Both groups live in one flat list, so the third level
+  comes from the nearest preceding `h3` — nothing on the card itself says which
+  section it belongs to.
+- The regulator is **"Saudi Exchange"**, not "Tadawul / Saudi Exchange".
+  `section_path.prefix[0]` becomes the top-level folder in the library, so it has
+  to match whatever the regulator is called everywhere else — two spellings would
+  build two sibling trees holding the same regulator's documents. "Tadawul"
+  survives only in the form's filename and output folder, and never reaches a
+  document.
+- **The date is a LAST UPDATED date, and is deliberately NOT `published_date`.**
+  It records when a rule was last revised, not when it was issued. The
+  orchestrator treats `published_date` as part of a document's identity
+  (`filter_new_documents` dedupes on title + published_date), so feeding it a
+  revision date would make an amended rule look like a brand-new document every
+  time Tadawul touched it. `last_updated_date` is a new `FIELD_TARGETS` entry that
+  lands in `extra_meta`.
+- ~14 s per run. No detail pages: every row links straight to a PDF.
+
+This site needed two new capabilities, both small and both generic:
+
+**`requires_headed: true`** — Tadawul is behind Akamai and fingerprints headless
+Chromium:
+
+| | |
+|---|---|
+| headless | **403 "Access Denied"**, 0 anchors |
+| headful | 200, 616 anchors, correct title |
+
+`curl` gets 403 too, so this is not a Playwright quirk. A form can now declare
+the requirement and it **overrides the caller** — the site's demand is a fact
+about the site, not a preference of whoever launched the run. Without it a
+scheduled headless run would harvest nothing and look perfectly healthy. On a
+headless server this still needs a virtual display (Xvfb); the flag makes the
+requirement visible rather than solving it.
+
+**`where_text` on a css field** — pick the match whose own visible text matches a
+pattern. Tadawul publishes every rule twice, as adjacent Arabic and English PDF
+links that are **indistinguishable in markup**: same tag, no class, no
+`hreflang`. They are always ordered Arabic-then-English, so `:nth-of-type()`
+would work today — and would **silently swap the languages** on any card that
+offered only one, filing an Arabic PDF as the English document. Selecting each by
+its own label cannot do that: if the site relabels them the field comes back
+empty and the fill-rate check fails loudly.
+
+```yaml
+document_url: {from: css, selector: "div.lngDownload a", attr: href, where_text: "^\\s*English\\s*$"}
+arabic_url:   {from: css, selector: "div.lngDownload a", attr: href, where_text: "^\\s*(Arabic|العربية|عربي)\\s*$"}
+```
+
+`arabic_url` is a new `FIELD_TARGETS` entry alongside the existing `urdu_url`,
+and maps to `extra_meta["arabic_pdf_link"]` — the key
+`crawler/cbb_monitoring_crawler.py` already uses for the same idea.
+
+Two data-quality notes found while testing, both real:
+
+- One card prints its date as `26th June, 2025` with **no "Last Updated:" label**,
+  so requiring the label lost that row's date. The label is now optional; each
+  card carries exactly one date, so this stays unambiguous.
+- One English filename is non-ASCII — it contains a curly apostrophe in
+  "Companies’". Not a mislabelled link; checked.
+
+**Ministry of Health — Rules and Regulations** (`a.event_block`, SharePoint).
+Added 2026-08-02. **The first click-paginated site, and the first with two lists
+on one URL.**
+
+- `moh.rules_recent` — 3 runs: **75 / 75 / 75, 0% spread. PASS.**
+- `moh.rules_archived` — 3 runs: **7 / 7 / 7, 0% spread. PASS.**
+- Fill rates on both: title 100%, document_url 100%, last_updated_date 100%.
+  Every row links straight to a PDF, so `fetch_details` is off.
+- Paths: `Ministry of Health > Rules and Regulations > Recent` (75) and
+  `… > Archived` (7).
+- ~15 s and ~7 s per run.
+
+**Why the page shows two paginations.** It is not a duplicate and not a
+top/bottom pair — there are two independent lists stacked on one URL, each with
+its own container, its own pager and its own total:
+
+| list | container | pager | states |
+|---|---|---|---|
+| Recent | `#documents-container` | `#pagination-controls` | 75 items / 8 pages |
+| Archived | `#documents-container-archived` | `#pagination-controls-archived` | 7 items / 1 page |
+
+So it is **two forms**, not one. A single form would have one pager driving rows
+it does not own. Note `#documents-container` is a name-prefix of
+`#documents-container-archived` but not a DOM ancestor — getting the selector
+wrong harvests the Recent list under the Archived path, silently.
+
+**"File Date" is an upload date, not a publication date.** Each card reads
+`(File Date: 2026-02-20 10:13:42) …`. Three things settle it:
+
+1. it carries seconds;
+2. "Total Hip Arthroplasty (THA) Rehabilitation Protocol **2025**" has File Date
+   **2026-02-23** — a 2025 protocol, filed in 2026;
+3. five documents were filed within 22 minutes — 10:06:32, 10:13:42, 10:19:17,
+   10:24:42, 10:28:33. That is one person doing a bulk upload, not a ministry
+   publishing five clinical guidelines five minutes apart.
+
+It therefore goes to `last_updated_date` → `extra_meta`, never `published_date`.
+
+### `pagination.mode: click` is now implemented
+
+Previously it walked only the first page. MOH forced it: every pager link is
+`href="javascript:void(0)"` with a `data-page` attribute, so there is no URL to
+construct — the list is redrawn in place.
+
+The walk stops on the **strongest available signal**, in this order:
+
+1. **the site's own stated total is reached** — best, and the reason it exists:
+   MOH applies the pager's `disabled` class with its own JS *after* the list
+   initialises, so a check can win the race and see an enabled "Next" on a
+   single-page list. Measured: before this, Archived walked 3 pages for 1 page of
+   content and Recent walked 10 for 8.
+2. **Next is disabled or hidden** — a pager that has run out does not remove the
+   control, it marks it. Clicking a disabled Next silently re-harvests page 1
+   forever.
+3. **two consecutive redraws add no rows** — the backstop.
+4. `max_pages` — reported as a **CAP**, never as an ending.
+
+A click that navigates instead of redrawing is not handled here; that has not
+come up yet.
+
+### `row_count_check.total` — page or list
+
+MOH exposed a real bug in the coverage check. `row_count_check` assumed the
+stated number counted rows on *this page* (DataTables: "Showing 1 to 685 of 685
+entries"). MOH states `of 75 items` while showing 10, so a complete crawl
+reported **"COVERAGE GAP: states 75, harvested 10 — 65 missing"**.
+
+`total` now says which it is — `page` (default, unchanged) or `list`. A list-wide
+total drives the pager stop condition and is checked **once, against the finished
+inventory**, which also had to move after the click walk rather than before it.
+
+This is the first site that publishes its own total, so it is the first crawl we
+can call **provably complete**: `coverage_ok: stated 75, harvested 75`. That is
+worth far more than any row count on its own — see §9 on why consistency is not
+coverage.
+
+### Unknown keys are now rejected
+
+I wrote `row_count:` instead of `row_count_check:`. It validated clean, did
+nothing, and cost a debugging session before anyone noticed the coverage check had
+never run. A form is data whose whole safety argument is that a reviewer can see
+what it says, and a key nobody reads breaks that quietly. `validate_hints` now
+rejects any unrecognised top-level key and suggests the nearest real one. All 11
+existing forms still validate clean.
+
 **Correction to something we believed:** SBP's circular listing is **not**
 JavaScript-drawn. The digest measured 304 links in the raw HTML vs 302 rendered.
 The `js_dependence` figure in every digest settles that question per site instead
@@ -490,9 +645,21 @@ of us arguing about it.
 
 ## 11. Limits, honestly
 
-- **`pagination.mode: click` only walks the first page.** URL-based pagination
-  (`url_offset` / `url_page`) is fully supported. SECP's "Show N entries"
-  in-page tables will need this finished.
+- **`pagination.mode: click` walks a next-button pager** (added 2026-08-03 for
+  MHRSD: 63 rows over 4 pages, 63/63/63 on verify). Each click is verified against
+  a fingerprint of the row set, so a dead control stops the walk instead of
+  re-reading page 1. **A page-size control ("Show N entries") is still not
+  handled** — that, not a next button, is what SECP needs.
+- **`panels` covers tab strips whose tabs are fragments** (added 2026-08-05 for
+  GOSI: six legal instruments on one url, 1 captured before). Panels are read
+  with `textContent` and never clicked — on GOSI the *active* panel reports 279
+  characters of innerText against 82,064, because its accordions are collapsed.
+  **Still open:** a row inside a panel that holds more than one file yields only
+  the first, so the section-level GOSI form gets 3 of 6 PDFs — SDAIA's bug in §9,
+  and the same fix applies (make the row the file). Verified live 2026-08-05:
+  6/6/6 and 2/2/2, 0% spread, and both text totals matched the snapshot figures
+  to the character. `verify` had to be taught that a `panels` form needs phase 2
+  — see `HANDOFF.md` §9.
 - **Trees are walked, but only via the menu.** A page reachable by no menu link
   cannot be found by walking one — that needs a sitemap or the site's search.
   `crawl_tree` has the same limit.

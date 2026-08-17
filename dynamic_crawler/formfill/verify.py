@@ -45,7 +45,8 @@ OPTIONAL_FILL_WARN = 60.0
 
 def verify(hints_path: str | Path, out_dir: str | Path, runs: int = DEFAULT_RUNS,
            tolerance: float = DEFAULT_TOLERANCE, headless: bool = True,
-           max_pages: int | None = None, sample: int = 10) -> dict:
+           max_pages: int | None = None, sample: int = 10,
+           snapshot: str | Path | None = None) -> dict:
     hints = load_hints(hints_path)                 # structurally valid or it raises
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -61,14 +62,18 @@ def verify(hints_path: str | Path, out_dir: str | Path, runs: int = DEFAULT_RUNS
     # Same reasoning applies to include_page: the seed page's own text and HTML
     # are captured in phase 2, so skipping it would verify a form that never
     # produces the document the form exists to produce.
-    needs_phase2 = hints.get("shape") == "tree" or bool(hints.get("include_page"))
+    # And to panels: a panel row has no url, so phase 1 only proves the tabs
+    # exist. Skipping phase 2 passed GOSI 6/6/6 with `documents: 0`.
+    needs_phase2 = (hints.get("shape") == "tree" or bool(hints.get("include_page"))
+                    or bool(hints.get("panels")))
 
     results, url_sets = [], []
     for i in range(1, runs + 1):
         print(f"\n--- verify run {i}/{runs} ---", flush=True)
         summary = runner.run(hints, out / f"run_{i}", headless=headless,
                              fetch_details=None if needs_phase2 else False,
-                             max_pages=max_pages, write_excel=(i == 1))
+                             max_pages=max_pages, write_excel=(i == 1),
+                             snapshot=snapshot)
         results.append(summary)
         rows = json.loads((out / f"run_{i}" / "rows.json").read_text(encoding="utf-8"))
         url_sets.append({r["href"] or f"::{r['title']}" for r in rows})
@@ -134,11 +139,25 @@ def verify(hints_path: str | Path, out_dir: str | Path, runs: int = DEFAULT_RUNS
                         "cannot approve a form. Re-run without --max-pages, and raise "
                         "pagination.max_pages in the form if that is what cut it short")
 
+    if snapshot:
+        # Never a failure — a snapshot verify is a legitimate and useful check that
+        # the form reads the page deterministically. But it measures the FORM, not
+        # the SITE: N runs against one saved file cannot see the run-to-run variance
+        # this gate exists to catch (SDAIA: 415/363/439 on identical code). So it
+        # warns, and `approve` refuses to stamp it.
+        warnings.append(
+            f"verified against a SNAPSHOT ({snapshot}), not the live site — this "
+            "proves the form reads that saved page consistently and nothing about "
+            "the site's stability. It cannot approve a form.")
+
     verdict = "FAIL" if failures else ("WARN" if warnings else "PASS")
 
     report = {
         "name": hints.get("name"),
         "seed": hints.get("seed_url"),
+        # What the runs were made against. `approve` reads this.
+        "source": "snapshot" if snapshot else "live",
+        "snapshot": str(snapshot) if snapshot else "",
         "verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "runs": runs,
         "counts": counts,
@@ -252,6 +271,17 @@ def approve(hints_path: str | Path, verify_json: str | Path, approved_by: str,
                          + "\nFix the form (formfill refine) and verify again, or pass "
                            "--force to record a deliberate override.")
 
+    # A snapshot verify cannot approve. Three runs against one saved file agree by
+    # construction — approving on that would make the gate theatre for exactly the
+    # sites (blocked ones) where we are least able to check anything.
+    if rep.get("source") == "snapshot" and not force:
+        raise SystemExit(
+            f"refusing to approve: the last verify ran against a snapshot "
+            f"({rep.get('snapshot')}), not the live site. Runs against one saved page "
+            "agree by construction, so this says nothing about stability. Verify "
+            "live when the site is reachable, or pass --force to record a deliberate "
+            "override (it is stamped into the file).")
+
     meta = dict(hints.get("meta") or {})
     meta["approved"] = True
     meta["approved_by"] = approved_by
@@ -261,7 +291,11 @@ def approve(hints_path: str | Path, verify_json: str | Path, approved_by: str,
         "verdict": rep["verdict"], "counts": rep["counts"],
         "spread_pct": rep["spread_pct"], "fill_rates": rep["fill_rates"],
         "verified_at": rep["verified_at"],
-        "forced": bool(force and rep["verdict"] == "FAIL"),
+        # Which of the two overrides was used, if either — a reader of the form
+        # must be able to see that this approval rests on something weaker.
+        "source": rep.get("source", "live"),
+        "forced": bool(force and (rep["verdict"] == "FAIL"
+                                  or rep.get("source") == "snapshot")),
     }
     # Patches the meta block in place — a full rewrite would delete the comments
     # that explain the form.

@@ -1,0 +1,518 @@
+```json
+{
+    "requirements": [
+        {
+            "requirement_id": "REQ-001",
+            "requirement_title": "Licensing and Authorization",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-001-OB-001",
+                    "obligation_text": "No person, natural or juristic, unlicensed in accordance with the provisions of this Law, shall carry on basically any of the banking business.",
+                    "execution_category": "One_Time_Implementation",
+                    "control": null
+                },
+                {
+                    "obligation_id": "REQ-001-OB-002",
+                    "obligation_text": "All applications, for the grant of licenses to carry on banking business in the Kingdom, shall be addressed to SAMA.",
+                    "execution_category": "One_Time_Implementation",
+                    "control": null
+                },
+                {
+                    "obligation_id": "REQ-001-OB-003",
+                    "obligation_text": "Any person not authorized basically to carry on banking business in the Kingdom is not allowed to use the word \"Bank\", or its synonyms, or any similar term in any language on his papers or printed matter, or in his commercial address, or his name or in his advertisements.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Marketing and Branding Compliance Review",
+                        "control_objective": "To prevent the unauthorized use of restricted terms like \"Bank\" in all public-facing materials and communications.",
+                        "control_description": "This control ensures all marketing materials, stationery, digital content, and public identifiers are reviewed before publication to confirm they do not contain prohibited terms unless the entity is duly authorized. A formal review and approval process is established for all new branding and marketing initiatives.",
+                        "control_owner": "Marketing & Communications Department",
+                        "control_type": "Preventive",
+                        "execution_type": "Hybrid",
+                        "frequency": "Event-Driven",
+                        "control_level": "Process",
+                        "evidence_generated": "Approved marketing material checklist and review logs.",
+                        "key_steps": [
+                            "All new marketing materials, website content, and stationery designs are submitted to the compliance review process.",
+                            "The Compliance or Legal Department reviews the materials against a checklist of prohibited terms (e.g., \"Bank\", \"مصرف\").",
+                            "Materials are only approved for publication or printing after receiving formal sign-off from the reviewing department.",
+                            "A central register is maintained logging all reviewed materials, their version, review date, and approval status.",
+                            "Periodic audits are conducted on published materials to ensure ongoing compliance."
+                        ],
+                        "residual_risk_if_failed": "Medium"
+                    }
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-002",
+            "requirement_title": "Capital, Reserves, and Deposit Limits",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-002-OB-001",
+                    "obligation_text": "The deposit liabilities of a bank shall not exceed fifteen times its reserves and paid-up or invested capital.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Capital Adequacy and Deposit Limit Monitoring",
+                        "control_objective": "To ensure the bank's deposit liabilities do not exceed fifteen times its capital and reserves.",
+                        "control_description": "This control involves the automated calculation and monitoring of the ratio of total deposit liabilities to the sum of reserves and paid-up capital. Alerts are generated if the ratio approaches or breaches the regulatory limit, triggering management review and corrective action.",
+                        "control_owner": "Treasury / Finance Department",
+                        "control_type": "Detective",
+                        "execution_type": "Automated",
+                        "frequency": "Daily",
+                        "control_level": "System",
+                        "evidence_generated": "Daily automated calculation reports and exception alerts with management review logs.",
+                        "key_steps": [
+                            "The core banking system extracts daily balances for deposit liabilities, reserves, and paid-up capital.",
+                            "An automated script calculates the ratio (Deposits / (Capital + Reserves)).",
+                            "The system generates an exception report and alerts the Treasury and Compliance departments if the ratio exceeds a predefined threshold (e.g., 14.5x).",
+                            "Management reviews the alert and prepares a corrective action plan if required.",
+                            "The calculation, results, and any management actions are logged in a secure repository for audit."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-002-OB-002-A",
+                    "obligation_text": "If the deposit liabilities exceed the prescribed limit, the bank must within one month of the date of submission of the statement referred to in paragraph 1 of Article 15, increase its capital and reserves to the prescribed limit.",
+                    "execution_category": "One_Time_Implementation",
+                    "control": null
+                },
+                {
+                    "obligation_id": "REQ-002-OB-002-B",
+                    "obligation_text": "If the deposit liabilities exceed the prescribed limit, the bank must within one month of the date of submission of the statement referred to in paragraph 1 of Article 15, deposit fifty percent of the excess with SAMA.",
+                    "execution_category": "One_Time_Implementation",
+                    "control": null
+                },
+                {
+                    "obligation_id": "REQ-002-OB-003",
+                    "obligation_text": "Every bank shall maintain with SAMA at all times a statutory deposit of a sum not less than fifteen percent of its deposit liabilities.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Statutory Deposit Reconciliation and Monitoring",
+                        "control_objective": "To ensure the bank maintains the required statutory deposit with SAMA, equal to at least 15% of its deposit liabilities.",
+                        "control_description": "This control reconciles the balance of the statutory deposit account held at SAMA with the bank's total deposit liabilities. A daily calculation ensures the deposit meets the minimum percentage, with procedures to top up the deposit if a shortfall is identified.",
+                        "control_owner": "Treasury Department",
+                        "control_type": "Detective",
+                        "execution_type": "Hybrid",
+                        "frequency": "Daily",
+                        "control_level": "Process",
+                        "evidence_generated": "Daily reconciliation reports, SAMA account statements, and fund transfer instructions for top-ups.",
+                        "key_steps": [
+                            "The Finance Department receives daily deposit liability totals from the core banking system.",
+                            "Treasury obtains the daily balance of the statutory deposit account from SAMA's portal or statements.",
+                            "A reconciliation officer calculates the required deposit (15% of liabilities) and compares it to the actual balance.",
+                            "If a shortfall exists, a report is escalated to senior Treasury management to authorize a top-up transfer to SAMA.",
+                            "All calculations, comparisons, and transfer authorizations are documented and filed."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-002-OB-004",
+                    "obligation_text": "Every bank shall maintain a liquidity reserve of not less than 15 percent of its deposit liabilities.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Liquidity Reserve Ratio Compliance Check",
+                        "control_objective": "To ensure the bank's liquidity reserve is maintained at or above 15% of its total deposit liabilities.",
+                        "control_description": "This control calculates the liquidity reserve ratio daily by identifying qualifying high-quality liquid assets (HQLA) and comparing their value to total deposit liabilities. Breaches are reported to ALCO (Asset-Liability Committee) for immediate action.",
+                        "control_owner": "Treasury / Asset-Liability Management (ALM)",
+                        "control_type": "Detective",
+                        "execution_type": "Automated",
+                        "frequency": "Daily",
+                        "control_level": "System",
+                        "evidence_generated": "Daily liquidity reserve calculation reports, ALCO meeting minutes discussing breaches.",
+                        "key_steps": [
+                            "The Treasury system automatically aggregates daily balances of qualifying liquid assets as per the bank's policy (aligned with SAMA requirements).",
+                            "The system also aggregates total deposit liabilities.",
+                            "The liquidity ratio (HQLA / Deposit Liabilities) is calculated and compared to the 15% threshold.",
+                            "An exception report is generated for any breach and sent to the ALCO and Chief Financial Officer.",
+                            "ALCO reviews the breach and documents the corrective actions taken in its meeting minutes."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-002-OB-005",
+                    "obligation_text": "Every bank shall, before declaring distribution of any profits, transfer a sum equal to not less than 25 percent of its net profits, to the statutory reserve, until the amount of that reserve equals as a minimum of the paid-up capital.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Pre-Dividend Statutory Reserve Transfer",
+                        "control_objective": "To ensure the mandatory transfer of at least 25% of net profits to the statutory reserve occurs before any profit distribution is declared.",
+                        "control_description": "This is a manual control embedded in the financial closing and dividend declaration process. It requires formal calculation and journal entry for the statutory reserve transfer, which must be reviewed and approved before the Board considers dividend declarations.",
+                        "control_owner": "Financial Control / Accounting Department",
+                        "control_type": "Preventive",
+                        "execution_type": "Manual",
+                        "frequency": "Event-Driven (Annual/Interim profit declaration)",
+                        "control_level": "Process",
+                        "evidence_generated": "Board papers including profit calculation, reserve transfer calculation, approved journal entry, and Board minutes approving dividends.",
+                        "key_steps": [
+                            "Following the finalization of audited/annual financial statements, Finance calculates the net profit for the period.",
+                            "The required transfer to statutory reserve (25% of net profit) is calculated, considering the reserve's current balance against paid-up capital.",
+                            "A journal entry for the transfer is prepared and must be approved by the CFO and reviewed by Internal Audit.",
+                            "The approved transfer entry is posted to the general ledger before the dividend proposal is presented to the Board.",
+                            "Board minutes explicitly note that the statutory reserve transfer has been made prior to the dividend declaration."
+                        ],
+                        "residual_risk_if_failed": "Medium"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-002-OB-006",
+                    "obligation_text": "No bank shall pay dividends or remit any part of its profits abroad, until its capital expenditures including aggregate foundation expenditures and losses incurred have been completely written off.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Capital Expenditure and Loss Write-Off Verification Prior to Distribution",
+                        "control_objective": "To prevent dividend payments or profit remittances abroad until all capital expenditures and losses are fully written off.",
+                        "control_description": "This control requires a formal attestation from the Financial Controller during the dividend planning process. The attestation confirms, based on ledger reviews, that all capital expenditures and accumulated losses have been fully amortized or written off according to the bank's accounting policy.",
+                        "control_owner": "Financial Control Department",
+                        "control_type": "Preventive",
+                        "execution_type": "Manual",
+                        "frequency": "Event-Driven (Before each dividend declaration or profit remittance)",
+                        "control_level": "Policy",
+                        "evidence_generated": "Formal attestation letter from the Financial Controller, supporting ledger extracts, and Board minutes referencing the attestation.",
+                        "key_steps": [
+                            "When a dividend distribution or profit remittance is proposed, the Treasury department requests a compliance check from Financial Control.",
+                            "Financial Control reviews the relevant general ledger accounts for capital expenditures, foundation costs, and loss accounts.",
+                            "The Controller verifies that the balances in these accounts are zero or that any remaining balances are fully provisioned/written off per the latest financial statements.",
+                            "A formal signed attestation is issued to the CFO and Board Secretary confirming compliance.",
+                            "The Board of Directors reviews and acknowledges this attestation in the minutes approving the distribution."
+                        ],
+                        "residual_risk_if_failed": "Medium"
+                    }
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-003",
+            "requirement_title": "Credit and Exposure Limits",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-003-OB-001",
+                    "obligation_text": "No bank shall grant a loan or extend a credit facility, or give a financial guarantee with respect to any natural or juristic person for amounts aggregating more than 25 percent of the Bank's reserves and paid-up or invested capital.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Single Obligor Limit (SOL) Monitoring and Enforcement",
+                        "control_objective": "To prevent aggregate exposure to any single counterparty from exceeding 25% of the bank's capital and reserves.",
+                        "control_description": "This control uses the credit risk system to aggregate all exposures (loans, guarantees, commitments) to a single obligor or connected group. The system blocks new transactions that would cause the total exposure to breach the limit, which is dynamically updated based on the latest capital figures.",
+                        "control_owner": "Credit Risk Management Department",
+                        "control_type": "Preventive",
+                        "execution_type": "Automated",
+                        "frequency": "Per-Transaction",
+                        "control_level": "System",
+                        "evidence_generated": "System logs of blocked transactions, monthly single obligor exposure reports, and limit configuration records.",
+                        "key_steps": [
+                            "The bank's capital and reserve amount is updated in the credit system quarterly or upon material change.",
+                            "The 25% limit is calculated and set for each obligor identification code (or group code).",
+                            "For every new credit transaction initiation, the system sums existing exposures and adds the proposed new exposure.",
+                            "If the proposed aggregate exceeds the limit, the system prevents the transaction from proceeding and generates an alert.",
+                            "Credit Risk Management reviews and approves any temporary limit excesses via a separate, documented override process with senior management approval."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-003-OB-002",
+                    "obligation_text": "No bank shall grant a loan or extending credit facilities, or issuing a guarantee or incurring any other financial liability on the security of its own shares.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Prohibition on Lending Against Own Shares",
+                        "control_objective": "To prevent the bank from accepting its own shares as collateral for any credit exposure.",
+                        "control_description": "This control involves configuring the collateral management system to reject the bank's own ISIN or security identifier as eligible collateral. Additionally, manual credit reviews include a specific check for this prohibited collateral type.",
+                        "control_owner": "Credit Administration / Collateral Management Department",
+                        "control_type": "Preventive",
+                        "execution_type": "Hybrid",
+                        "frequency": "Per-Transaction",
+                        "control_level": "System",
+                        "evidence_generated": "System configuration document prohibiting the bank's ISIN, credit application checklists with signed confirmation.",
+                        "key_steps": [
+                            "The bank's own share ISIN(s) are entered into the collateral management system's 'blocked' or 'ineligible' list.",
+                            "When collateral is pledged for a new or existing facility, the system validates the security against the blocked list.",
+                            "If a match is found, the system generates a hard stop and the transaction cannot be booked.",
+                            "Credit officers are required to confirm on the credit application checklist that no collateral consists of the bank's own shares.",
+                            "Internal Audit periodically tests the system configuration and samples credit files to verify control effectiveness."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-003-OB-003-A",
+                    "obligation_text": "No bank shall grant, without security, a loan or credit facilities, or issuing a guarantee or incurring any other financial liability in respect of a Member of its Board of Directors or its Auditors.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Related Party Lending - Board & Auditor Security Requirement",
+                        "control_objective": "To ensure all credit exposures to Board Members and External Auditors are fully secured.",
+                        "control_description": "This control mandates that any credit application for a Board Member or Auditor is automatically flagged as a Related Party Transaction (RPT). The bank's policy requires 100% security coverage for such exposures, which must be validated and documented before approval.",
+                        "control_owner": "Credit Risk Management / Compliance Department",
+                        "control_type": "Preventive",
+                        "execution_type": "Manual",
+                        "frequency": "Per-Transaction",
+                        "control_level": "Policy",
+                        "evidence_generated": "RPT approval forms, collateral valuation reports, and Board/Committee minutes approving the secured facility.",
+                        "key_steps": [
+                            "The customer onboarding/KYC system flags accounts belonging to Board Members and the appointed Auditors.",
+                            "Any credit application for a flagged party is routed through the enhanced RPT approval process.",
+                            "The credit proposal must include details of acceptable collateral that fully secures the exposure amount.",
+                            "The proposal requires approval from the Board's Related Party Transactions Committee or the full Board, excluding the interested member.",
+                            "The approved security is perfected and registered before disbursement, with documentation filed in the credit file."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-003-OB-003-B",
+                    "obligation_text": "No bank shall grant, without security, a loan or credit facilities, or issuing a guarantee or incurring any other financial liability in respect of Establishments not taking the form of joint-stock companies in which any member of its Board or Auditor is a partner or a manager or has a direct financial interest.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Related Party Lending - Non-Joint Stock Company Security Check",
+                        "control_objective": "To ensure credit exposures to non-joint-stock companies linked to Board Members or Auditors are fully secured.",
+                        "control_description": "This control relies on annual related-party declarations from Board Members and Auditors to identify their interests in non-joint-stock companies (e.g., partnerships, LLCs). Credit applications for these entities are subject to the same mandatory security requirement and RPT approval process.",
+                        "control_owner": "Compliance / Secretary of the Board",
+                        "control_type": "Preventive",
+                        "execution_type": "Manual",
+                        "frequency": "Per-Transaction",
+                        "control_level": "Process",
+                        "evidence_generated": "Annual related-party disclosure forms, RPT committee approval minutes, collateral documentation.",
+                        "key_steps": [
+                            "Board Members and Auditors submit annual declarations of their financial interests, including ownership/management roles in non-joint-stock companies.",
+                            "The Compliance department maintains a register of these declared entities.",
+                            "When a credit application is received, the beneficiary is checked against the related-party register.",
+                            "If a match is found, the application is processed as an RPT, requiring full security and special committee approval.",
+                            "The credit file must contain evidence of the link, the security documentation, and the special approval."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-003-OB-003-C",
+                    "obligation_text": "No bank shall grant, without security, a loan or credit facilities, or issuing a guarantee or incurring any other financial liability in respect of Persons or establishments not taking the form of joint stock companies in cases where any of the Bank's directors or Auditors is a Guarantor.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Guarantor-Based Related Party Security Validation",
+                        "control_objective": "To ensure any credit exposure where a Director or Auditor acts as a guarantor is fully secured.",
+                        "control_description": "This control requires credit officers to identify if any proposed guarantor for a facility is a Director or Auditor. If so, the primary exposure itself (to the borrower) must be fully secured by other collateral, as the personal guarantee does not satisfy the security requirement.",
+                        "control_owner": "Credit Department",
+                        "control_type": "Detective",
+                        "execution_type": "Manual",
+                        "frequency": "Per-Transaction",
+                        "control_level": "Process",
+                        "evidence_generated": "Credit application with guarantor details, checklist confirming guarantor check, documentation of primary collateral.",
+                        "key_steps": [
+                            "As part of the credit assessment, officers complete a mandatory field listing all proposed guarantors.",
+                            "The list of guarantors is checked against the bank's internal register of Directors and Auditors.",
+                            "If a Director or Auditor is identified as a guarantor, a mandatory control flag is triggered.",
+                            "The credit officer must then document the independent, tangible collateral securing the facility that is not the Director/Auditor guarantee.",
+                            "The file is reviewed by the Credit Risk Management department to confirm compliance before final approval."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-003-OB-004",
+                    "obligation_text": "No bank shall grant, without security, a loan or a credit facility or giving a guarantee or incurring any other financial liability in favor of any of its officials or employees for amounts exceeding a four month salary of any such concerned person.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Staff Loan Unsecured Limit Compliance",
+                        "control_objective": "To prevent unsecured staff loans from exceeding the value of four months' salary of the concerned employee.",
+                        "control_description": "This control is embedded in the staff loan origination system. It calculates the employee's gross salary, multiplies it by four, and sets this as the maximum unsecured limit. The system will only allow unsecured disbursements up to this cap; any amount above requires documented security.",
+                        "control_owner": "Human Resources / Retail Banking (Staff Loans Unit)",
+                        "control_type": "Preventive",
+                        "execution_type": "Automated",
+                        "frequency": "Per-Transaction",
+                        "control_level": "System",
+                        "evidence_generated": "System-generated staff loan offers showing calculated limit, loan application forms, and exception reports for secured staff loans.",
+                        "key_steps": [
+                            "The HR system provides a certified monthly feed of employee gross salaries to the staff loan platform.",
+                            "When an employee applies for a loan, the system retrieves their current salary and calculates the maximum unsecured limit (Salary x 4).",
+                            "If the requested loan amount is unsecured and within the limit, it proceeds. If it exceeds the limit, the system requires the loan officer to input collateral details.",
+                            "For loans with collateral, a manual review by the Credit Department is required to validate the security.",
+                            "Monthly, a report of all staff loans is generated, highlighting unsecured amounts against the 4-month salary limit for sampling by Internal Audit."
+                        ],
+                        "residual_risk_if_failed": "Medium"
+                    }
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-004",
+            "requirement_title": "Prohibited Activities and Investments",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-004-OB-001",
+                    "obligation_text": "No bank shall engage, whether for its own account or on a commission basis, in the wholesale or retail trade including the import or export trade.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Prohibited Trading Activity Monitoring",
+                        "control_objective": "To detect and prevent the bank from engaging in wholesale, retail, import, or export trading activities.",
+                        "control_description": "This control involves reviewing the general ledger and income statements for revenue streams that could indicate trading activities. A periodic forensic analysis is performed on large transactions and counterparties to ensure they align with permissible banking activities.",
+                        "control_owner": "Internal Audit / Financial Control",
+                        "control_type": "Detective",
+                        "execution_type": "Manual",
+                        "frequency": "Quarterly",
+                        "control_level": "Process",
+                        "evidence_generated": "Quarterly review reports, sampled transaction analysis, and attestations from business unit heads.",
+                        "key_steps": [
+                            "Financial Control runs a quarterly report mapping all income statement lines to approved banking activity categories.",
+                            "Any revenue recorded under suspicious categories (e.g., 'Trade Sales', 'Merchandise Income') is flagged for investigation.",
+                            "Internal Audit samples large or unusual transactions from the treasury and corporate banking ledgers to verify their nature.",
+                            "Business unit heads are required to provide quarterly attestations confirming their units have not engaged in prohibited trading.",
+                            "Findings from the review are reported to the Chief Compliance Officer and the Audit Committee."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-004-OB-002",
+                    "obligation_text": "No bank shall have any direct interest, whether as a stock-holder, partner, owner, or otherwise, in any commercial, industrial, agricultural or other undertaking unless within the limits referred to in paragraph 4 of this Article, except when such interest results from the satisfaction of debts due to the bank.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Non-Financial Investment Portfolio Review",
+                        "control_objective": "To ensure all direct investments in non-financial undertakings are within regulatory limits or are legitimate debt-satisfaction acquisitions.",
+                        "control_description": "This control requires a quarterly review of the bank's investment portfolio to identify any direct holdings in commercial, industrial, or agricultural companies. Each holding is classified as either 'permitted within limits', 'acquired via debt satisfaction', or 'prohibited'.",
+                        "control_owner": "Investment Department / Treasury",
+                        "control_type": "Detective",
+                        "execution_type": "Manual",
+                        "frequency": "Quarterly",
+                        "control_level": "Process",
+                        "evidence_generated": "Quarterly investment portfolio review report, supporting legal documents for debt-satisfaction acquisitions.",
+                        "key_steps": [
+                            "The Investment Department prepares a detailed quarterly listing of all direct equity and partnership investments.",
+                            "Each investment is analyzed to determine the nature of the underlying company (financial vs. non-financial).",
+                            "For non-financial investments, the origin is verified: either (a) checked against the dual percentage limits of Article 10(4), or (b) supported by legal documentation proving acquisition through debt recovery.",
+                            "Any investment that cannot be justified under (a) or (b) is escalated to senior management and the Board for immediate rectification.",
+                            "The review report is signed off by the Head of Investments and shared with Compliance."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-004-OB-002-DISPOSAL",
+                    "obligation_text": "All interests resulting from the satisfaction of debts due to the bank shall be disposed of within a period of two years or within any such longer period as may be determined in consultation with SAMA.",
+                    "execution_category": "One_Time_Implementation",
+                    "control": null
+                },
+                {
+                    "obligation_id": "REQ-004-OB-003",
+                    "obligation_text": "No bank shall purchase, without the approval of SAMA, stocks and shares of any bank conducting its business in the Kingdom.",
+                    "execution_category": "Governance_Approval",
+                    "control": null
+                },
+                {
+                    "obligation_id": "REQ-004-OB-004",
+                    "obligation_text": "No bank shall own stocks of any other joint-stock company incorporated in the Kingdom, in excess of ten percent of the paid up capital of such a company provided that the nominal value of these shares shall not exceed twenty percent of the bank's paid-up capital and reserves.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Dual Limit Check for Saudi Joint-Stock Company Investments",
+                        "control_objective": "To ensure the bank's investments in other Saudi joint-stock companies comply with both the 10% ownership limit and the 20% of capital & reserves value limit.",
+                        "control_description": "This automated control calculates two key ratios for each Saudi joint-stock company in the investment portfolio. It checks the bank's ownership percentage against the company's paid-up capital and the investment's value against the bank's own capital and reserves, flagging any breaches.",
+                        "control_owner": "Investment Department",
+                        "control_type": "Detective",
+                        "execution_type": "Automated",
+                        "frequency": "Monthly",
+                        "control_level": "System",
+                        "evidence_generated": "Monthly dual-limit compliance report, system alerts for breaches.",
+                        "key_steps": [
+                            "The investment system is fed with external data on the paid-up capital of all Saudi listed and unlisted joint-stock companies in the portfolio.",
+                            "The system calculates the bank's ownership percentage (Bank's Shares / Company's Total Shares) for each holding.",
+                            "It simultaneously calculates the ratio of the investment's book value to the bank's latest reported capital and reserves.",
+                            "A monthly report is generated highlighting any holdings where ownership >10% OR value >20% of bank capital.",
+                            "Breaches are immediately investigated, and a plan for divestment or capital increase is developed and reported to SAMA if necessary."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-004-OB-005",
+                    "obligation_text": "No bank shall acquire or lease real estate except in so far as may be necessary for the purpose of conducting its banking business, housing of its employees or for their recreation or in satisfaction of debts due to the Bank.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Real Estate Acquisition Justification and Approval",
+                        "control_objective": "To ensure all real estate acquisitions or leases are for permissible purposes only.",
+                        "control_description": "This control mandates a rigorous pre-approval process for any real estate transaction. A business case must be prepared justifying the acquisition under one of the permitted categories (business use, staff housing, staff recreation, or debt satisfaction) and approved by a high-level committee.",
+                        "control_owner": "Facilities Management / Real Estate Department",
+                        "control_type": "Preventive",
+                        "execution_type": "Manual",
+                        "frequency": "Event-Driven",
+                        "control_level": "Policy",
+                        "evidence_generated": "Approved business case with justification, Investment Committee or Board approval minutes, lease/purchase contracts.",
+                        "key_steps": [
+                            "Any proposal to acquire or lease real estate requires a formal business case document.",
+                            "The business case must explicitly select and justify the purpose from the four permitted categories in Article 10.",
+                            "The proposal is reviewed by the Legal and Compliance departments for regulatory alignment.",
+                            "It is then presented to the Bank's Investment Committee or a designated Management Committee for approval.",
+                            "The signed approval and business case are filed with the transaction documents, and the property is tagged in the fixed asset register with its approved purpose."
+                        ],
+                        "residual_risk_if_failed": "Medium"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-004-OB-006",
+                    "obligation_text": "In cases where a bank acquires real estate in satisfaction of debts due to it and such real estate is not necessary for the Bank's own banking business or housing of its employees or for their recreation, it shall liquidate such real estate within three years of its acquisition or within the period or periods approved by SAMA.",
+                    "execution_category": "One_Time_Implementation",
+                    "control": null
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-006",
+            "requirement_title": "Audit and Reporting",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-006-OB-001",
+                    "obligation_text": "Every bank shall annually appoint two auditors from amongst the approved list of auditors registered with the Ministry of Commerce and Industry.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "Annual Auditor Appointment Process",
+                        "control_objective": "To ensure the bank annually appoints two auditors from the official approved list.",
+                        "control_description": "This is a governance control managed by the Board Secretary. The process involves verifying the auditors' current registration on the official list, proposing their appointment (or re-appointment) to the Board, and documenting the decision in the annual general meeting (AGM) minutes.",
+                        "control_owner": "Secretary of the Board / Corporate Governance",
+                        "control_type": "Preventive",
+                        "execution_type": "Manual",
+                        "frequency": "Annual",
+                        "control_level": "Policy",
+                        "evidence_generated": "Board recommendation papers, AGM minutes, signed engagement letters, and verification of auditor registration.",
+                        "key_steps": [
+                            "Annually, the Board Secretary obtains the current approved list of auditors from the Ministry of Commerce and Industry.",
+                            "The Audit Committee evaluates the performance of the incumbent auditors and recommends appointment/re-appointment to the Board.",
+                            "The Board's recommendation is included in the AGM agenda for shareholder approval.",
+                            "The AGM minutes formally record the shareholder resolution appointing the two auditors.",
+                            "Signed engagement letters with the appointed auditors are obtained and filed, confirming their acceptance."
+                        ],
+                        "residual_risk_if_failed": "High"
+                    }
+                },
+                {
+                    "obligation_id": "REQ-006-OB-002",
+                    "obligation_text": "The bank management should send copies of these two reports to SAMA.",
+                    "execution_category": "One_Off_Reporting",
+                    "control": null
+                },
+                {
+                    "obligation_id": "REQ-006-OB-003",
+                    "obligation_text": "They should send a copy of the Auditor's report to SAMA.",
+                    "execution_category": "One_Off_Reporting",
+                    "control": null
+                },
+                {
+                    "obligation_id": "REQ-006-OB-004",
+                    "obligation_text": "Every bank shall furnish SAMA by the end of the following month with a consolidated monthly statement of its financial position relating to the previous month, which shall be true and correct, and be in the form prescribed by SAMA.",
+                    "execution_category": "One_Off_Reporting",
+                    "control": null
+                },
+                {
+                    "obligation_id": "REQ-006-OB-005",
+                    "obligation_text": "Every bank shall also furnish SAMA within six months of the close of its financial year with a copy of its annual balance sheet and profit and loss accounts certified by its auditors in the form prescribed by SAMA.",
+                    "execution_category": "One_Off_Reporting",
+                    "control": null
+                }
+            ]
+        },
+        {
+            "requirement_id": "REQ-007",
+            "requirement_title": "Information Provision and Inspection",
+            "obligations": [
+                {
+                    "obligation_id": "REQ-007-OB-001",
+                    "obligation_text": "SAMA may, at any time, request any bank to supply it, within a time limit it will specify and in the manner it will prescribe, with any information that it deems necessary for ensuring the realization of the purposes of this Law.",
+                    "execution_category": "Ongoing_Control",
+                    "control": {
+                        "control_title": "SAMA Information Request Management Process",
+                        "control_objective": "To ensure all ad-hoc information requests from SAMA are identified, responded to accurately, and submitted

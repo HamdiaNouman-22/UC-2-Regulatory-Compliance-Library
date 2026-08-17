@@ -1,0 +1,158 @@
+{
+  "label": "baseline",
+  "run_at_utc": "2026-08-03T06:15:39+00:00",
+  "regulation_id": 103296,
+  "title": "Banking Control Law",
+  "regulator": "SAMA",
+  "category": "Laws and Implementing Regulations",
+  "reference_no": "M/5",
+  "input_chars": 19274,
+  "model": "deepseek/deepseek-v3.2",
+  "error": null,
+  "totals": {
+    "wall_seconds": 614.55,
+    "llm_calls": 4,
+    "prompt_tokens": 15133,
+    "completion_tokens": 19627,
+    "total_tokens": 34760,
+    "cost_usd": 0.009563,
+    "truncated_calls": 1,
+    "cost_estimated_usd": 0.011275
+  },
+  "stages": [
+    {
+      "call_index": 1,
+      "stage": "stage1_extract",
+      "seconds": 50.82,
+      "prompt_tokens": 4447,
+      "completion_tokens": 2868,
+      "total_tokens": 7315,
+      "cached_prompt_tokens": 0,
+      "finish_reason": "stop",
+      "truncated": false,
+      "max_tokens_requested": 16000,
+      "temperature": 0.1,
+      "cost_usd": 0.00224606,
+      "provider": "AtlasCloud",
+      "cost_estimated_usd": 0.0022
+    },
+    {
+      "call_index": 2,
+      "stage": "stage2_normalize",
+      "seconds": 228.99,
+      "prompt_tokens": 3024,
+      "completion_tokens": 7177,
+      "total_tokens": 10201,
+      "cached_prompt_tokens": 0,
+      "finish_reason": "stop",
+      "truncated": false,
+      "max_tokens_requested": 16000,
+      "temperature": 0.1,
+      "cost_usd": 0.0035135,
+      "provider": "AtlasCloud",
+      "cost_estimated_usd": 0.003503
+    },
+    {
+      "call_index": 3,
+      "stage": "stage3_controls",
+      "seconds": 278.64,
+      "prompt_tokens": 5731,
+      "completion_tokens": 8000,
+      "total_tokens": 13731,
+      "cached_prompt_tokens": 0,
+      "finish_reason": "length",
+      "truncated": true,
+      "max_tokens_requested": 8000,
+      "temperature": 0.25,
+      "cost_usd": 0.003803299,
+      "provider": "StreamLake",
+      "cost_estimated_usd": 0.004488
+    },
+    {
+      "call_index": 4,
+      "stage": "stage4_report",
+      "seconds": 55.52,
+      "prompt_tokens": 1931,
+      "completion_tokens": 1582,
+      "total_tokens": 3513,
+      "cached_prompt_tokens": 0,
+      "finish_reason": "stop",
+      "truncated": false,
+      "max_tokens_requested": 4000,
+      "temperature": 0.3,
+      "cost_usd": null,
+      "provider": null,
+      "cost_estimated_usd": 0.001084
+    }
+  ],
+  "output": {
+    "requirements": 7,
+    "obligations": 38,
+    "controls": 0,
+    "obligations_per_req": 5.43,
+    "criticality": {
+      "High": 31,
+      "Medium": 7
+    },
+    "execution_category": {
+      "Ongoing_Control": 20,
+      "Governance_Approval": 8,
+      "One_Time_Implementation": 6,
+      "One_Off_Reporting": 4
+    },
+    "obligation_type": {
+      "Preventive": 18,
+      "Governance": 10,
+      "Reporting": 6,
+      "Corrective": 4
+    },
+    "mean_clarity_score": 4.68,
+    "needs_manual_review": 2,
+    "empty_obligation_texts": 0,
+    "stage4_chars": 7342,
+    "stage4_has_all_sections": true,
+    "stage4_table_rows": 29
+  },
+  "by_stage": [
+    {
+      "stage": "stage1_extract",
+      "calls": 1,
+      "seconds": 50.82,
+      "prompt_tokens": 4447,
+      "completion_tokens": 2868,
+      "total_tokens": 7315,
+      "cost_estimated_usd": 0.0022,
+      "truncated": 0
+    },
+    {
+      "stage": "stage2_normalize",
+      "calls": 1,
+      "seconds": 228.99,
+      "prompt_tokens": 3024,
+      "completion_tokens": 7177,
+      "total_tokens": 10201,
+      "cost_estimated_usd": 0.003503,
+      "truncated": 0
+    },
+    {
+      "stage": "stage3_controls",
+      "calls": 1,
+      "seconds": 278.64,
+      "prompt_tokens": 5731,
+      "completion_tokens": 8000,
+      "total_tokens": 13731,
+      "cost_estimated_usd": 0.004488,
+      "truncated": 1
+    },
+    {
+      "stage": "stage4_report",
+      "calls": 1,
+      "seconds": 55.52,
+      "prompt_tokens": 1931,
+      "completion_tokens": 1582,
+      "total_tokens": 3513,
+      "cost_estimated_usd": 0.001084,
+      "truncated": 0
+    }
+  ]
+}

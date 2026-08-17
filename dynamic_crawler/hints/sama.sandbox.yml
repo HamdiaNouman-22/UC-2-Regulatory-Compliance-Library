@@ -45,7 +45,10 @@ section_path:
   # "Regulatory Sandbox" instead of five levels deep.
   from_breadcrumb: ".breadcrumb a"
   # Fallback only, for any page that has no breadcrumb.
-  prefix: ["SAMA Rulebook", "Regulatory Sandbox"]
+  # Fallback only — from_breadcrumb above supplies the real trail, and it
+  # already starts "SAMA Rulebook". Only "Regulatory Sandbox" is added here,
+  # because the source YAML contributes the regulator and source_system.
+  prefix: ["Regulatory Sandbox"]
 
 # title and document_url come from the node itself on a tree, so `fields` is
 # only needed for anything extra. Nothing here publishes dates or reference
@@ -54,10 +57,42 @@ fields: {}
 
 fetch_details: true      # the page text IS the content — phase 2 is not optional here
 notes: "Hand-written from the inspect digest. Menu re-read on every page (Drupal book nav)."
+# Who this source belongs to. These two lead the folder trail AND the
+# section_path column in the Excel, so the crawler's own output shows the
+# same path the library will use. Defined here only — the pipeline reuses
+# them rather than prepending its own copy.
+# The PDF behind "Download Original PDF" IS the regulation here — the page is
+# a stub or a summary. So each attachment becomes its own document, with the
+# page kept as source_page_url. Contrast SBP, where the page is the circular
+# and its PDFs are annexures (default false).
+attachment_is_document: true
+
+library:
+  regulator: "SAMA"
+  source_system: "SAMA Rulebook"
+
+# The regulator's own furniture, removed from the captured page. Without this,
+# every SAMA document begins "Entire section Custom print Text Only Rich Text
+# Print / Save as PDF Versions (6 versions) Download Original PDF" — stored as
+# document content and fed to the LLM as if it were regulation.
+# The PDF link's href is still harvested; only the visible button is removed.
+content:
+  strip:
+    - "table.disp_toolbar"          # Entire section | Custom print | Text Only | …
+    - "table:has(#amount_versions)"  # the "(6 versions)" switcher — :has() targets
+                                     # the wrapping table, which has no class of its own
+    - "a.title"                      # the "Versions" link
+    - "a.submenu.icopdf"             # the Download Original PDF button (href still harvested)
+    - "div.related-content"          # the "Related Content" list of OTHER circulars —
+                                     # other regulations' titles stored inside this one
+    - "div.parent_transalated_doc"   # the "Translated Document" block: the same text
+                                     # again in another language, which doubles the
+                                     # tokens and makes the LLM read it twice
+                                     # (site's spelling of the class, not a typo here)
 meta:
   approved: true
-  approved_by: ai.team@benchmatrix.com
-  approved_at: '2026-08-02T14:53:17+00:00'
+  approved_by: your name
+  approved_at: '2026-08-03T09:18:59+00:00'
   verify:
     verdict: PASS
     counts:
@@ -68,6 +103,6 @@ meta:
     fill_rates:
       title: 100.0
       document_url: 100.0
-    verified_at: '2026-08-02T14:52:11+00:00'
+    verified_at: '2026-08-03T09:18:59+00:00'
     forced: false
-  form_hash: a1b650d82140
+  form_hash: db11199f6d16

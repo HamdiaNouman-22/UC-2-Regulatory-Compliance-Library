@@ -1,0 +1,106 @@
+# MOE — Systems, Regulations and Policies. A TAB-FILTERED listing.
+#
+# From `formfill inspect`:
+#   div.single-blog.single-blog-2   x119  links:119  docs:119
+#   14 links in raw HTML vs 372 rendered  -> JAVASCRIPT-RENDERED
+#
+# WHY THE TABS MUST BE CLICKED
+# All 119 cards are already in the DOM, so a plain crawl gets every document
+# without touching a tab. But the cards carry NO category: their only attributes
+# are `class="col-sm-4"` and an inline style. The left strip
+# (div.PhotoLibraryCategoriesItem, 16 of them) is the sole place "Personnel" or
+# "Scholarship Program" exists. So the tabs are clicked not for coverage but for
+# the ONE fact the markup never states.
+#
+# "All" is skipped: it repeats every other tab's contents, and a row harvested
+# under it would be filed as category "All" instead of its real one.
+#
+# EXPECT THE PER-TAB TOTAL TO EXCEED 119 IF documents are listed under more than
+# one category. That is not double counting — each is a separate placement, and
+# `documents` still de-duplicates on URL with the extra placements in `also_in`,
+# the same as SDAIA.
+#
+# View and Download point at the SAME pdf, so one document per card. Checked.
+
+version: 1
+name: moe.regulations
+seed_url: "https://www.moe.gov.sa/en/aboutus/aboutministry/pages/rpr.aspx"
+shape: list
+scope: prefix
+
+# The tab strip renders ~12s after DOMContentLoaded. The default 1200ms
+# settle queried `tabs.selector` before the tabs existed, so the run walked
+# 0 tabs and harvested 0 rows against a site that was working perfectly.
+wait_ms: 14000
+
+tabs:
+  selector: "div.PhotoLibraryCategoriesItem"
+  skip_labels: ["All"]
+  # 1500ms was too short: the tab strip itself needs 14s to render, and the card
+  # list had not re-filtered before it was harvested, so 20 documents were filed
+  # under a category they do not belong to (Scholarship rows under Special
+  # Education). The walker now verifies the row set changed and skips a tab whose
+  # click has not landed, but the right fix is to give it time in the first place.
+  wait_ms: 5000
+  max_tabs: 30
+
+row_selector: "div.single-blog.single-blog-2"
+detail_link_selector: "a[href]"
+
+pagination:
+  mode: none
+  max_pages: 1
+
+fields:
+  # h3.blog-title, NOT the div around it. div.blog-info also contains the two
+  # buttons, so every title came out as "... View Download" — 136 of 136 rows,
+  # and a fill-rate check cannot see it because the field was populated.
+  title:
+    from: css
+    selector: "h3.blog-title"
+    attr: text
+  document_url:
+    from: css
+    selector: "a[href]"
+    attr: href
+
+section_path:
+  # No prefix. The folder trail is built as
+  #     regulator > source_system > <this section path> > document title
+  # and BOTH of the crumbs we want are already supplied by the source YAML:
+  #
+  #     regulator:     "Ministry of Education"
+  #     source_system: "Systems, Regulations and Policies"
+  #
+  # Naming either of them here as well would repeat it as a second folder. The
+  # tab label the walker appends is the only crumb this page contributes.
+  prefix: []
+
+# Every card links straight to a PDF — no detail page to open.
+fetch_details: false
+notes: "Tab-filtered listing; the tab label is the only source of a document's category."
+# Who this source belongs to. These two lead the folder trail AND the
+# section_path column in the Excel, so the crawler's own output shows the
+# same path the library will use. Defined here only — the pipeline reuses
+# them rather than prepending its own copy.
+library:
+  regulator: "Ministry of Education"
+  source_system: "Systems, Regulations and Policies"
+meta:
+  approved: true
+  approved_by: lead
+  approved_at: '2026-08-12T11:36:56+00:00'
+  form_hash: bc421d06209e
+  verify:
+    verdict: PASS
+    counts:
+    - 136
+    - 136
+    - 136
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-03T09:11:18+00:00'
+    source: live
+    forced: false

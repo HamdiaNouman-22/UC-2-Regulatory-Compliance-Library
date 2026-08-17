@@ -18,8 +18,10 @@ fields:
     selector: a.showLawDocItem
     attr: href
 section_path:
-  prefix:
-  - Laws
+  # No prefix. The folder trail is  regulator > source_system > <here> > title,
+  # and the source YAML already supplies the first two crumbs. Repeating either
+  # of them here would create a duplicate folder.
+  prefix: []
   levels:
   - ancestor: div.regulationContent
     title: h4
@@ -28,13 +30,25 @@ section_path:
 fetch_details: false
 notes: Unsure if the row_selector scoped to div.showLawItems will capture all laws
   on all possible page variations.
+# Who this source belongs to. These two lead the folder trail AND the
+# section_path column in the Excel, so the crawler's own output shows the
+# same path the library will use. Defined here only — the pipeline reuses
+# them rather than prepending its own copy.
+library:
+  # FULL NAME, then the acronym — the house style, and this string is also the
+  # FIRST CRUMB of doc_path, so it is the root folder of MISA's tree in
+  # compliancecategory. Changed 2026-08-14 from the bare acronym "MISA".
+  regulator: "Ministry of Investment (MISA)"
+  # "Laws", not "Laws and Regulations" — the site's own tab is "Laws", and this
+  # crumb is what the library shows. Corrected 2026-08-13.
+  source_system: "Laws"
 meta:
   proposed_by: default (see llm_client.DEFAULT_MODEL)
   proposed_at: '2026-08-02T10:29:35+00:00'
   instruction: ''
   approved: true
-  approved_by: ai.team@benchmatrix.com
-  approved_at: '2026-08-02T10:36:48+00:00'
+  approved_by: your name
+  approved_at: '2026-08-03T09:09:47+00:00'
   verify:
     verdict: PASS
     counts:
@@ -45,7 +59,7 @@ meta:
     fill_rates:
       title: 100.0
       document_url: 100.0
-    verified_at: '2026-08-02T10:36:18+00:00'
+    verified_at: '2026-08-03T09:09:47+00:00'
     forced: false
   refined_from: dynamic_crawler/hints/misa.laws.yml
   feedback: 'Still wrong. I ran it: 55 laws came out as ''Laws > Sectoral Legislations''
@@ -56,3 +70,4 @@ meta:
     the desktop copies only, and build the path from the tab pane (div.regulationContent
     h4) and then the sector (div.showLawItems h4). Drop the Left/Right layout containers,
     they are not sections.'
+  form_hash: 6dd438540dbe

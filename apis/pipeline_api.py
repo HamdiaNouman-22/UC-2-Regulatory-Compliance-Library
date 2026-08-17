@@ -21,6 +21,7 @@ from processor.metadata_extractor import extract_metadata_from_text, extract_doc
 import docx as python_docx
 from fastapi.responses import JSONResponse, Response
 from processor.staged_LLM_Analyzer import StagedLLMAnalyzer
+from processor import analysis_cache
 from processor.requirement_matcher import RequirementMatcher
 from processor.LlmAnalyzer import LLMAnalyzer
 from orchestrator.orchestrator import Orchestrator
@@ -65,10 +66,6 @@ _diag_logger.info("=" * 60)
 gap_analyzer = GapAnalyzer()
 staged_analyzer = StagedLLMAnalyzer()
 requirement_matcher = RequirementMatcher()
-
-from crawler.cbb_monitoring_crawler import monitor_cbb_changes
-
-
 
 # Add to REGULATOR_PIPELINES dictionary
 REGULATOR_PIPELINES = {
@@ -170,6 +167,27 @@ def serialize_datetime(obj):
 
 def row_to_dict(row, columns):
     return {col: serialize_datetime(value) for col, value in zip(columns, row)}
+
+
+def _attach_regulation_counts(cursor, categories: list):
+    """Mark each category dict with whether it has regulations directly
+    attached, so a category that is both a folder (has children) and a
+    leaf (owns a regulation) surfaces both facts instead of just the tree."""
+    ids = [c["compliancecategory_id"] for c in categories]
+    counts = {}
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        cursor.execute(
+            f"SELECT compliancecategory_id, COUNT(*) FROM regulations "
+            f"WHERE compliancecategory_id IN ({placeholders}) "
+            f"GROUP BY compliancecategory_id",
+            ids,
+        )
+        counts = {row[0]: row[1] for row in cursor.fetchall()}
+    for c in categories:
+        cnt = counts.get(c["compliancecategory_id"], 0)
+        c["has_regulations"] = cnt > 0
+        c["regulation_count"] = cnt
 
 
 # ================================================================== #
@@ -1247,6 +1265,49 @@ def trigger_full_pipeline():
     }
 
 
+class CBBMonitoringRequest(BaseModel):
+    from_date: Optional[str] = None   # "YYYY-MM-DD" — default: last crawl date from DB
+    to_date:   Optional[str] = None   # "YYYY-MM-DD" — default: today
+
+
+@app.post("/trigger/CBB/monitoring", tags=["CBB"])
+def trigger_cbb_monitoring_with_dates(request: CBBMonitoringRequest = Body(default=None)):
+    """
+    Trigger CBB monitoring with optional custom date range.
+
+    - **from_date** `YYYY-MM-DD` — start of TR revision window (default: last crawl date - 1 day)
+    - **to_date**   `YYYY-MM-DD` — end of TR revision window   (default: today)
+
+    Example body for backfill May 25 -> Jul 16 2026:
+    ```json
+    { "from_date": "2026-05-25", "to_date": "2026-07-16" }
+    ```
+    Leave body empty (or `{}`) to use auto-detected dates from DB.
+    """
+    from crawler.cbb_monitoring_crawler import monitor_cbb_changes
+
+    req = request or CBBMonitoringRequest()
+    logger.info(f"CBB monitoring triggered via API — from={req.from_date} to={req.to_date}")
+    try:
+        result = monitor_cbb_changes(from_date=req.from_date, to_date=req.to_date)
+        return {
+            "status":       result.get("status", "done"),
+            "from_date":    req.from_date or "auto",
+            "to_date":      req.to_date   or "today",
+            "completed_at": datetime.utcnow().isoformat(),
+            "summary":      {
+                "changes_detected":   result.get("changes_detected", 0),
+                "new_processed":      result.get("new_processed",    0),
+                "modified_processed": result.get("modified_processed", 0),
+                "total_errors":       result.get("total_errors", 0),
+            },
+            "details": result,
+        }
+    except Exception as e:
+        logger.error(f"CBB monitoring API failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
 @app.post("/trigger/{regulator}")
 def trigger_regulator_pipeline(regulator: str):
     # Capture all logs
@@ -1896,6 +1957,7 @@ def get_categories(lang: str = Query("en")):
             rows    = cursor.fetchall()
             columns = [col[0] for col in cursor.description]
             categories = [row_to_dict(row, columns) for row in rows]
+            _attach_regulation_counts(cursor, categories)
 
         if lang == "ar":
             titles     = [c.get("title") or "" for c in categories]
@@ -1949,6 +2011,7 @@ def get_root_categories_only(lang: str = Query("en")):
             rows    = cursor.fetchall()
             columns = [col[0] for col in cursor.description]
             root_categories = [row_to_dict(row, columns) for row in rows]
+            _attach_regulation_counts(cursor, root_categories)
 
         if lang == "ar":
             titles     = [c.get("title") or "" for c in root_categories]
@@ -1980,6 +2043,7 @@ def get_root_categories_with_children(lang: str = Query("en")):
             rows    = cursor.fetchall()
             columns = [col[0] for col in cursor.description]
             categories = [row_to_dict(row, columns) for row in rows]
+            _attach_regulation_counts(cursor, categories)
 
         if lang == "ar":
             titles     = [c.get("title") or "" for c in categories]
@@ -2024,6 +2088,7 @@ def get_children(parent_id: int, lang: str = Query("en")):
             rows    = cursor.fetchall()
             columns = [col[0] for col in cursor.description]
             children = [row_to_dict(row, columns) for row in rows]
+            _attach_regulation_counts(cursor, children)
 
         if lang == "ar":
             titles     = [c.get("title") or "" for c in children]
@@ -2192,7 +2257,8 @@ def trigger_requirement_matching_v2(regulation_id: int):
                 "kpis":             [],
                 "_obligation_id":   ob["obligation_id"],
                 "_requirement_id":  row["requirement_id"],
-                # version_id is None for SAMA/SBP, populated for CBB
+                # version_id is whatever was active in regulation_versions when
+                # the analysis ran; None only if no version row existed yet.
                 "_version_id":      row.get("version_id"),
             })
 
@@ -2525,17 +2591,22 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
     For CBB, fetches content from regulation_versions.
     Use ?force=true to re-run and overwrite existing analysis.
     """
-    if not force:
-        existing_rows = repo.get_compliance_analysis(regulation_id)
-        if existing_rows:
-            return {
-                "success": True,
-                "regulation_id": regulation_id,
-                "skipped": True,
-                "reason": "Analysis already exists. Use ?force=true to re-run.",
-                "existing_count": len(existing_rows),
-                "next_step": f"POST /trigger/requirement-matching/{regulation_id}",
-            }
+    # The content-hash decision needs clean_text, which is computed further
+    # down, so the real skip happens after normalization. This early return only
+    # covers the case where text extraction itself fails -- previously the
+    # endpoint never reached extraction when an analysis already existed, and
+    # that must keep working.
+    existing_rows = [] if force else repo.get_compliance_analysis(regulation_id)
+
+    def _skip_response(reason: str, rows):
+        return {
+            "success": True,
+            "regulation_id": regulation_id,
+            "skipped": True,
+            "reason": reason,
+            "existing_count": len(rows),
+            "next_step": f"POST /trigger/requirement-matching/{regulation_id}",
+        }
 
     regulation = repo.get_regulation_by_id(regulation_id)
     if not regulation:
@@ -2582,8 +2653,49 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
             text_content = doc_html
             content_type = "html"
 
+    # ── LAST RESORT: the document IS the file at document_url ──────────
+    #
+    # Every source above reads text the library already holds. A PDF-only
+    # regulator holds none: its `document_url` IS the regulation, `document_html`
+    # is empty by design, and nothing ever wrote `content_text`. So the four
+    # checks above all miss and the endpoint refused with "No extractable text"
+    # — measured 2026-08-16 on the Anti-Money Laundering Law (id=3).
+    #
+    # That is not a property of one document. It blocks every PDF-only source in
+    # the library: AML 11, MOH 83, SDAIA 29, ZATCA Agreements 98, Tadawul 19,
+    # MISA's 65 PDFs — 300+ regulations that could not be analysed at all.
+    #
+    # The orchestrator already downloads and extracts exactly these files
+    # (`_download_and_extract_pdf`, with OCR when a PDF has no text layer), so
+    # this reuses that path rather than adding a second extractor. It is LAST on
+    # purpose: fetching is the expensive option, and any stored text is both
+    # cheaper and reproducible.
     if not text_content:
-        raise HTTPException(422, f"No extractable text for regulation {regulation_id}.")
+        doc_url = (regulation.get("document_url") or "").strip()
+        if doc_url.startswith("http"):
+            try:
+                from orchestrator.orchestrator import Orchestrator
+                from processor.downloader import Downloader
+                fetched = Orchestrator(
+                    crawler=None, repo=repo, downloader=Downloader()
+                )._download_and_extract_pdf(doc_url, regulation_id)
+                if fetched and len(fetched) > 200:
+                    text_content = fetched
+                    content_type = "pdf_text"
+                    logger.info("fetched %d chars from document_url for %s",
+                                len(fetched), regulation_id)
+            except Exception as e:                      # noqa: BLE001 - reported below
+                logger.warning("could not fetch %s for regulation %s: %s",
+                               doc_url[:90], regulation_id, e)
+
+    if not text_content:
+        raise HTTPException(
+            422,
+            f"No extractable text for regulation {regulation_id}. "
+            f"Checked: regulation_versions.content_text/content_html, "
+            f"extra_meta.org_pdf_text, document_html, and a download of "
+            f"document_url. A regulation with no stored text and no reachable "
+            f"file cannot be analysed.")
 
     normalizer = LLMAnalyzer()
     try:
@@ -2596,6 +2708,30 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
 
     raw_date = regulation.get("published_date")
     published_date = str(raw_date)[:10] if raw_date else ""
+
+    # ── Content-hash cache ────────────────────────────────────────────
+    # Re-analysing identical text produces a DIFFERENT answer (measured: 27/38/44
+    # obligations across three runs of one document -- docs/determinism.md), so
+    # not re-running is the only way to keep a stored analysis stable. This also
+    # makes the skip text-aware: a document that HAS changed now re-analyses
+    # automatically, instead of keeping a stale result indefinitely.
+    should_run, input_hash, cache_reason = analysis_cache.decide(
+        extra_meta=extra_meta,
+        clean_text=clean_text,
+        model=staged_analyzer.model,
+        has_existing_rows=bool(existing_rows),
+        force=force,
+    )
+    if not should_run:
+        if not analysis_cache.stored_hash(extra_meta):
+            # First sighting of a pre-cache analysis: record the hash now so the
+            # next call can make a real comparison.
+            analysis_cache.record(repo, regulation_id, extra_meta,
+                                  input_hash, staged_analyzer.model)
+        logger.info(f"Staged analysis SKIPPED for {regulation_id}: {cache_reason}")
+        return _skip_response(cache_reason, existing_rows)
+
+    logger.info(f"Staged analysis RUNNING for {regulation_id}: {cache_reason}")
 
     rows = staged_analyzer.analyze(
         text=clean_text,
@@ -2619,15 +2755,21 @@ def trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
             )
             conn.commit()
 
-    # Get version_id from regulation_versions for CBB
-    version_id = None
-    if regulation.get("regulator") == "Central Bank of Bahrain":
-        version_data = repo.get_active_regulation_version(regulation_id)
-        if version_data:
-            version_id = version_data.get("version_id")
+    # Anchor to whatever version_id is active for this regulation right now.
+    # Every regulator gets regulation_versions rows since the orchestrator
+    # merge (2026-08-16 handoff), not just CBB, so this used to leave
+    # version_id NULL for everyone else even though an active version
+    # existed — archive_current_analysis(regulation_id, version_id) then had
+    # nothing to stamp. Falls back to None only when no version row exists
+    # yet (e.g. a regulator that hasn't been through direct-write).
+    version_data = repo.get_active_regulation_version(regulation_id)
+    version_id = version_data.get("version_id") if version_data else None
 
-    # Store with version_id (populated for CBB, None for others)
     repo.store_analysis(rows, version_id=version_id)
+    # Only after a successful store -- a hash recorded against an analysis that
+    # failed to persist would suppress the retry.
+    analysis_cache.record(repo, regulation_id, extra_meta, input_hash,
+                          staged_analyzer.model)
     _invalidate_ar_cache(regulation_id)
 
     exec_counts, crit_counts = {}, {}
@@ -3045,7 +3187,7 @@ def get_analysis_versions(
                 "requirements": current_requirements,
                 "created_at": serialize_datetime(current_rows[0].get("created_at")),
                 "label": "Current (active — shown in all analysis endpoints)",
-                "note": "version_id is set for CBB regulations, null for SAMA/SBP/SECP."
+                "note": "version_id reflects the regulation_versions row active when the analysis ran; null only if no version existed yet."
             }
         else:
             current_summary = {
@@ -3054,7 +3196,7 @@ def get_analysis_versions(
                 "requirement_count": len(current_rows),
                 "created_at": serialize_datetime(current_rows[0].get("created_at")),
                 "label": "Current (active — shown in all analysis endpoints)",
-                "note": "version_id is set for CBB regulations, null for SAMA/SBP/SECP."
+                "note": "version_id reflects the regulation_versions row active when the analysis ran; null only if no version existed yet."
             }
 
     # ── Get archived versions (CBB only) ───────────────────────────────────
@@ -3599,7 +3741,8 @@ def root():
         "versioning_note": (
             "All regulators write to compliance_analysis (current). "
             "CBB additionally archives to compliance_analysis_versions on content change. "
-            "version_id is set on CBB rows; NULL for SAMA/SBP/SECP."
+            "version_id anchors to whatever regulation_versions row was active when the "
+            "analysis ran, for every regulator; NULL only if no version existed yet."
         ),
         "endpoints": {
             "upload":         "POST /upload-regulation",
@@ -4442,4 +4585,482 @@ def fetch_and_analyze(regulation_id: int):
         "text_extracted_chars": len(text),
         "analysis": analysis_result,
         "matching": matching_result,
+    }
+
+# ================================================================== #
+#  DEMO-ONLY, FULLY STANDALONE ANALYSIS ENDPOINTS                      #
+#                                                                       #
+#  Zero dependency on MSSQLRepository — it is unsafe to call here      #
+#  because several of its methods reference columns that don't exist   #
+#  on the current live schema:                                        #
+#    - compliance_analysis.is_current, .version_id                     #
+#    - sama_requirement_mapping.version_id, .obligation_id,            #
+#      .requirement_id                                                 #
+#    - regulations.content_hash (used by get_regulation_by_id)         #
+#                                                                       #
+#  This file opens its own pyodbc connection and writes/reads only     #
+#  columns confirmed to exist right now. Reuses staged_analyzer,       #
+#  requirement_matcher, LLMAnalyzer since those are pure processing    #
+#  classes with no DB calls of their own.                              #
+#                                                                       #
+#  Paste into pipeline_api.py anywhere after `staged_analyzer`,        #
+#  `requirement_matcher` are instantiated.                             #
+# ================================================================== #
+
+import pyodbc as _demo_pyodbc
+
+
+def _demo_get_conn():
+    conn_str = (
+        f"DRIVER={os.getenv('MSSQL_DRIVER')};"
+        f"SERVER={os.getenv('MSSQL_SERVER')};"
+        f"DATABASE={os.getenv('MSSQL_DATABASE')};"
+        f"UID={os.getenv('MSSQL_USERNAME')};"
+        f"PWD={os.getenv('MSSQL_PASSWORD')};"
+        f"TrustServerCertificate=yes;"
+    )
+    return _demo_pyodbc.connect(conn_str, timeout=30)
+
+
+def _demo_get_regulation(regulation_id: int) -> Optional[dict]:
+    """Raw fetch avoiding content_hash/title_hash (not confirmed to exist)."""
+    query = """
+        SELECT id, regulator, source_system, category, title,
+               document_url, published_date, reference_no,
+               department, year, source_page_url,
+               CAST(extra_meta AS NVARCHAR(MAX)) AS extra_meta,
+               document_html
+        FROM regulations
+        WHERE id = ?
+    """
+    with _demo_get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, [regulation_id])
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cols = [c[0] for c in cursor.description]
+        result = dict(zip(cols, row))
+        if result.get("extra_meta"):
+            try:
+                result["extra_meta"] = json.loads(result["extra_meta"])
+            except Exception:
+                result["extra_meta"] = {}
+        return result
+
+
+@app.post("/demo/trigger/staged-analysis/{regulation_id}", tags=["Demo (standalone)"])
+def demo_trigger_staged_analysis(regulation_id: int, force: bool = Query(False)):
+    if not force:
+        with _demo_get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM compliance_analysis WHERE regulation_id = ?",
+                [regulation_id],
+            )
+            existing_count = cursor.fetchone()[0]
+        if existing_count > 0:
+            return {
+                "success": True,
+                "regulation_id": regulation_id,
+                "skipped": True,
+                "reason": "Analysis already exists. Use ?force=true to re-run.",
+                "existing_count": existing_count,
+                "next_step": f"POST /demo/trigger/requirement-matching/{regulation_id}",
+            }
+
+    regulation = _demo_get_regulation(regulation_id)
+    if not regulation:
+        raise HTTPException(404, f"Regulation {regulation_id} not found")
+
+    extra_meta = regulation.get("extra_meta") or {}
+
+    text_content = None
+    content_type = None
+
+    org_pdf_text = extra_meta.get("org_pdf_text")
+    if org_pdf_text and len(org_pdf_text) > 200:
+        text_content = org_pdf_text
+        content_type = "pdf_text"
+
+    if not text_content:
+        doc_html = regulation.get("document_html")
+        if doc_html and len(doc_html) > 200:
+            text_content = doc_html
+            content_type = "html"
+
+    if not text_content:
+        raise HTTPException(422, f"No extractable text for regulation {regulation_id}.")
+
+    normalizer = LLMAnalyzer()
+    try:
+        clean_text = normalizer.normalize_input_text(text_content, content_type=content_type)
+    except Exception as e:
+        raise HTTPException(422, f"Text normalization failed: {e}")
+
+    if len(clean_text) < 200:
+        raise HTTPException(422, f"Text too short ({len(clean_text)} chars).")
+
+    raw_date = regulation.get("published_date")
+    published_date = str(raw_date)[:10] if raw_date else ""
+
+    rows = staged_analyzer.analyze(
+        text=clean_text,
+        regulation_id=regulation_id,
+        document_title=regulation.get("title", "Untitled"),
+        regulator=regulation.get("regulator") or "",
+        reference=regulation.get("reference_no") or "",
+        publication_date=published_date,
+    )
+
+    if not rows:
+        raise HTTPException(422, f"Pipeline extracted 0 requirements for regulation {regulation_id}.")
+
+    if force:
+        with _demo_get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM compliance_analysis WHERE regulation_id = ?", [regulation_id])
+            conn.commit()
+
+    insert_sql = """
+    INSERT INTO compliance_analysis (
+        regulation_id, analysis_json, requirement_id, requirement_title,
+        execution_category, criticality, obligation_type,
+        stage1_json, stage2_json, stage3_json, stage4_md,
+        schema_version, status, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETUTCDATE(), GETUTCDATE())
+"""
+    with _demo_get_conn() as conn:
+        cursor = conn.cursor()
+        for r in rows:
+            cursor.execute(
+    insert_sql,
+    [
+        regulation_id,
+        _json.dumps(r),  # NEW — satisfies analysis_json NOT NULL
+        r.get("requirement_id"),
+        r.get("requirement_title"),
+        r.get("execution_category"),
+        r.get("criticality"),
+        r.get("obligation_type"),
+        _json.dumps(r.get("stage1_json")) if r.get("stage1_json") is not None else None,
+        _json.dumps(r.get("stage2_json")) if r.get("stage2_json") is not None else None,
+        _json.dumps(r.get("stage3_json")) if r.get("stage3_json") is not None else None,
+        r.get("stage4_md"),
+        "demo",
+        "active",
+    ],
+)
+        conn.commit()
+
+    exec_counts, crit_counts = {}, {}
+    for r in rows:
+        ec = r.get("execution_category") or "Unknown"
+        cr = r.get("criticality") or "Unknown"
+        exec_counts[ec] = exec_counts.get(ec, 0) + 1
+        crit_counts[cr] = crit_counts.get(cr, 0) + 1
+
+    return {
+        "success": True,
+        "regulation_id": regulation_id,
+        "document_title": regulation.get("title"),
+        "text_length": len(clean_text),
+        "content_type": content_type,
+        "mode": "demo-standalone",
+        "analysis": {
+            "requirements_extracted": len(rows),
+            "by_execution_category": exec_counts,
+            "by_criticality": crit_counts,
+        },
+        "next_step": f"POST /demo/trigger/requirement-matching/{regulation_id}",
+    }
+
+
+@app.post("/demo/trigger/requirement-matching/{regulation_id}", tags=["Demo (standalone)"])
+def demo_trigger_requirement_matching(regulation_id: int):
+    with _demo_get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, regulation_id, requirement_id, requirement_title,
+                   stage2_json
+            FROM compliance_analysis
+            WHERE regulation_id = ?
+            """,
+            [regulation_id],
+        )
+        cols = [c[0] for c in cursor.description]
+        rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    if not rows:
+        raise HTTPException(
+            404,
+            f"No analysis for regulation {regulation_id}. "
+            f"Run POST /demo/trigger/staged-analysis/{regulation_id} first.",
+        )
+
+    extracted_requirements = []
+    for row in rows:
+        s2 = row.get("stage2_json") or {}
+        if isinstance(s2, str):
+            try:
+                s2 = json.loads(s2)
+            except Exception:
+                s2 = {}
+        for ob in s2.get("normalized_obligations", []):
+            extracted_requirements.append({
+                "requirement_text": ob["obligation_text"],
+                "department":       "",
+                "risk_level":       ob.get("criticality", "Medium"),
+                "controls":         [],
+                "kpis":             [],
+            })
+
+    if not extracted_requirements:
+        raise HTTPException(404, f"No obligations found for regulation {regulation_id}")
+
+    with _demo_get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COMPLIANCEREQUIREMENT_ID, TITLE, DESCRIPTION FROM COMPLIANCE_REQUIREMENT "
+            "WHERE TITLE IS NOT NULL AND DESCRIPTION IS NOT NULL"
+        )
+        existing_requirements = [
+            {"id": r[0], "title": r[1], "description": r[2]} for r in cursor.fetchall()
+        ]
+
+        cursor.execute(
+            "SELECT CONTROL_ID, TITLE, DESCRIPTION, CONTROL_KEY FROM DEMO_CONTROL WHERE TITLE IS NOT NULL"
+        )
+        existing_controls = [
+            {"id": r[0], "title": r[1], "description": r[2], "control_key": r[3]}
+            for r in cursor.fetchall()
+        ]
+
+        cursor.execute(
+            "SELECT KISETUP_ID, TITLE, DESCRIPTION, KISETUP_KEY FROM DEMO_KPI WHERE TITLE IS NOT NULL"
+        )
+        existing_kpis = [
+            {"id": r[0], "title": r[1], "description": r[2], "kisetup_key": r[3]}
+            for r in cursor.fetchall()
+        ]
+
+        cursor.execute("SELECT COMPLIANCEREQUIREMENT_ID, CONTROL_ID FROM DEMO_REQUIREMENT_CONTROL_LINK")
+        linked_controls_by_req = {}
+        for req_id, ctrl_id in cursor.fetchall():
+            linked_controls_by_req.setdefault(req_id, []).append(ctrl_id)
+
+        cursor.execute("SELECT COMPLIANCEREQUIREMENT_ID, KISETUP_ID FROM DEMO_REQUIREMENT_KPI_LINK")
+        linked_kpis_by_req = {}
+        for req_id, kpi_id in cursor.fetchall():
+            linked_kpis_by_req.setdefault(req_id, []).append(kpi_id)
+
+    match_results = requirement_matcher.match_requirements(
+        regulation_id=regulation_id,
+        extracted_requirements=extracted_requirements,
+        existing_requirements=existing_requirements,
+        existing_controls=existing_controls,
+        existing_kpis=existing_kpis,
+        linked_controls_by_req=linked_controls_by_req,
+        linked_kpis_by_req=linked_kpis_by_req,
+    )
+
+    requirement_mappings   = match_results["requirement_mappings"]
+    control_links          = match_results["control_links"]
+    kpi_links              = match_results["kpi_links"]
+    new_controls_to_insert = match_results["new_controls_to_insert"]
+    new_kpis_to_insert     = match_results["new_kpis_to_insert"]
+
+    # ── Store mappings (only columns that exist on sama_requirement_mapping) ──
+    if requirement_mappings:
+        insert_sql = """
+            INSERT INTO sama_requirement_mapping (
+                regulation_id, extracted_requirement_text,
+                matched_requirement_id, match_status, match_explanation, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, GETDATE())
+        """
+        with _demo_get_conn() as conn:
+            cursor = conn.cursor()
+            for m in requirement_mappings:
+                cursor.execute(
+                    insert_sql,
+                    [
+                        regulation_id,
+                        m["extracted_requirement_text"],
+                        m.get("matched_requirement_id"),
+                        m["match_status"],
+                        m.get("match_explanation"),
+                    ],
+                )
+            conn.commit()
+
+    partially_matched_ids = [
+        m["matched_requirement_id"]
+        for m in requirement_mappings
+        if m["match_status"] == "partially_matched" and m.get("matched_requirement_id")
+    ]
+    if partially_matched_ids:
+        with _demo_get_conn() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in partially_matched_ids)
+            cursor.execute(
+                f"UPDATE COMPLIANCE_REQUIREMENT SET IS_SUGGESTED = 1 "
+                f"WHERE COMPLIANCEREQUIREMENT_ID IN ({placeholders})",
+                partially_matched_ids,
+            )
+            conn.commit()
+
+    new_req_mappings = [m for m in requirement_mappings if m["match_status"] == "new"]
+    for i, mapping in enumerate(new_req_mappings):
+        try:
+            req_text = mapping["extracted_requirement_text"]
+            title = req_text[:100].strip() + ("..." if len(req_text) > 100 else "")
+            with _demo_get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO COMPLIANCE_REQUIREMENT (TITLE, DESCRIPTION, REF_KEY, REF_NO, IS_SUGGESTED, CREATEDON)
+                    OUTPUT INSERTED.COMPLIANCEREQUIREMENT_ID
+                    VALUES (?, ?, ?, ?, 1, GETDATE())
+                    """,
+                    [title, req_text, f"DEMO-AUTO-{regulation_id}-{i}", f"REG-{regulation_id}"],
+                )
+                new_req_id = cursor.fetchone()[0]
+                conn.commit()
+            for ctrl in new_controls_to_insert:
+                if ctrl.get("_req_id") is None:
+                    ctrl["_req_id"] = new_req_id
+            for kpi in new_kpis_to_insert:
+                if kpi.get("_req_id") is None:
+                    kpi["_req_id"] = new_req_id
+        except Exception as e:
+            logger.error(f"[demo-matching] Failed to insert new suggested requirement: {e}")
+
+    if control_links:
+        with _demo_get_conn() as conn:
+            cursor = conn.cursor()
+            for link in control_links:
+                cursor.execute(
+                    """
+                    INSERT INTO DEMO_REQUIREMENT_CONTROL_LINK (
+                        COMPLIANCEREQUIREMENT_ID, CONTROL_ID, MATCH_STATUS, MATCH_EXPLANATION, REGULATION_ID
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        link["compliancerequirement_id"], link["control_id"],
+                        link["match_status"], link.get("match_explanation"), link.get("regulation_id"),
+                    ],
+                )
+            conn.commit()
+
+    if kpi_links:
+        with _demo_get_conn() as conn:
+            cursor = conn.cursor()
+            for link in kpi_links:
+                cursor.execute(
+                    """
+                    INSERT INTO DEMO_REQUIREMENT_KPI_LINK (
+                        COMPLIANCEREQUIREMENT_ID, KISETUP_ID, MATCH_STATUS, MATCH_EXPLANATION, REGULATION_ID
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        link["compliancerequirement_id"], link["kisetup_id"],
+                        link["match_status"], link.get("match_explanation"), link.get("regulation_id"),
+                    ],
+                )
+            conn.commit()
+
+    for ctrl in new_controls_to_insert:
+        try:
+            with _demo_get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO DEMO_CONTROL (TITLE, DESCRIPTION, CONTROL_KEY, IS_SUGGESTED, CREATEDON)
+                    OUTPUT INSERTED.CONTROL_ID
+                    VALUES (?, ?, ?, 1, GETDATE())
+                    """,
+                    [
+                        ctrl["title"][:500], ctrl["description"],
+                        ctrl.get("control_key", f"DEMO-AUTO-CTRL-{ctrl['title'][:20]}"),
+                    ],
+                )
+                new_ctrl_id = cursor.fetchone()[0]
+                conn.commit()
+            req_id = ctrl.get("_req_id")
+            if req_id:
+                with _demo_get_conn() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        INSERT INTO DEMO_REQUIREMENT_CONTROL_LINK (
+                            COMPLIANCEREQUIREMENT_ID, CONTROL_ID, MATCH_STATUS, MATCH_EXPLANATION, REGULATION_ID
+                        ) VALUES (?, ?, 'new', ?, ?)
+                        """,
+                        [req_id, new_ctrl_id, ctrl.get("_explanation", ""), regulation_id],
+                    )
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"[demo-matching] Failed to insert new suggested control: {e}")
+
+    for kpi in new_kpis_to_insert:
+        try:
+            with _demo_get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO DEMO_KPI (TITLE, DESCRIPTION, KISETUP_KEY, FORMULA, IS_SUGGESTED, CREATEDON)
+                    OUTPUT INSERTED.KISETUP_ID
+                    VALUES (?, ?, ?, ?, 1, GETDATE())
+                    """,
+                    [
+                        kpi["title"][:500], kpi["description"],
+                        kpi.get("kisetup_key", f"DEMO-AUTO-KPI-{kpi['title'][:20]}"),
+                        kpi.get("formula", ""),
+                    ],
+                )
+                new_kpi_id = cursor.fetchone()[0]
+                conn.commit()
+            req_id = kpi.get("_req_id")
+            if req_id:
+                with _demo_get_conn() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        INSERT INTO DEMO_REQUIREMENT_KPI_LINK (
+                            COMPLIANCEREQUIREMENT_ID, KISETUP_ID, MATCH_STATUS, MATCH_EXPLANATION, REGULATION_ID
+                        ) VALUES (?, ?, 'new', ?, ?)
+                        """,
+                        [req_id, new_kpi_id, kpi.get("_explanation", ""), regulation_id],
+                    )
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"[demo-matching] Failed to insert new suggested KPI: {e}")
+
+    return {
+        "success":               True,
+        "regulation_id":         regulation_id,
+        "mode":                  "demo-standalone",
+        "obligations_processed": len(extracted_requirements),
+        "mappings": [
+            {
+                "extracted_requirement_text": m["extracted_requirement_text"],
+                "match_status":               m["match_status"],
+                "matched_requirement_id":     m.get("matched_requirement_id"),
+                "match_explanation":          m.get("match_explanation"),
+            }
+            for m in requirement_mappings
+        ],
+        "summary": {
+            "requirements": {
+                "total":             len(requirement_mappings),
+                "fully_matched":     sum(1 for m in requirement_mappings if m["match_status"] == "fully_matched"),
+                "partially_matched": sum(1 for m in requirement_mappings if m["match_status"] == "partially_matched"),
+                "new":               sum(1 for m in requirement_mappings if m["match_status"] == "new"),
+            },
+            "controls": {"new_links_added": len(control_links), "new_controls_created": len(new_controls_to_insert)},
+            "kpis":     {"new_links_added": len(kpi_links),     "new_kpis_created":     len(new_kpis_to_insert)},
+        },
     }

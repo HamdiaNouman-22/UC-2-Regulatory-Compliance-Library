@@ -1,0 +1,71 @@
+# CMA — Capital Market Authority — Laws & Regulations
+#
+# Wired 2026-08-11. CUSTOM, not generic, and deliberately so.
+#
+# CMA publishes nine tabs in six different page shapes — a chapter-structured
+# law, single pages, card grids, grouped cards, an iframe, sub-tabbed paginated
+# lists with detail pages, and a paginated FAQ. site_runners/cma_laws.py has a
+# handler per shape. A generic link walk collects the easy ones and silently
+# under-collects the rest, and a partial crawl that looks successful is worse
+# than none: the completeness gate would take that undercount as its baseline
+# and never report the gap.
+#
+# crawler/cma_crawler_wrapper.py adapts that runner to the interface
+# `build_regulator_crawler(mode: custom)` expects. It adds no crawling logic —
+# if a tab is wrong, fix it in site_runners/cma_laws.py.
+#
+# CALIBRATED 2026-08-13 against a real full run: 705 R&R + 323 Announcements
+# (12-month window) = 1028 rows, 0 blocked pages, 0 failed tabs.
+#
+# Media Center announcements (3,297 over 550 pages) ARE included, deliberately,
+# via `tabs` below. That tab is the one shape whose list is not held in the
+# DOM, so it pages the site hundreds of times -- the slowest tab by far, but
+# the announcements are themselves regulatory notices (approvals, enforcement,
+# consultation calls) and belong in the library. crawl_paged()'s
+# `text_as_document` flag (site_runners/cma_laws.py, TABS["announcements"])
+# makes each announcement's own text the document, since ~92% carry no
+# attached PDF. `since_days` on that same TABS entry caps it to the last 12
+# months rather than the full 3,297-item history -- see the flag's own
+# comment for how to run a one-time full backfill later.
+#
+# Five Capital Market tabs added 2026-08-13, each individually verified:
+# Prospectuses (266), Shareholder Circulars (22), Facilitating Opening
+# Investment Accounts Initiative (1, was 3 -- see single_page's
+# one-row-per-page fix), FinTech Lab (1, same fix), and Financial Market
+# Institutions (a REGISTER, not documents -- 2 rows, one per register part,
+# each the whole institution table rendered into content_html/document_html;
+# see render_register() and crawl_register()). The other four CMA registers
+# (SPEs, Investment Funds, Accounting Offices, Real Estate Contributions) use
+# the same render-as-one-document path if ever added here, but are not
+# requested and so are not crawled.
+
+regulator: "CMA"
+owner: lead
+
+sources:
+  - name: "CMA Laws & Regulations + Media Center Announcements + Capital Market"
+    mode: custom
+    crawler_class: "crawler.cma_crawler_wrapper.CMACrawler"
+    init_kwargs:
+      headless: true
+      source_system: "CMA-RULES"
+      tabs:
+        - capital_market_law
+        - sifi
+        - forms
+        - cpe
+        - guides
+        - circulars
+        - public_consultation
+        - implementing_regulations
+        - faqs
+        - announcements
+        - prospectuses
+        - shareholder_circulars
+        - facilitating_accounts
+        - fintech_lab
+        - cm_institutions
+      # CMA throttles. The runner's own measurement: 600-1000ms between detail
+      # fetches finishes SOONER than 0, because backing off avoids the throttle
+      # it would otherwise trip.
+      delay_ms: 600

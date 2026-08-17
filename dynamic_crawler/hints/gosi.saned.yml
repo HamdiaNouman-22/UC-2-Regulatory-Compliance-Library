@@ -1,0 +1,59 @@
+# GOSI — SANED (unemployment insurance). TWO instruments on one url, same tabbed
+# shape as gosi.social_insurance.yml:
+#
+#   #1  Laws of Unemployment Insurance (SANED)   29 sections
+#   #2  Regulations for Implementations          22 sections
+#
+# generic_crawler kept panel #2 only, because it is the longer of the two — which
+# is why "the crawler picked the right one" is never a safe assumption here.
+
+version: 1
+name: gosi.saned
+seed_url: "https://www.gosi.gov.sa/en/SystemsAndRegulations/Saned"
+shape: list
+
+# The page is an Angular app (_ngcontent-* attributes on every node). Phase 2
+# RELOADS the seed to re-stamp the panels, and at the default settle only the
+# first panel had rendered — so panels 1..5 were "not found again" and five of
+# six instruments stored NO html at all. Everything else that broke on this
+# project today was a settle time; give it room.
+wait_ms: 8000
+scope: prefix
+
+panels:
+  tabs: "ul.tabs.blocksTabs li.tab a"
+  include_panel: true
+
+pagination:
+  mode: none
+  max_pages: 1
+
+section_path:
+  prefix: ["Saned"]
+
+fetch_details: true
+notes: "Two instruments in fragment-addressed tab panels; each panel's text is the document."
+# Names this source stores under. MUST match config/change_signals.yml,
+# or the change sweep and the ingest path keep separate memories of the
+# same documents.
+library:
+  regulator: "General Organization for Social Insurance (GOSI)"
+  source_system: "Laws and Regulations"
+meta:
+  approved: true
+  approved_by: lead
+  approved_at: '2026-08-12T14:23:57+00:00'
+  form_hash: adee626c7715
+  verify:
+    verdict: WARN
+    counts:
+    - 2
+    - 2
+    - 2
+    spread_pct: 0.0
+    fill_rates:
+      title: 100.0
+      document_url: 100.0
+    verified_at: '2026-08-12T14:23:57+00:00'
+    source: live
+    forced: false
