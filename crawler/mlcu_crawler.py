@@ -52,6 +52,10 @@ _BLOCK_MARKERS = ("the requested url was rejected",
                   "request rejected",
                   "your support id is")
 
+# Ordinary Arabic. Presentation forms are not listed because NFKC has already
+# folded them by the time this runs — see `_text_for`.
+_ARABIC = re.compile(r"[؀-ۿ]")
+
 # openpyxl's ILLEGAL_CHARACTERS_RE, which it raises on rather than escapes. A PDF
 # extractor emits these freely — form feeds between pages, control bytes from a
 # bad encoding — and `workbook export` then dies inside save(), after the whole
@@ -212,25 +216,41 @@ class MLCUCrawler:
         tmp.write_bytes(body)
         return tmp, "live"
 
-    def _text_for(self, url: str) -> Tuple[str, str]:
-        """Extracted text for one PDF, plus where the bytes came from.
+    def _text_for(self, url: str) -> Tuple[str, str, dict]:
+        """Extracted text for one PDF, where the bytes came from, and how much of
+        the document the extractor could actually read.
 
         Uses the orchestrator's own extractor so the text stored here is the same
         text it would have produced (`orchestrator.py:273`), not a second opinion.
         """
         if not _is_doc(url):
-            return "", "not-a-document"
+            return "", "not-a-document", {}
         path, origin = self._pdf_path(url)
         if path is None:
-            return "", origin
+            return "", origin, {}
         try:
             # Heavy import (cv2, pdfplumber, pytesseract) — kept off module load
             # so importing this crawler stays cheap for anything that only parses.
             from processor.Text_Extractor import OCRProcessor
-            text, _meta = OCRProcessor.extract_text_from_pdf_smart(pdf_path=str(path))
+            text, meta = OCRProcessor.extract_text_from_pdf_smart(pdf_path=str(path))
+            ocr_ok = OCRProcessor.is_ocr_available()
         except Exception as e:
             logger.warning("MLCU text extraction failed %s: %s", url[:80], e)
-            return "", "extract-failed"
+            return "", "extract-failed", {}
+
+        meta = meta or {}
+        total = int(meta.get("total_pages") or 0)
+        good = int(meta.get("good_pages") or 0)
+        ocred = int(meta.get("ocr_pages") or 0)
+
+        # A page routed to OCR contributes NOTHING when the engine is absent, but
+        # `extract_text_from_pdf_smart` still counts it in `good_pages` and logs
+        # it as "OK (0 chars)" — the one thing the extractor does not report. So
+        # subtract those to get the number of pages actually read.
+        usable = good - (0 if ocr_ok else ocred)
+        info = {"pages": total, "ocr_pages": ocred, "ocr_available": ocr_ok,
+                "pages_read": max(usable, 0)}
+
         # NFKC first. Four of the six 1065 documents extract as Arabic
         # PRESENTATION FORMS (U+FB50-FEFF) rather than ordinary Arabic
         # (U+0600-06FF) — the letters are right and in logical order, but they are
@@ -241,7 +261,33 @@ class MLCUCrawler:
         # the workbook. Hashing before either step would fingerprint words no
         # reader ever sees.
         text = unicodedata.normalize("NFKC", text or "")
-        return _ILLEGAL_XLSX.sub(" ", text).strip(), origin
+        text = _ILLEGAL_XLSX.sub(" ", text).strip()
+
+        # DISCARD ON "NO ARABIC", not on the page arithmetic above. MLCU publishes
+        # only in Arabic, so text with no Arabic character in it is not the
+        # document, whatever the page counts say. The counts alone are not enough:
+        # the consumer-finance controls have a font with no ToUnicode map, so
+        # every glyph decodes to (cid:NNN) — `_is_text_broken` catches four of its
+        # six pages and routes them to an OCR engine that is not installed, but
+        # ONE page's mojibake passes that check and lands in `good_pages`. The
+        # arithmetic therefore reads "1 page of 6 was read" and keeps 1,290
+        # characters of residue.
+        #
+        # Zero is the whole threshold. There is nothing to tune, and it cannot
+        # misfire on a healthy document here — the seventeen readable ones run
+        # 60-76% Arabic.
+        if text and not _ARABIC.search(text):
+            logger.warning("MLCU %s: discarding %d chars with no Arabic in them "
+                           "— %d/%d pages needed OCR and OCR is %s",
+                           url.rsplit("/", 1)[-1][:50], len(text), ocred, total,
+                           "available" if ocr_ok else "NOT installed")
+            return "", "unreadable-text-layer", info
+
+        if usable <= 0:
+            # Nothing survived at all: a scanned document with no OCR engine.
+            return "", ("no-pages-read" if origin in ("live", "pdf-cache") else origin), info
+
+        return text, origin, info
 
     def _attach_text(self, docs: List[RegulatoryDocument]) -> List[RegulatoryDocument]:
         """Store each document's text and fingerprint it from those words.
@@ -251,10 +297,19 @@ class MLCUCrawler:
         crawler put here.
         """
         for doc in docs:
-            text, origin = self._text_for(doc.document_url)
+            text, origin, info = self._text_for(doc.document_url)
             doc.extra_meta["content_text"] = text
             doc.extra_meta["text_origin"] = origin
             doc.extra_meta["text_chars"] = len(text)
+            # WHY a text cell is empty, in the row rather than in a log nobody
+            # will still have. Seven documents here need OCR — six are scanned
+            # images, one has an unmappable text layer — and without this the
+            # reader cannot tell that from a crawler that simply missed them.
+            if info:
+                doc.extra_meta["text_pages"] = info["pages"]
+                doc.extra_meta["text_pages_read"] = info["pages_read"]
+                doc.extra_meta["text_ocr_pages"] = info["ocr_pages"]
+                doc.extra_meta["text_ocr_available"] = info["ocr_available"]
 
             # Hash the words, not the link. `content_key("")` is "" — falsy — so
             # `stamp_content_hashes` fills in the `document_url|title` fallback for
@@ -354,6 +409,14 @@ class MLCUCrawler:
         for d in docs:
             key = d.extra_meta.get("content_hash_basis", "?")
             by_basis[key] = by_basis.get(key, 0) + 1
+        needs_ocr = [d for d in docs
+                     if d.extra_meta.get("text_ocr_pages")
+                     and not d.extra_meta.get("text_ocr_available")]
+        if needs_ocr:
+            warnings.append(
+                f"{len(needs_ocr)} document(s) need OCR and tesseract is not "
+                f"installed; their text is empty by measurement, not by omission")
+
         if by_basis.get("document_url|title"):
             # Not noise: these are the documents whose change detection is running
             # on the weak fingerprint, and the count is what the delivery message
