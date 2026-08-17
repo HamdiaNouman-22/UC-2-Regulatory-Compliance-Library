@@ -341,5 +341,54 @@ sources:
     signal: crawl
     confirm: true
 
+  # MLCU (EGYPT) — `crawl` IS A MEASURED CONCLUSION HERE, NOT A DEFAULT.
+  #
+  # Every cheaper candidate was tested and ruled out. MEASURED 2026-08-17:
+  #
+  #   ETag / Last-Modified   ABSENT on every response — section pages and PDFs
+  #                          alike. So `stored-inventory` has no token to read.
+  #   sitemap.xml            190 urls and NO <lastmod> on any of them, so
+  #                          `signal: sitemap` cannot work either.
+  #   3145 اخبار as a feed   RULED OUT, and this is the one worth recording
+  #                          because it looks promising until you fetch it. The
+  #                          page carries 0 links to documents, 0 date-shaped
+  #                          strings, 0 four-digit years, no pagination and no
+  #                          ordering by id. Its 15 news items are ALL titled
+  #                          "اقرا المزيد" ("read more"); nearly every other
+  #                          link on it is the site navigation menu. A feed
+  #                          signal needs dates or instrument links to be worth
+  #                          anything, and it has neither — so it could only
+  #                          ever say "a news post appeared", which over-fires
+  #                          on events and FATF notices and stays SILENT when a
+  #                          PDF is replaced in place. Silence is the direction
+  #                          that loses a regulation.
+  #   raw body sha256        MOVES ON EVERY FETCH — three different hashes in
+  #                          three seconds. Cause found: ASP.NET __VIEWSTATE,
+  #                          regenerated per render.
+  #   visible text sha256    STABLE across those same three fetches
+  #                          (ff2617829798322d).
+  #
+  # The crawl is also small enough that a probe would save almost nothing: five
+  # section pages plus 24 PDFs.
+  #
+  # `confirm: true` is recorded rather than exercised. No probe runs under
+  # `signal: crawl`. But if anyone ever runs a deliberate `--signal
+  # stored-inventory --limit N` against a slice here, the two measurements above
+  # say it MUST hash visible text — the raw body would report every document as
+  # changed on every run, which is exactly the CMA pathology that produced 1,134
+  # false changes.
+  #
+  # IDENTITY IS NOT THE DEFAULT, and it has to match the crawl's.
+  # config/sources/mlcu.yml sets `identity: [doc_path, title]` because 3144
+  # already holds a `_v2` filename and a `_v3` re-upload moves document_url. If
+  # monitoring keyed on the default the sweep and the orchestrator would build
+  # different keys, and no withdrawal could ever accumulate — silently, which is
+  # how that fault behaved for a whole day on 2026-08-16.
+  - regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
+    source_system: "Legislative and Supervisory Framework"
+    signal: crawl
+    confirm: true
+    identity: [doc_path, title]
+
 # Not listed, deliberately:
 #   MOH x2  same shape as MOE; both forms are still approved=false.
