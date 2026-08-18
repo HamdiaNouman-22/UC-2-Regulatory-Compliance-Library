@@ -68,7 +68,8 @@ import re
 import sys
 from collections import deque
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote, urljoin
+from html import escape as _html_escape
 
 from playwright.sync_api import sync_playwright
 
@@ -203,6 +204,116 @@ def ext_of(url: str) -> str:
     path = urlparse(url).path.lower()
     dot = path.rfind(".")
     return path[dot:] if dot != -1 else ""
+
+
+# ---- captured HTML: absolute urls, and a file a browser can actually open ----
+#
+# JS_MAIN_CONTENT returns `clone.innerHTML`, and innerHTML serializes attributes
+# AS AUTHORED: a relative src/href stays relative. The result is written to
+# html/<slug>.html as a bare fragment with no origin, so a browser opening it
+# from disk resolves "/en/laws-regulations" against file:///D:/ — every image
+# 404s and every link points at a path that does not exist. Measured on
+# cbe.org.eg: the <img> tags are captured correctly and render as broken icons
+# with their alt text intact, which is what says the tags are fine and only the
+# URL is wrong.
+#
+# JS_LINKS never had this problem: it reads `a.href`, the IDL property, which
+# the DOM has already resolved. That is why documents.xlsx has been right all
+# along and only the saved HTML is broken.
+#
+# regression_check.py already fixes exactly this for its frozen pages (see its
+# freeze(): "without it every link becomes file:/// and the document-link counts
+# collapse to zero"). Same bug, same remedy, applied to the crawler's own output.
+#
+# Attributes are rewritten with a regex rather than an HTML parser on purpose:
+# this folder is self-contained (README) and we are editing attribute VALUES, not
+# restructuring markup, so a parser's re-serialization is risk without a benefit.
+# <script> and <style> are stripped by JS_MAIN_CONTENT before we get here, so the
+# usual "regex matched inside a script" failure cannot arise.
+_URL_ATTRS = ("data-lazy-src", "data-original", "data-src", "data-bg",
+              "srcset", "poster", "href", "src")
+_ATTR_RE = re.compile(
+    r"\b(?P<attr>" + "|".join(_URL_ATTRS) + r")\s*=\s*"
+    r"(?P<q>[\"'])(?P<val>[^\"']*)(?P=q)", re.I)
+# Not URLs to resolve: in-page anchors, and schemes with no path to join.
+_SKIP_URL = re.compile(r"^\s*(#|data:|javascript:|mailto:|tel:|blob:|about:)", re.I)
+
+
+def _abs_one(base: str, val: str) -> str:
+    v = (val or "").strip()
+    if not v or _SKIP_URL.match(v):
+        return val
+    try:
+        return urljoin(base, v)
+    except Exception:
+        return val
+
+
+def _abs_srcset(base: str, val: str) -> str:
+    """srcset is a comma-separated list of "<url> <descriptor>" pairs."""
+    out = []
+    for part in (val or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        bits = part.split(None, 1)
+        bits[0] = _abs_one(base, bits[0])
+        out.append(" ".join(bits))
+    return ", ".join(out)
+
+
+def absolutize_html(html: str, base_url: str) -> str:
+    """Resolve every relative url in `html` against `base_url`. Idempotent:
+    urljoin on an already-absolute url returns it unchanged."""
+    if not html or not base_url:
+        return html or ""
+
+    def _sub(m):
+        attr, q, val = m.group("attr"), m.group("q"), m.group("val")
+        new = (_abs_srcset(base_url, val) if attr.lower() == "srcset"
+               else _abs_one(base_url, val))
+        return f"{attr}={q}{new}{q}"
+
+    return _ATTR_RE.sub(_sub, html)
+
+
+def html_document(fragment: str, page_url: str, title: str = "") -> str:
+    """Wrap a captured fragment as a standalone file.
+
+    Three things the fragment does not carry on its own:
+      * <meta charset> - the file is written UTF-8 with nothing declaring it, so
+        Arabic renders as mojibake when opened from disk
+      * <base href>    - belt and braces over absolutize_html(): a url built by
+        JS after capture, or an attribute the rewrite did not know about, still
+        resolves against the site instead of file:///
+      * a <title>      - so a folder of these is readable in browser tabs
+
+    CSS is deliberately NOT restored. JS_MAIN_CONTENT strips <style> and <link>
+    as page chrome, so these files are the document's text and images, unstyled.
+    Images load from the live site, which means viewing one needs a connection.
+    """
+    safe = re.sub(r"\s+", " ", (title or page_url or "")).strip()[:200]
+    base = _html_escape(page_url or "", quote=True)
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<base href="{base}">
+<title>{_html_escape(safe)}</title>
+</head>
+<body>
+{fragment or ""}
+</body>
+</html>
+"""
+
+
+def write_page_html(out, html_file: str, fragment: str, page_url: str,
+                    title: str = "") -> None:
+    """The ONE place a captured page becomes a file on disk."""
+    path = Path(out) / html_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html_document(fragment, page_url, title), encoding="utf-8")
 
 
 # ---- external portals that HOST law text themselves ----
@@ -1722,7 +1833,7 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
             # --- record this page ---
             slug = slugify(urlparse(url).path or title) or f"page-{len(records)}"
             html_file = f"html/{slug}.html"
-            (out / html_file).write_text(content["html"], encoding="utf-8")
+            write_page_html(out, html_file, content["html"], url, title)
 
             rec = {
                 "section_path": " > ".join(breadcrumb),
@@ -1913,6 +2024,37 @@ def _finish(out, seed_norm, records, documents, chrome_dropped, shape, note=None
         # pipeline fetches the file.
         d["content_hash"] = content_key(
             f"{d.get('doc_url','')}|{d.get('title','')}")
+
+    # Absolute urls in the captured html, and one openable file per page.
+    #
+    # Done HERE for the reason content_hash is stamped here: three walkers
+    # serialize innerHTML (crawler.py JS_MAIN_CONTENT, strategies.py x2) and a
+    # fourth will be written by someone who never read this comment. One exit
+    # every walker passes through cannot be forgotten.
+    #
+    # It also gives the tree/table/list walkers the html files they never wrote
+    # (they set html_file=""), so the column means the same thing whichever
+    # walker ran. Rewriting the generic walker's files is not wasted work: the
+    # in-walk copy exists so a crashed run still leaves something readable, and
+    # this pass is what makes a FINISHED run correct.
+    #
+    # content_hash is unaffected - it hashes text, never html - so nothing
+    # re-classifies as `modified` because of this.
+    used = {}
+    for i, r in enumerate(records):
+        page_url = r.get("url") or seed_norm
+        r["html"] = absolutize_html(r.get("html") or "", page_url)
+        if not r["html"]:
+            continue
+        name = r.get("html_file") or ""
+        if not name:
+            slug = slugify(urlparse(page_url).path or r.get("title") or "")
+            slug = slug or f"page-{i}"
+            n = used.get(slug, 0)
+            used[slug] = n + 1
+            name = f"html/{slug}.html" if not n else f"html/{slug}-{n}.html"
+            r["html_file"] = name
+        write_page_html(out, name, r["html"], page_url, r.get("title") or "")
 
     n = dict(note or {})
     counts = {"pages": len(records), "documents": len(documents),
