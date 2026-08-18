@@ -1,6 +1,6 @@
 """Scheduled monitoring — the jobs the scheduler calls, writing straight to MSSQL.
 
-FOUR JOBS, NOT TWELVE. Regulators are grouped by what their site will actually
+FIVE JOBS, NOT TWELVE. Regulators are grouped by what their site will actually
 answer, because that — not the regulator's importance — is what decides how often
 and how expensively it can be checked.
 
@@ -20,6 +20,10 @@ and how expensively it can be checked.
     monitor_cma            weekly   CMA's token is the current time and a
                                     confirm costs a full page fetch, so the
                                     crawl is the signal here too.
+    monitor_cbe            weekly   Twelve sources: the circulars API (one
+                                    request, and it DISCOVERS) plus eleven
+                                    browser crawls of the HTML sections. Weekly
+                                    because of the eleven, not the one.
 
 WHERE THE ROWS GO
 
@@ -162,10 +166,24 @@ CHEAP_PROBE_SOURCES = [
 #: loop AND it already tells you what changed, so the probe step was pure
 #: overhead — the crawl IS the signal here, same as MC and CMA, just fast
 #: enough to run daily instead of weekly.
+#:
+#: CBE joined 2026-08-18, and for the same reason MOH did: its circulars page is
+#: a "Load more" pager that a crawl reads 4.5% of (18 of 396, reported `ok`),
+#: while the page's own JavaScript calls /api/listing/circulars and returns all
+#: 396 in ONE request — with a publication date, the regulator's own category,
+#: and a Sitecore GUID per record. No probe can improve on that.
+#:
+#: CBE differs from MOH in one way that decides its cadence: its config holds
+#: TWELVE sources, and eleven of them are browser crawls of the HTML sections.
+#: `build_regulator_crawler` has no source filter, so a job gets all twelve or
+#: none — which is why CBE is weekly like MC and CMA rather than daily like MOH.
+#: If daily circulars are ever wanted, the upgrade is to split cbe.yml in two,
+#: not to run eleven browser crawls every night.
 CRAWL_AS_SIGNAL = {
     "Ministry of Commerce": ("mc", False),
     "Capital Market Authority (CMA)": ("cma", False),
     "Ministry of Health": ("moh", False),
+    "Central Bank of Egypt (CBE)": ("cbe", False),
 }
 
 
@@ -418,6 +436,45 @@ def _monitor_cma_impl() -> dict:
     return res
 
 
+def monitor_cbe() -> dict:
+    """WEEKLY. Twelve sources: the circulars API, plus eleven section crawls.
+
+    THE CIRCULARS HALF IS THE CHEAP, HONEST SIGNAL and it also DISCOVERS.
+    `crawler/cbe_crawler.py` reads /api/listing/circulars in one request and gets
+    all 396 with a publication date and a Sitecore GUID each, so the orchestrator's
+    new/modified/unchanged classification against the DB already does everything a
+    probe step would. It refuses to return a partial inventory rather than let a
+    short list read downstream as documents having disappeared.
+
+    THE OTHER ELEVEN ARE BROWSER CRAWLS, which is what makes this weekly. Measured
+    2026-08-18 over the nine sections then configured: 100 pages, 152 documents.
+    `Regulations Book` is the big one at 143 sitemap urls and is capped at 250.
+
+    WHY THE PACING MATTERS HERE MORE THAN USUAL. cbe.org.eg runs bot protection —
+    it already refuses `urllib` outright and answers HEAD with 403. Both hosts in
+    `skip_hosts` were blocked by automated access from this address, and SIMAH's
+    note records that it was "triggered by repeated iteration, not volume".
+    Eleven prefix crawls is real iteration. Weekly, and never in a retry loop.
+
+    A SHORT CRAWL IS THE DANGER, not a slow one — the CMA lesson. A section that
+    hits its page cap or times out returns fewer documents than are stored, and
+    absent documents are ruled `disappeared`. The orchestrator's completeness gate
+    is what stands between that and a withdrawal proposal, and it is keyed per
+    source, which is exactly why cbe.yml splits the sections rather than crawling
+    /en/laws-regulations as one. Give this job room rather than a tight timeout.
+    """
+    return _run_exclusive("monitor_cbe", _monitor_cbe_impl)
+
+
+def _monitor_cbe_impl() -> dict:
+    # 10800s = 3 hours. Deliberately generous: CMA's job was killed at 5400s
+    # after real work and produced nothing, and a killed run is worse than a slow
+    # one because it looks like a source that returned nothing.
+    res = _crawl_into_db("cbe", False, timeout=10800)
+    logger.info("Central Bank of Egypt: %s", res)
+    return res
+
+
 def _forms_for(regulator: str) -> list:
     """Every hints form that crawls this regulator, sorted for determinism.
 
@@ -442,4 +499,5 @@ def _forms_for(regulator: str) -> list:
     return forms
 
 
-__all__ = ["monitor_cheap_probes", "monitor_sama", "monitor_mc", "monitor_cma"]
+__all__ = ["monitor_cheap_probes", "monitor_sama", "monitor_mc", "monitor_cma",
+           "monitor_cbe"]
