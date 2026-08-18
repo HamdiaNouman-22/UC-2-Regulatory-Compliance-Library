@@ -6,10 +6,10 @@ Five changes, in the order we did them:
 
 | # | change | files |
 |---|---|---|
-| 1 | [Prefix-scoped runs over a list of sub-sites](#1-prefix-scoped-runs-over-a-list-of-sub-sites) | `generic_crawler/run_site.py` *(new)* |
+| 1 | [Prefix-scoped runs over a list of sub-sites](#1-prefix-scoped-runs-over-a-list-of-sub-sites) | `generic_crawler/crawler.py` |
 | 2 | [Images render when you open the saved HTML](#2-images-render-when-you-open-the-saved-html) | `generic_crawler/crawler.py` |
 | 3 | [Document links in the saved HTML actually reach the site](#3-document-links-in-the-saved-html-actually-reach-the-site) | `generic_crawler/crawler.py` |
-| 4 | [Procurement PDF declared from the CLI](#4-procurement-pdf-declared-from-the-cli) | `generic_crawler/run_site.py` |
+| 4 | [Procurement PDF declared from the CLI](#4-procurement-pdf-declared-from-the-cli) | `generic_crawler/crawler.py` |
 | 5 | [Monitoring](#5-monitoring) | `crawler/cbe_crawler.py` *(new)*, `config/sources/cbe.yml` *(new)*, `config/change_signals.yml` |
 
 `crawl()` was never touched in signature or return value — it is imported by the
@@ -20,21 +20,40 @@ stay intact. Nothing was deleted anywhere.
 
 ## 1. Prefix-scoped runs over a list of sub-sites
 
-**New file:** `generic_crawler/run_site.py`. One seed, a dynamic list of
+**In `generic_crawler/crawler.py`, SECTION F.** One seed, a dynamic list of
 sub-paths, each crawled as its own prefix-scoped run, sequentially.
 
 ```
-venv/Scripts/python.exe generic_crawler/run_site.py --seed https://www.cbe.org.eg/en --subpaths governance,laws-regulations,aml-cft --out output/cbe_test --scope prefix --max-pages 150
+venv/Scripts/python.exe generic_crawler/crawler.py --seed https://www.cbe.org.eg/en --subpaths governance,laws-regulations,aml-cft --out output/cbe_test --scope prefix --max-pages 150
 ```
 
 `--subpaths-file <path>` for long lists (one per line, `#` comments). An entry
 starting with `http` is used verbatim; anything else is joined onto the seed.
-Nothing is hardcoded. Scope defaults to `prefix` and applies to every section.
+Nothing is hardcoded. Nested paths work
+(`sustainability/principles-and-regulatory-framework`).
 
-**Why a new file rather than a flag on `crawl()`:** the pipeline imports `crawl()`,
-so changing it puts every regulator at risk. A runner that only calls it is
-additive. No scope logic needed changing either — `scope_prefix()` already derives
-the prefix from whatever URL it is handed.
+### Where it sits, and what it must not touch
+
+Everything is ABOVE `crawl()`, in a new SECTION F, and calls it once per section.
+`crawl()`'s signature is unchanged, because it is imported by the live pipeline
+(`crawler/generic_crawler_wrapper.py:253`, behind `mode: generic` for **MC, MISA,
+SAMA and ZATCA**) and by `crawler/fingerprint.py`, the single definition of
+`content_hash` for the whole library.
+
+`main()` is imported by nothing, so the driver is safe to live there. But the CLI
+**is** invoked as a subprocess with `--url` by `generic_crawler_wrapper.py:258`
+and by `baseline.py:73`, so:
+
+* `--url` behaves exactly as it always has
+* `--seed` is an alias for it, reading better alongside `--subpaths`
+* **with no `--subpaths`, nothing in SECTION F runs** — the single-site path is
+  the old path
+* `--scope` still defaults to `auto`, not `prefix`, so an existing invocation that
+  omits it is unaffected
+
+Verified: `--url https://www.cbe.org.eg/en/aml-cft --scope prefix` returns the
+same 5 pages / 13 documents it did before, exit 0. `regression_check.py` reports
+all 7 regulators unchanged.
 
 ### Five rules built in, and the evidence for each
 
@@ -94,7 +113,8 @@ A sixth status word would put a second definition of a working run next to
 **Still open:** the preflight uses `urllib`, whose header signature CBE's WAF
 rejects with a 269-byte "Request Rejected" page served as **HTTP 200** — so on
 this site it approves everything. `requests` with the same User-Agent gets the
-real page. Moving it over fixes the check.
+real page, and is already imported for `--documents`. Moving it over fixes the
+check; the limit is documented in `preflight()`'s own docstring.
 
 ---
 
@@ -195,8 +215,11 @@ HTML are `data:` placeholders and `javascript:;`, both correctly skipped:
 
 ## 4. Procurement PDF declared from the CLI
 
-**In `generic_crawler/run_site.py`.** Opt-in: with no `--documents` flag, nothing
-about a run changes.
+**In `generic_crawler/crawler.py`, SECTION F.** Opt-in: with no `--documents`
+flag, nothing about a run changes. It works in BOTH modes — with `--subpaths`
+the declared rows land in `summary.xlsx`; on a single-site crawl they are
+appended to that run's own `pages.json` and `pages.xlsx`, so `pages.json` stays
+the one answer for what the crawl produced.
 
 ```
 --documents "About CBE :: Procurement :: https://www.cbe.org.eg/-/media/project/cbe/page-content/rich-text/about-cbe/procurement.pdf"
@@ -399,13 +422,16 @@ Two risks specifically checked on the `crawler.py` change:
   site with no entry is a site nobody will notice you broke."* Adding it is
   instructed; the `calibrate_*` lists are discretionary and CBE adds no new
   archetype (`generic` shape is already covered by MISA, SDAIA and MHRSD).
-* **Identity for CBE circulars is still the default.** `MONITORING.md` §2 says
-  identity is chosen per source, defaulting to `(document_url, doc_path)`, and
-  that **no config overrides it today** — so `itemId` would be the first use of a
-  built-but-unused mechanism. The same doc names the exact failure it would fix:
-  *"the default leaves a re-issued circular at a new url reading as one new
-  document plus one disappearance"*, and CBE's circular urls embed the date. Cheap
-  to change now, a migration after promotion.
+* ~~Identity for CBE circulars is still the default.~~ **DECIDED** — `itemId`.
+  `config/sources/cbe.yml` now carries `identity: [extra_meta.cbe_item_id]`,
+  making CBE the first source in the repo to override identity. Verified 396/396
+  present and unique. See CHANGE 19 in
+  [changes_2026-08-18.md](changes_2026-08-18.md).
+* ~~The nine HTML sections are not in the pipeline.~~ **DECIDED** — all of them go
+  into the library. `cbe.yml` now builds **12 sources**: the circulars API plus
+  eleven generic crawls. `laws-regulations` is seeded at its three real subtrees
+  rather than its landing page, because prefix scope there swept in 21 circular
+  PDFs the API already owns in full.
 * **`workbook export cbe` needs `OPENROUTER_API_KEY`** (`Orchestrator.__init__`
   builds an `LLMAnalyzer`). Environment prerequisite, unrelated to the crawler.
 * **`crawler.py`'s header is stale** — it still calls itself "a TEST TOOL … fully
@@ -426,7 +452,7 @@ runner walks the HTML sections, the API crawler takes the circulars.
 One line:
 
 ```
-venv/Scripts/python.exe generic_crawler/run_site.py --seed https://www.cbe.org.eg/en/ --subpaths governance,laws-regulations,aml-cft,financial-stability,monetary-policy,payment-systems-and-services,cybersecurity,financial-technology,sustainability/principles-and-regulatory-framework --out output/cbe_test_1 --scope prefix --max-pages 150 --documents "About CBE :: Procurement :: https://www.cbe.org.eg/-/media/project/cbe/page-content/rich-text/about-cbe/procurement.pdf"
+venv/Scripts/python.exe generic_crawler/crawler.py --seed https://www.cbe.org.eg/en/ --subpaths governance,laws-regulations,aml-cft,financial-stability,monetary-policy,payment-systems-and-services,cybersecurity,financial-technology,sustainability/principles-and-regulatory-framework --out output/cbe_test_1 --scope prefix --max-pages 150 --documents "About CBE :: Procurement :: https://www.cbe.org.eg/-/media/project/cbe/page-content/rich-text/about-cbe/procurement.pdf"
 ```
 
 Notes on the arguments:
@@ -464,18 +490,18 @@ Then the roll-up. **This is the actual output of that command:**
 ```
 ======================================================================
 OK  -  9 section(s), 153 documents
-  ok  governance                                     12 pages    5 docs
-  ok  laws-regulations                               17 pages   55 docs
-  ok  aml-cft                                         5 pages   13 docs
-  ok  financial-stability                            19 pages   27 docs
-  ok  monetary-policy                                10 pages   13 docs
-  ok  payment-systems-and-services                   27 pages   37 docs
-  ok  cybersecurity                                   4 pages    0 docs
-  ok  financial-technology                            5 pages    2 docs
-  ok  sustainability/principles-and-regulatory-...    1 pages    0 docs   [thin - ...]
+  ok          governance                      12 pages      5 docs
+  ok          laws-regulations                17 pages     55 docs
+  ok          aml-cft                          5 pages     13 docs
+  ok          financial-stability             19 pages     27 docs
+  ok          monetary-policy                 10 pages     13 docs
+  ok          payment-systems-and-services    27 pages     37 docs
+  ok          cybersecurity                    4 pages      0 docs
+  ok          financial-technology             5 pages      2 docs
+  ok          sustainability/principles-and-regulatory-framework     1 pages      0 docs   [thin - ...]
+  1 declared document(s), not crawled
 
   2 document(s) appear under more than one section - see the duplicates sheet.
-  1 declared document(s), not crawled
 ```
 
 100 pages, 152 crawled documents + 1 declared = **153**. Exit code **0**.
