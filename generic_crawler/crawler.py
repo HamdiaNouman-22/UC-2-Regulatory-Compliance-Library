@@ -66,12 +66,23 @@ import argparse
 import json
 import re
 import sys
+import urllib.error
+import urllib.request
 from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote, urljoin
 from html import escape as _html_escape
 
 from playwright.sync_api import sync_playwright
+
+# Only used by --documents (SECTION F). urllib is NOT enough there: cbe.org.eg's
+# WAF rejects its header signature with a 269-byte "Request Rejected" page served
+# as HTTP 200, while requests with the same User-Agent gets the real file. Guarded
+# so a crawl that declares no documents does not need it installed.
+try:
+    import requests
+except ImportError:                                   # pragma: no cover
+    requests = None
 
 # Shape-aware strategies (additive): detect tree / table layouts and dispatch.
 try:
@@ -87,6 +98,14 @@ try:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+
+#: ONE User-Agent for the whole file: the browser context in crawl(), the
+#: preflight, and the --documents stamp. It was already this exact string in
+#: crawl(); naming it stops the plain-HTTP helpers from drifting away from the
+#: browser and being judged differently by a WAF.
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 
 def slugify(text: str) -> str:
@@ -1527,8 +1546,7 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
             args=["--disable-dev-shm-usage", "--disable-gpu",
                   "--renderer-process-limit=2"])
         ctx = browser.new_context(
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+            user_agent=USER_AGENT,
             locale="en-US",
         )
         page = ctx.new_page()
@@ -2124,9 +2142,490 @@ def _write_excel(path, records, documents, chrome_dropped=None):
                 xw, sheet_name="chrome_dropped", index=False)
 
 
+# ============================================================================
+# SECTION F — several SECTIONS of one site in one command (--subpaths), and
+#             documents the crawl cannot reach (--documents)
+#
+# Everything here sits ABOVE crawl(). It calls crawl() once per section and
+# never changes its signature, because `crawl` is imported by the live pipeline
+# (crawler/generic_crawler_wrapper.py:253, used by MC, MISA, SAMA and ZATCA) and
+# by crawler/fingerprint.py. main() is imported by nothing, so the driver is safe
+# to live here.
+#
+# WITHOUT --subpaths NOTHING IN THIS SECTION RUNS. `--url` behaves exactly as it
+# always has, which matters: the wrapper and baseline.py both invoke this file as
+# a subprocess with `--url`.
+# ============================================================================
+
+#: Worst wins. The same words run_status already uses, ranked by how much they
+#: should stop you: a blocked host invalidates everything, an empty section is a
+#: failed extraction, a short walk is still usable data. NOT a second definition
+#: of "did this run work" — it orders run_status's answers, it does not replace
+#: them.
+STATUS_RANK = {"ok": 0, "incomplete": 1, "not-run": 1, "zero": 2, "blocked": 3}
+
+
+def read_subpaths(subpaths: str, subpaths_file=None) -> list:
+    """The section list, from --subpaths and/or --subpaths-file. Order is kept,
+    duplicates dropped (a repeated section would crawl twice into one dir)."""
+    raw = list((subpaths or "").split(","))
+    if subpaths_file:
+        path = Path(subpaths_file)
+        if not path.exists():
+            raise SystemExit(f"no such file: {path}")
+        for line in path.read_text(encoding="utf-8").splitlines():
+            raw.append(line.split("#", 1)[0])
+    out, seen = [], set()
+    for item in raw:
+        item = item.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def section_url(seed: str, sub: str) -> str:
+    """A full URL is taken as given; anything else is joined onto the seed."""
+    if sub.lower().startswith(("http://", "https://")):
+        return normalize_url(sub)
+    base = seed if seed.endswith("/") else seed + "/"
+    return normalize_url(urljoin(base, sub.lstrip("/")))
+
+
+def section_dir_name(url: str, seed: str, taken: set) -> str:
+    """A readable folder name per section, from the part of the path the section
+    adds to the seed. Collisions get a numeric suffix rather than overwriting:
+    two sections sharing one directory is the merged-baseline bug by accident."""
+    seed_path = urlparse(seed).path.rstrip("/")
+    path = urlparse(url).path
+    tail = path[len(seed_path):] if path.startswith(seed_path) else path
+    name = slugify(tail) or slugify(path) or "section"
+    candidate, n = name, 1
+    while candidate in taken:
+        n += 1
+        candidate = f"{name}-{n}"
+    taken.add(candidate)
+    return candidate
+
+
+def preflight(url: str, timeout: int = 20) -> tuple:
+    """Is this URL there at all? Returns (ok, detail).
+
+    Deliberately shallow. It catches the hard 404 a typo produces; it cannot tell
+    you a single-page app answered 200 and rendered nothing — that is what the
+    crawl's own `zero` status is for. HEAD first, because some servers answer it
+    without building the page; GET after, since plenty of government servers
+    reject HEAD outright.
+
+    KNOWN LIMIT: cbe.org.eg answers ANY path with 200, and answers urllib's
+    header signature with a 269-byte "Request Rejected" page under that same 200.
+    So on that host this approves everything, including a typo. It never wrongly
+    stops a run; the `thin` note below is what catches the typo instead.
+    """
+    for method in ("HEAD", "GET"):
+        req = urllib.request.Request(url, method=method,
+                                     headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return True, f"{resp.status} {method}"
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 405, 501) and method == "HEAD":
+                continue          # the server dislikes HEAD, not the URL
+            if e.code == 403:
+                # A 403 is not proof the page is missing — it is often the WAF.
+                # Let the crawl decide; blocked_reason reads the actual page.
+                return True, "403 (may be bot protection - the crawl will judge)"
+            return False, f"HTTP {e.code}"
+        except Exception as e:
+            if method == "HEAD":
+                continue
+            return False, f"{type(e).__name__}: {str(e)[:80]}"
+    return False, "unreachable"
+
+
+def read_outcome(out_dir: Path) -> dict:
+    """One section's own verdict, read back from pages.json rather than taken
+    from crawl()'s return value — the same thing a later reader would see, the
+    same reason _report_outcome reads the file."""
+    try:
+        data = json.loads((out_dir / "pages.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"status": "zero", "n_pages": 0, "n_documents": 0,
+                "stopped": f"could not read pages.json: {e}"}
+    return {
+        "status": data.get("status", "ok"),
+        "n_pages": data.get("n_pages", 0),
+        "n_documents": data.get("n_documents", 0),
+        "blocked_pages": data.get("blocked_pages", 0),
+        "errors": data.get("errors", 0),
+        "retries": data.get("retries", 0),
+        "stopped": data.get("stopped", ""),
+    }
+
+
+def thin_note(row: dict) -> str:
+    """A section that answered but produced almost nothing.
+
+    Preflight cannot catch every typo: cbe.org.eg returns 200 for ANY path, so a
+    misspelled section renders a soft-404, records its one page, and run_status
+    correctly calls that `ok` — one page IS a successful crawl of one page.
+    Measured: `/en/definitely-not-a-real-section` gives 1 page and 0 documents,
+    beside `/en/laws-regulations` at 17 pages and 55 documents.
+
+    So this is a NOTE, not a status. A sixth status word would put a second
+    definition of a working run next to run_status. The number is the evidence; a
+    person reads the row and decides. (A REAL thin page exists too:
+    /en/sustainability/principles-and-regulatory-framework is a genuine leaf with
+    1 page and no attachments — which is exactly why this cannot be an error.)
+    """
+    if row.get("status") not in ("ok", "incomplete"):
+        return ""
+    if row.get("n_documents", 0) == 0 and row.get("n_pages", 0) <= 1:
+        return ("thin - check this sub-path exists; some sites answer 200 for "
+                "any path")
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# DECLARED DOCUMENTS (--documents)
+#
+# Some documents are reachable only from the site's navigation. CBE links its
+# Procurement PDF from the "About CBE" menu, so it appears on EVERY page, and the
+# header/footer rule correctly files it under `chrome_dropped` rather than
+# letting 17 pages contribute 17 copies of it.
+#
+# The fix is not to weaken that rule. Un-dropping a nav link records it once per
+# page, each row carrying the section_path of the page it was found on — measured
+# on CBE as "Home > Laws and Regulations", the wrong folder — and documents are
+# keyed on (url, section_path), so the same file under three crawled sections
+# becomes three documents that propose each other as withdrawn.
+#
+# So the nav document is DECLARED: named once, with the folder it really belongs
+# to, outside the crawl entirely.
+#
+# HOW IT IS FINGERPRINTED. A declared document has no page text to hash, and
+# `url|title` — the usual fallback for a file we have not downloaded — cannot
+# move when the publisher replaces the PDF behind an unchanged link. That would
+# add a document change detection can never notice changing. So the server is
+# asked, in the order crawler/fingerprint.py prefers:
+#
+#   1. ETag           the publisher's own change stamp
+#   2. Last-Modified  the same, weaker
+#   3. url|title      the honest fallback, recorded AS a fallback
+#
+# Measured on the CBE Procurement PDF: ETag ffc4891297f348f3be3d044356700fdb,
+# Last-Modified Thu, 16 Jun 2022. Real values, not a clock.
+#
+# `hash_basis` travels with the row because a stamp that quietly degraded to
+# url|title looks exactly like one that did not.
+# ---------------------------------------------------------------------------
+
+
+def parse_document_spec(spec: str, default_section: str) -> dict:
+    """One --documents entry. The url is always last, so the form reads
+    left-to-right from least to most specific:
+
+        <url>
+        <title> :: <url>
+        <section path> :: <title> :: <url>
+    """
+    parts = [p.strip() for p in spec.split("::")]
+    parts = [p for p in parts if p]
+    if not parts:
+        return {}
+    url = normalize_url(parts[-1])
+    if not url.lower().startswith(("http://", "https://")):
+        raise SystemExit(f"--documents entry does not end in a url: {spec!r}")
+    title = parts[-2] if len(parts) >= 2 else (title_from_slug(url) or url)
+    section = parts[0] if len(parts) >= 3 else default_section
+    return {"title": title, "doc_url": url, "section_path": section}
+
+
+def stamp_declared(url: str, title: str, timeout: int = 25) -> tuple:
+    """(content_hash, basis) for a declared document. Never raises: a stamp we
+    could not read must not take a run down, it must be visible as a weaker one.
+
+    HEAD then GET, because cbe.org.eg refuses HEAD with 403 and answers GET with
+    200. `stream=True` on the GET so the headers arrive without pulling the body.
+    """
+    etag = lastmod = None
+    if requests is not None:
+        for method in ("head", "get"):
+            try:
+                r = getattr(requests, method)(
+                    url, headers={"User-Agent": USER_AGENT}, timeout=timeout,
+                    allow_redirects=True,
+                    **({"stream": True} if method == "get" else {}))
+                if r.status_code < 400:
+                    etag = (r.headers.get("ETag") or "").strip('"') or None
+                    lastmod = (r.headers.get("Last-Modified") or "").strip() or None
+                if method == "get":
+                    r.close()
+                if etag or lastmod:
+                    break
+            except Exception:
+                continue
+    if etag:
+        return content_key(f"{url}|etag:{etag}"), "etag"
+    if lastmod:
+        return content_key(f"{url}|last-modified:{lastmod}"), "last-modified"
+    return content_key(f"{url}|{title}"), "url|title (WEAK - no server stamp)"
+
+
+def collect_declared(documents, documents_file=None,
+                     documents_section="Documents") -> list:
+    """Every --documents / --documents-file entry, stamped and ready to write."""
+    specs = list(documents or [])
+    if documents_file:
+        path = Path(documents_file)
+        if not path.exists():
+            raise SystemExit(f"no such file: {path}")
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                specs.append(line)
+    if not specs:
+        return []
+    if requests is None:
+        print("  note: `requests` is not installed, so declared documents fall "
+              "back to a url|title hash", file=sys.stderr)
+
+    out, seen = [], set()
+    print(f"Declared documents ({len(specs)})")
+    for spec in specs:
+        doc = parse_document_spec(spec, documents_section)
+        if not doc or doc["doc_url"] in seen:
+            continue
+        seen.add(doc["doc_url"])
+        doc["content_hash"], doc["hash_basis"] = stamp_declared(
+            doc["doc_url"], doc["title"])
+        doc["type"] = doc_type_of(doc["doc_url"])
+        doc["found_on"] = ""          # declared, not found on a crawled page
+        doc["subsite"] = "(declared)"
+        out.append(doc)
+        print(f"  {doc['title']}  [{doc['hash_basis']}]")
+        print(f"    {doc['section_path']}  <-  {doc['doc_url']}")
+    print()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# the roll-up
+# ---------------------------------------------------------------------------
+
+
+def merged_documents(rows: list, root: Path) -> list:
+    """Every section's documents, each tagged with the section it came from."""
+    docs = []
+    for row in rows:
+        if row.get("status") == "not-run":
+            continue
+        try:
+            raw = (root / row["dir"] / "pages.json").read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for d in json.loads(raw).get("documents") or []:
+            docs.append({"subsite": row["subsite"], **d})
+    return docs
+
+
+def report_duplicates(docs: list) -> list:
+    """The same file under two sections. NOT deduplicated on purpose.
+
+    Two causes, and they need opposite responses. Overlapping prefixes
+    double-count and make sections propose each other's documents as withdrawn.
+    A genuine cross-listing is two real places in the library — the DB agrees,
+    document_exists_by_url(url, category) is category-scoped for exactly that.
+    Collapsing the rows silently would hide the first and destroy the second, so
+    both are reported and a person reads the pair.
+    """
+    by_url = {}
+    for d in docs:
+        key = normalize_url(d.get("doc_url") or "")
+        if key:
+            by_url.setdefault(key, []).append(d.get("subsite", ""))
+    return [{"doc_url": url, "subsites": ", ".join(sorted(set(subs)))}
+            for url, subs in by_url.items() if len(set(subs)) > 1]
+
+
+def write_summary(root: Path, rows: list, docs: list, dupes: list) -> None:
+    import pandas as pd
+    with pd.ExcelWriter(root / "summary.xlsx", engine="openpyxl") as xw:
+        pd.DataFrame(rows).to_excel(xw, sheet_name="subsites", index=False)
+        if docs:
+            pd.DataFrame(docs).to_excel(xw, sheet_name="documents", index=False)
+        if dupes:
+            pd.DataFrame(dupes).to_excel(xw, sheet_name="duplicates", index=False)
+    # The pages sheet is NOT merged here. It carries full page text, each section
+    # already has its own pages.xlsx, and _write_excel owns that column contract.
+    # A second writer of the same sheet is how two writers drift apart.
+
+
+def crawl_sections(args) -> int:
+    """--subpaths: crawl each section as its own run, sequentially, then roll up.
+
+    FIVE RULES, and the reason each one exists:
+
+    1. ONE OUTPUT DIRECTORY PER SECTION, never merged. Each keeps its own status
+       and its own baseline. Merging them is the ZATCA bug: five forms shared one
+       baseline, overwrote each other, and every run was quarantined.
+    2. PREFLIGHT THE WHOLE LIST FIRST and refuse to crawl if a path is
+       unreachable, so a typo costs a second rather than an hour.
+    3. SEQUENTIAL, never parallel. Playwright's sync API drives one browser, and
+       pacing is most of what keeps a crawl off a WAF.
+    4. `blocked` ABORTS THE WHOLE RUN. Continuing to hit other paths on a host
+       whose bot wall just answered is what turns a soft block into a permanent
+       one — saudiexchange.sa and simah.com were both blocked that way. `zero`
+       and `incomplete` do NOT abort: they are that section's problem.
+    5. THE ROLL-UP ORDERS run_status's ANSWERS, it does not invent new ones.
+    """
+    subs = read_subpaths(args.subpaths, args.subpaths_file)
+    if not subs:
+        raise SystemExit("no sections given - pass --subpaths and/or --subpaths-file")
+
+    seed = normalize_url(args.seed or args.url)
+    root = Path(args.out)
+    root.mkdir(parents=True, exist_ok=True)
+
+    # Parsed and stamped BEFORE any crawling: a malformed --documents entry
+    # should cost a second, not an hour of crawl followed by a SystemExit.
+    declared = collect_declared(args.documents, args.documents_file,
+                                args.documents_section)
+
+    taken, plan = set(), []
+    for sub in subs:
+        url = section_url(seed, sub)
+        plan.append({"subsite": sub, "url": url,
+                     "dir": section_dir_name(url, seed, taken)})
+
+    # ---- preflight ----------------------------------------------------------
+    if not args.no_preflight:
+        print(f"Preflight {len(plan)} section(s)")
+        bad = []
+        for item in plan:
+            ok, detail = preflight(item["url"])
+            item["preflight"] = detail
+            print(f"  {'ok  ' if ok else 'FAIL'}  {item['url']}  ({detail})")
+            if not ok:
+                bad.append(item)
+        if bad and not args.skip_unreachable:
+            print(f"\n{len(bad)} section(s) did not answer. Nothing was crawled.",
+                  file=sys.stderr)
+            print("  Fix the list, or pass --skip-unreachable to crawl the rest.",
+                  file=sys.stderr)
+            return 2
+        for item in bad:
+            item["status"] = "not-run"
+        print()
+
+    # ---- crawl, one section at a time --------------------------------------
+    rows, aborted = [], False
+    for i, item in enumerate(plan, 1):
+        if item.get("status") == "not-run":
+            rows.append({**item, "n_pages": 0, "n_documents": 0,
+                         "stopped": "unreachable at preflight"})
+            continue
+        if aborted:
+            rows.append({**item, "status": "not-run", "n_pages": 0,
+                         "n_documents": 0,
+                         "stopped": "skipped: an earlier section was blocked"})
+            continue
+
+        out_dir = root / item["dir"]
+        print(f"[{i}/{len(plan)}] {item['url']}  ->  {out_dir}")
+        try:
+            crawl(item["url"], out_dir,
+                  max_pages=args.max_pages, max_depth=args.max_depth,
+                  scope=args.scope, headless=not args.headful,
+                  wait_ms=args.wait_ms, strategy=args.strategy,
+                  group_headings=args.group_headings,
+                  list_details=not args.no_details,
+                  max_details=args.max_details or None)
+        except Exception as e:
+            print(f"  crawl raised {type(e).__name__}: {e}", file=sys.stderr)
+
+        outcome = read_outcome(out_dir)
+        rows.append({**item, **outcome})
+        print(f"  {outcome['status']}: {outcome['n_pages']} pages, "
+              f"{outcome['n_documents']} documents")
+        if outcome["status"] == "blocked":
+            aborted = True
+            print("  BLOCKED - stopping. Re-running the rest now is what turns a "
+                  "soft block into a permanent one.", file=sys.stderr)
+
+    # ---- roll up ------------------------------------------------------------
+    for r in rows:
+        r["note"] = r.get("note") or thin_note(r)
+    docs = merged_documents(rows, root) + declared
+    dupes = report_duplicates(docs)
+    overall = "ok"
+    for r in rows:
+        if STATUS_RANK.get(r.get("status"), 0) > STATUS_RANK.get(overall, 0):
+            overall = r["status"]
+    if overall == "not-run":
+        overall = "incomplete"
+
+    (root / "summary.json").write_text(
+        json.dumps({"seed": seed, "scope": args.scope, "status": overall,
+                    "n_subsites": len(rows), "n_documents": len(docs),
+                    "n_declared_documents": len(declared),
+                    "n_duplicate_documents": len(dupes), "subsites": rows},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+    write_summary(root, rows, docs, dupes)
+
+    print("\n" + "=" * 70)
+    print(f"{overall.upper()}  -  {len(rows)} section(s), {len(docs)} documents")
+    for r in rows:
+        print(f"  {r.get('status', '?'):<11} {r['subsite']:<28} "
+              f"{r.get('n_pages', 0):>5} pages  {r.get('n_documents', 0):>5} docs"
+              + (f"   {r['stopped']}" if r.get("stopped") else "")
+              + (f"   [{r['note']}]" if r.get("note") else ""))
+    if declared:
+        weak = [d for d in declared if d["hash_basis"].startswith("url|title")]
+        print(f"  {len(declared)} declared document(s), not crawled"
+              + (f" - {len(weak)} with NO server stamp, which cannot report a "
+                 f"replacement behind the same url" if weak else ""))
+    if dupes:
+        print(f"\n  {len(dupes)} document(s) appear under more than one section - "
+              f"see the duplicates sheet.\n  Overlapping prefixes double-count and "
+              f"propose each other's documents as withdrawn; a genuine "
+              f"cross-listing is two real places. Read the pair.")
+    print(f"  {root / 'summary.json'}")
+    return 1 if overall in FATAL_STATUSES else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Standalone Playwright sidebar crawler (test tool)")
-    ap.add_argument("--url", required=True, help="Seed URL")
+    # --url is the original single-site flag and MUST keep working: the live
+    # wrapper (generic_crawler_wrapper.py:258) and baseline.py both invoke this
+    # file as a subprocess with it. --seed is the same thing under the name the
+    # multi-section form reads better with.
+    ap.add_argument("--url", help="Seed URL (single-site crawl)")
+    ap.add_argument("--seed", help="alias for --url; with --subpaths, the site root")
+    ap.add_argument("--subpaths", default="",
+                    help="comma-separated sections under --seed, each crawled as "
+                         "its own run into its own directory, e.g. "
+                         "governance,laws-regulations,aml-cft. Nested paths are "
+                         "fine (sustainability/principles-and-regulatory-framework)")
+    ap.add_argument("--subpaths-file",
+                    help="one section per line (# comments allowed)")
+    ap.add_argument("--documents", action="append", default=[],
+                    help="record a document WITHOUT crawling it, for a file the "
+                         "site links only from its navigation (the header/footer "
+                         "rule files those under chrome_dropped, correctly). "
+                         "Repeatable. Form: '<url>', '<title> :: <url>', or "
+                         "'<section path> :: <title> :: <url>'")
+    ap.add_argument("--documents-file",
+                    help="one --documents entry per line (# comments allowed)")
+    ap.add_argument("--documents-section", default="Documents",
+                    help="folder trail for --documents entries that name none")
+    ap.add_argument("--skip-unreachable", action="store_true",
+                    help="--subpaths: crawl the sections that answered instead of "
+                         "refusing the whole list (default: refuse, so a typo is "
+                         "loud)")
+    ap.add_argument("--no-preflight", action="store_true",
+                    help="--subpaths: do not check the sections before crawling")
     ap.add_argument("--out", required=True, help="Output directory")
     ap.add_argument("--max-pages", type=int, default=150)
     ap.add_argument("--max-depth", type=int, default=8)
@@ -2149,11 +2648,41 @@ def main():
                     help="list shape: cap how many detail pages are opened")
     args = ap.parse_args()
 
-    crawl(args.url, args.out, max_pages=args.max_pages, max_depth=args.max_depth,
+    if not (args.url or args.seed):
+        ap.error("one of --url or --seed is required")
+
+    # MULTI-SECTION: several sections of one site, each its own run, then a
+    # roll-up. Its own exit code, because 9 sections have 9 statuses and
+    # _report_outcome reads exactly one pages.json.
+    if args.subpaths or args.subpaths_file:
+        return crawl_sections(args)
+
+    # SINGLE SITE: unchanged from before, byte for byte. A --documents entry is
+    # still honoured so one file can be declared alongside a single-section crawl;
+    # with no --documents this is exactly the old path.
+    declared = collect_declared(args.documents, args.documents_file,
+                                args.documents_section)
+
+    crawl(args.seed or args.url, args.out,
+          max_pages=args.max_pages, max_depth=args.max_depth,
           list_details=not args.no_details,
           max_details=args.max_details or None,
           scope=args.scope, headless=not args.headful, wait_ms=args.wait_ms,
           strategy=args.strategy, group_headings=args.group_headings)
+
+    if declared:
+        # Appended to the run's own documents list rather than kept in a second
+        # file, so `pages.json` stays the one answer for what this crawl found.
+        out = Path(args.out)
+        data = json.loads((out / "pages.json").read_text(encoding="utf-8"))
+        data["documents"] = (data.get("documents") or []) + declared
+        data["n_documents"] = len(data["documents"])
+        data["n_declared_documents"] = len(declared)
+        (out / "pages.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_excel(out / "pages.xlsx", data.get("pages") or [],
+                     data["documents"], data.get("chrome_dropped") or [])
+        print(f"  {len(declared)} declared document(s) added, not crawled")
 
     # The status is authoritative, and `pages.json` is where it survives the
     # process. A blocked or empty crawl exits non-zero so a caller that reads

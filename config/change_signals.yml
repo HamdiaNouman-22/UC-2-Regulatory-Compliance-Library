@@ -58,6 +58,69 @@ skip_hosts:
 # or the sweep and the ingest path keep separate memories of the same documents.
 # MHRSD hit exactly that.)
 sources:
+  # CENTRAL BANK OF EGYPT — A SPLIT SOURCE, MEASURED 2026-08-18.
+  #
+  # config/sources/cbe.yml holds twelve sources: one custom (the site's own API)
+  # and eleven generic crawls of the HTML sections.
+  #
+  # 1. CIRCULARS: the crawl IS the signal, and the crawl is ONE REQUEST.
+  #    crawler/cbe_crawler.py calls /api/listing/circulars and gets all 396 with
+  #    a publication date, the regulator's own category, and a Sitecore GUID
+  #    each. A probe step would be pure overhead on top of that — the same
+  #    reason MOH moved out of CHEAP_PROBE_SOURCES on 2026-08-17. It belongs in
+  #    CRAWL_AS_SIGNAL once it has a baseline; the entry below exists for its
+  #    `identity`, and for a deliberate stored-inventory run against a slice.
+  #
+  #    IDENTITY IS THE GUID, NOT THE URL. Circular urls embed the date
+  #    (.../circulars/2026/august/circular-dated-17-august-2026-....pdf), so a
+  #    re-issue lands at a new url and the default identity reads it as one new
+  #    document plus one disappearance — the failure MONITORING.md §2 names.
+  #    396/396 itemIds present and unique. This is the FIRST source in the repo
+  #    to override identity; the mechanism was built and never used.
+  - regulator: "Central Bank of Egypt (CBE)"
+    source_system: "Circulars"
+    signal: crawl
+    identity: [extra_meta.cbe_item_id]
+    confirm: false
+
+  # 2. THE HTML SECTIONS: their stored rows are mostly /-/media/ PDFs, and those
+  #    answer a probe HONESTLY — procurement.pdf returns
+  #    ETag ffc4891297f348f3be3d044356700fdb and
+  #    Last-Modified Thu, 16 Jun 2022 07:14:19 GMT. Real values, not a clock, so
+  #    `confirm: false` and the default stored-inventory sweep works for them.
+  #
+  #    EXPECT SOME `unknown`, AND IT IS NOT DEGRADATION. A row whose
+  #    document_url is an HTML page has no token at all to read: no
+  #    Last-Modified and no ETag on any of the five pages tested. `unknown` is
+  #    the honest answer there and pulls no crawl; those rows are covered by
+  #    re-crawling the section, not by probing it.
+  #
+  #    AND DO NOT WIRE THE ON-PAGE STAMP. Every page carries
+  #      <span class="newsupdateddata"> Last Updated: 23 Mar 2023 </span>
+  #    and it reads 23 Mar 2023 on /en/laws-regulations, /en/governance,
+  #    /en/aml-cft and /en/laws-regulations/laws/banking-laws alike — unrelated
+  #    pages, one build-time constant, three years stale (robots.txt carries
+  #    Last-Modified: 25 Mar 2023, the same deployment).
+  #
+  #    This is the CMA lesson INVERTED. CMA's Last-Modified returned the current
+  #    time and reported 1,134 FALSE changes — loud, and someone fixed it. This
+  #    one would report ZERO changes forever, silently. A signal that never fires
+  #    is indistinguishable from a site that never changes.
+  #
+  #    One entry per section would be eleven near-identical blocks, so the
+  #    defaults are deliberately left to apply and only the exceptions are
+  #    listed. Add a section here when it needs a setting the defaults do not
+  #    give it.
+  #
+  # 3. NOTE FOR WHOEVER RUNS THE SWEEP: cbe.org.eg refuses HEAD with 403 and
+  #    answers GET with 200. inventory_sweep already uses
+  #    requests.get(stream=True), so it reads the headers and closes without
+  #    pulling the body — no change needed, but do not "optimise" it to a HEAD.
+  #    Separately, the host rejects urllib's header signature with a 269-byte
+  #    "Request Rejected" page served as HTTP 200; requests with the same
+  #    User-Agent gets the real file.
+
+
   # RECONCILED 2026-08-14 with the form, which now stores the full name and the
   # acronym. Both halves of the pair name the source.
   - regulator: "Saudi Data and AI Authority (SDAIA)"
