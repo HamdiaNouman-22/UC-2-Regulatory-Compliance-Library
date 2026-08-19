@@ -121,6 +121,58 @@ sources:
   #    User-Agent gets the real file.
 
 
+  # RERA (BAHRAIN) — A PROBE WOULD WORK AND STILL ANSWER THE WRONG QUESTION.
+  # MEASURED 2026-08-19.
+  #
+  # THE TOKENS ARE THE BEST WE HAVE SEEN. Over all 121 stored CloudFront urls:
+  #   117  HTTP 200, and ALL 117 return BOTH an ETag and a Last-Modified
+  #     4  HTTP 403 AccessDenied — dead objects (a library problem; the sweep
+  #        reports them and stops, the same call MHRSD's 63rd document got)
+  # and eight urls fetched twice 0.4s apart came back 8/8 IDENTICAL. Real
+  # per-object tokens, not a clock — which is what earns `confirm: false` here,
+  # unlike ZATCA and CMA where the token moves on every request.
+  #
+  # BUT DISCOVERY IS THE WHOLE POINT FOR THIS REGULATOR, and a probe cannot do it.
+  # A probe re-reads urls we already store, so it reports only that an existing
+  # PDF was silently replaced. What actually happens at RERA is that a new
+  # circular appears at a NEW url — and circulars are partitioned BY YEAR, so a
+  # new year is a new PAGE:
+  #
+  #     /en/regulations/circulars/circulars-issued-in-2020    25 documents
+  #     /en/regulations/circulars/Circulars-issued-in-2025     2
+  #     /en/regulations/circulars/Circulars-issued-in-2026     404, not yet created
+  #
+  # RERA published two circulars in 2025, so the modification case a probe covers
+  # is nearly hypothetical while the discovery case it cannot cover is everything.
+  # Hence `signal: crawl`. config/sources/rera.yml seeds the circulars source at
+  # the PARENT so prefix scope picks up the 2026 page the first time it exists.
+  #
+  # A DELIBERATE stored-inventory run is still worth doing occasionally — it is
+  # the only thing that would catch a silent replacement. Same reasoning as the
+  # note on SAMA's feed, for the opposite half of the problem.
+  #
+  # www.rera.gov.bh SERVES AN INCOMPLETE CERTIFICATE CHAIN — it omits the
+  # intermediate CA, which browsers tolerate and python does not:
+  #   requests.get(...)               -> SSLError CERTIFICATE_VERIFY_FAILED,
+  #                                      "unable to get local issuer certificate"
+  #   requests.get(..., verify=False) -> 200, 206 KB
+  # The crawl is unaffected (Playwright runs with ignore_https_errors). Only 2 of
+  # 123 documents are hosted there — the other 121 are on CloudFront, whose chain
+  # is fine — so those two will read `unknown` on any probe. That is explained,
+  # not degradation. Do NOT disable verification globally to "fix" it.
+  #
+  # IDENTITY STAYS THE DEFAULT because RERA exposes no publisher id: no GUID, no
+  # per-document reference number. The cost is stated so it is not rediscovered:
+  # the CDN filename is a content hash, so a re-upload arrives at a NEW url and
+  # reads as one `new` plus one `disappeared` rather than `modified`. Worse for
+  # the rows whose TITLE is also that hash (best_doc_title falls through to the
+  # slug when anchor text is generic), where two of the three identity fields
+  # carry no meaning. Fixing the titles is crawler-side work.
+  - regulator: "Real Estate Regulatory Authority (RERA)"
+    source_system: "Circulars"
+    signal: crawl
+    confirm: false
+
   # RECONCILED 2026-08-14 with the form, which now stores the full name and the
   # acronym. Both halves of the pair name the source.
   - regulator: "Saudi Data and AI Authority (SDAIA)"
