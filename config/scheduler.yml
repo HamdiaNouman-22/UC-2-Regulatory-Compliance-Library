@@ -158,6 +158,29 @@ jobs:
       hour: 5
       minute: 0
 
+  # MLCU (Egypt). No ETag, no Last-Modified, no sitemap lastmod, and its news
+  # page carries neither dates nor document links — every cheaper signal was
+  # measured and ruled out, so the crawl is the signal. Small: five section
+  # pages plus 24 PDFs.
+  #
+  # DISABLED, AND FOR A SECOND REASON BEYOND THE ONE ABOVE. The other four are
+  # off because turning them on is a server decision. This one is off because
+  # MLCU IS NEW AND NOBODY HAS READ ITS WORKBOOK YET. A new regulator goes to a
+  # workbook first; this path writes straight to MSSQL, so enabling it before
+  # the review would make the first scheduled run be the ingest. Turn it on
+  # after the workbook is approved and promoted, not before.
+  #
+  # Sunday 06:00 keeps it clear of monitor_mc (04:00) and monitor_cma (05:00) —
+  # all three take the same `_run_exclusive` lock, and an overlap is a SKIP, so
+  # a colliding slot would silently starve a job rather than fail.
+  monitor_mlcu:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 6
+      minute: 0
+
   # ----------------------------------------------------------
   # NO JOB FOR Saudi Exchange OR SIMAH — deliberately.
   #
