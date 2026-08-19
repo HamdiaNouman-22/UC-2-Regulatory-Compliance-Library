@@ -20,6 +20,11 @@ and how expensively it can be checked.
     monitor_cma            weekly   CMA's token is the current time and a
                                     confirm costs a full page fetch, so the
                                     crawl is the signal here too.
+    monitor_mlcu           weekly   Egypt. No ETag, no Last-Modified, no sitemap
+                                    lastmod, and its news page carries neither
+                                    dates nor document links — every cheaper
+                                    signal was measured and ruled out. SHIPPED
+                                    DISABLED: the workbook has not been read yet.
 
 WHERE THE ROWS GO
 
@@ -162,10 +167,23 @@ CHEAP_PROBE_SOURCES = [
 #: loop AND it already tells you what changed, so the probe step was pure
 #: overhead — the crawl IS the signal here, same as MC and CMA, just fast
 #: enough to run daily instead of weekly.
+#:
+#: MLCU joined 2026-08-17, and unlike the others it is here because every
+#: cheaper option was measured and failed rather than because the host fights
+#: us: no ETag, no Last-Modified, no sitemap lastmod, and its news page carries
+#: neither dates nor document links. The measurements are the comment on its
+#: config/change_signals.yml entry.
+#:
+#: ITS SCHEDULER SLOT IS `enabled: false` AND MUST STAY THAT WAY until a person
+#: has read the workbook. This dict feeds `_crawl_into_db`, which writes
+#: STRAIGHT TO MSSQL — turning MLCU on before the workbook is approved would
+#: make the first scheduled run be the ingest, with nobody having read anything.
 CRAWL_AS_SIGNAL = {
     "Ministry of Commerce": ("mc", False),
     "Capital Market Authority (CMA)": ("cma", False),
     "Ministry of Health": ("moh", False),
+    "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)":
+        ("mlcu", False),
 }
 
 
@@ -384,6 +402,27 @@ def monitor_mc() -> dict:
 def _monitor_mc_impl() -> dict:
     res = _crawl_into_db("mc", False, timeout=5400)
     logger.info("Ministry of Commerce: %s", res)
+    return res
+
+
+def monitor_mlcu() -> dict:
+    """WEEKLY, AND OFF. The crawl is the signal because nothing cheaper exists.
+
+    Measured 2026-08-17: no ETag, no Last-Modified, no sitemap lastmod, and the
+    `3145 اخبار` news page carries no dates and no document links, so it cannot
+    say which instrument moved. Full measurements on the change_signals.yml entry.
+
+    LEAVE THE SCHEDULER SLOT DISABLED until a person has read the workbook — this
+    path writes straight to MSSQL, and MLCU has never been reviewed.
+    """
+    return _run_exclusive("monitor_mlcu", _monitor_mlcu_impl)
+
+
+def _monitor_mlcu_impl() -> dict:
+    # Five section pages plus 24 PDFs, serial. Small enough that a probe would
+    # have saved almost nothing even if one had been possible.
+    res = _crawl_into_db("mlcu", False, timeout=5400)
+    logger.info("MLCU: %s", res)
     return res
 
 
