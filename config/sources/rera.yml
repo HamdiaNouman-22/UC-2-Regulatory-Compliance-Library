@@ -1,0 +1,179 @@
+# RERA — Real Estate Regulatory Authority, Bahrain
+#
+# ---------------------------------------------------------------------------
+# HOW RERA PUBLISHES, MEASURED 2026-08-19
+# ---------------------------------------------------------------------------
+# A plain server-rendered site. No API, no feed, no changelog, and no sitemap
+# lastmod. Verified: rendering /en/regulations makes exactly ONE json call and it
+# is a feedback widget; there is no __NEXT_DATA__, no __NUXT__, no graphql.
+#
+# A new regulation appears in two steps:
+#
+#   1. the PDF is uploaded to their CMS, which stores it on CloudFront at
+#        d3rsft5ep764nm.cloudfront.net/reracms/uploads/cms-medias/<YYYY>/<MM>/<md5>.pdf
+#      so the path carries the UPLOAD month and the filename is a content hash
+#   2. it is linked from a server-rendered page under /en/regulations/...
+#
+# CIRCULARS ARE PARTITIONED BY YEAR, AND A NEW YEAR IS A NEW PAGE:
+#
+#     /en/regulations/circulars/circulars-issued-in-2019    25 documents
+#     /en/regulations/circulars/circulars-issued-in-2020    25
+#     /en/regulations/circulars/circulars-issued-in-2021    13
+#     /en/regulations/circulars/circulars-issued-in-2022    13
+#     /en/regulations/circulars/circulars-issued-in-2023     8
+#     /en/regulations/circulars/Circulars-issued-in-2024     2
+#     /en/regulations/circulars/Circulars-issued-in-2025     2
+#     /en/regulations/circulars/Circulars-issued-in-2026     404 — does not exist yet
+#
+# The falling counts are real, not a short crawl: fetched each page directly and
+# 2025 and 2024 genuinely hold two CDN documents each while 2020 holds 25.
+#
+# NOTE THE CASE INCONSISTENCY. RERA writes `circulars-issued-in-2020` in lower
+# case and `Circulars-issued-in-2024` capitalised. Anything that PREDICTS the next
+# year's url must try both spellings, or it will conclude a page is missing when
+# it is only cased differently.
+#
+# THIS IS WHY THE CIRCULARS SOURCE IS SEEDED AT THE PARENT, not per year. `prefix`
+# scope on /en/regulations/circulars walks every year page it finds, so the 2026
+# page is picked up the first time it exists with no config change. Splitting per
+# year would need an edit every January, and the January nobody remembers is the
+# January the new circulars go missing.
+#
+# ---------------------------------------------------------------------------
+# WHY MONITORING IS THE CRAWL AND NOT A PROBE — even though a probe would work
+# ---------------------------------------------------------------------------
+# The documents answer a probe better than almost any source we hold. MEASURED
+# over all 121 stored CloudFront urls:
+#
+#     117  HTTP 200, and ALL 117 return BOTH an ETag and a Last-Modified
+#       4  HTTP 403 AccessDenied — dead objects, see below
+#
+# and the tokens are real, not a clock: eight urls fetched twice 0.4s apart came
+# back 8/8 IDENTICAL. That is what earns `confirm: false` here, unlike ZATCA and
+# CMA where the token moves on every request.
+#
+# But a probe answers the wrong question for RERA. It re-reads urls we already
+# store, so it can only ever report that an existing PDF was silently replaced —
+# and what actually happens here is that a NEW circular appears at a NEW url, on a
+# page that may itself be new. A probe cannot see either. Since RERA published
+# only two circulars in 2025, the modification case a probe covers is close to
+# hypothetical while the discovery case a probe cannot cover is the whole point.
+#
+# So: `signal: crawl`, weekly. See config/change_signals.yml for the numbers, and
+# note that a deliberate stored-inventory run is still worth doing occasionally —
+# it is the only thing that would catch a silent replacement.
+#
+# ---------------------------------------------------------------------------
+# TWO THINGS THAT WILL BITE WHOEVER RUNS THE SWEEP
+# ---------------------------------------------------------------------------
+# 1. www.rera.gov.bh SERVES AN INCOMPLETE CERTIFICATE CHAIN. It omits the
+#    intermediate CA, which browsers tolerate and python does not:
+#      requests.get(...)                -> SSLError, CERTIFICATE_VERIFY_FAILED,
+#                                          "unable to get local issuer certificate"
+#      requests.get(..., verify=False)  -> 200, 206 KB
+#    The CRAWL is unaffected — Playwright is launched with ignore_https_errors —
+#    but any plain-HTTP probe of a rera.gov.bh url fails. Only 2 of 123 documents
+#    are hosted there; the other 121 are on CloudFront, whose chain is fine. Do
+#    NOT "fix" this by disabling verification globally in the sweep.
+#
+# 2. FOUR STORED URLS ARE DEAD (403 AccessDenied from CloudFront, in a browser as
+#    well as a plain client). That is a library problem, not a sweep one — the
+#    same call MHRSD's 63rd document got: the sweep reports it and stops.
+#
+# ---------------------------------------------------------------------------
+# IDENTITY IS THE DEFAULT, AND IT HAS A KNOWN WEAKNESS
+# ---------------------------------------------------------------------------
+# Unlike CBE there is no publisher id to key on — no GUID, no reference number
+# exposed per document. So identity stays (document_url, doc_path, title), and the
+# consequence must be stated rather than discovered later: because the CDN
+# filename is a content hash, a re-uploaded document arrives at a NEW url and
+# reads as one `new` document plus one `disappeared`, not as `modified`.
+#
+# It is worse for the rows whose title is also the hash. `best_doc_title` falls
+# through to the url slug when the anchor text is generic, so some documents are
+# stored as e.g. "Ead1A6E678Ba3F8458Ca04478B2Cdf7A" — for those, two of the three
+# identity fields carry no meaning. Fixing the titles is a crawler-side job and
+# would make this identity sound; until then, expect re-uploads to churn.
+
+regulator: "Real Estate Regulatory Authority (RERA)"
+owner: lead
+
+sources:
+  # The landing page's own two documents, and nothing below it. max_depth: 0 stops
+  # the walk at the seed so this source does not duplicate the seven below.
+  - name: "Overview"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations"
+    scope: prefix
+    source_system: "Overview"
+    category: "Overview"
+    max_pages: 5
+    max_depth: 0
+
+  - name: "Laws and Decrees"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/laws-and-decrees"
+    scope: prefix
+    source_system: "Laws and Decrees"
+    category: "Laws and Decrees"
+    max_pages: 40
+    max_depth: 6
+
+  # 33 documents, the largest single page.
+  - name: "Resolutions"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/resolutions"
+    scope: prefix
+    source_system: "Resolutions"
+    category: "Resolutions"
+    max_pages: 40
+    max_depth: 6
+
+  # Seeded at the PARENT on purpose — see the year-partition note above. The cap
+  # allows for one new year page per year for a long time.
+  - name: "Circulars"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/circulars"
+    scope: prefix
+    source_system: "Circulars"
+    category: "Circulars"
+    max_pages: 60
+    max_depth: 6
+
+  - name: "Code of Conduct"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/rera-code-of-conduct"
+    scope: prefix
+    source_system: "Code of Conduct"
+    category: "Code of Conduct"
+    max_pages: 20
+    max_depth: 4
+
+  - name: "National Real Estate Plan"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/national-real-estate-plan"
+    scope: prefix
+    source_system: "National Real Estate Plan"
+    category: "National Real Estate Plan"
+    max_pages: 20
+    max_depth: 4
+
+  # RERA capitalises this path. Kept verbatim: a lower-cased seed is a different
+  # url to a case-sensitive server, and prefix scope compares paths as given.
+  - name: "Real Estate Advertising Guidelines"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/Real-Estate-Advertising-Guidelines"
+    scope: prefix
+    source_system: "Advertising Guidelines"
+    category: "Advertising Guidelines"
+    max_pages: 20
+    max_depth: 4
+
+  - name: "Regulation Templates"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/regulation-templates"
+    scope: prefix
+    source_system: "Regulation Templates"
+    category: "Regulation Templates"
+    max_pages: 20
+    max_depth: 4
