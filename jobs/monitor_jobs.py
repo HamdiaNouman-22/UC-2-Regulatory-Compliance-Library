@@ -24,6 +24,12 @@ and how expensively it can be checked.
                                     request, and it DISCOVERS) plus eleven
                                     browser crawls of the HTML sections. Weekly
                                     because of the eleven, not the one.
+    monitor_rera           weekly   Eight small section crawls. Its probe WOULD
+                                    work — 117/121 urls carry a stable ETag —
+                                    but circulars are partitioned by year and a
+                                    new year is a new PAGE, which no probe can
+                                    discover. The crawl is the signal because
+                                    DISCOVERY is, not because a probe fails.
 
 WHERE THE ROWS GO
 
@@ -179,11 +185,24 @@ CHEAP_PROBE_SOURCES = [
 #: none — which is why CBE is weekly like MC and CMA rather than daily like MOH.
 #: If daily circulars are ever wanted, the upgrade is to split cbe.yml in two,
 #: not to run eleven browser crawls every night.
+#:
+#: RERA joined 2026-08-19, and it is here for a DIFFERENT reason from the others.
+#: MC and CMA are here because a probe cannot work; RERA's probe works better than
+#: almost any source we hold — 117 of 121 stored urls return both an ETag and a
+#: Last-Modified, and eight fetched twice 0.4s apart were 8/8 identical.
+#:
+#: It is here because a probe answers the wrong question. RERA partitions its
+#: circulars BY YEAR, one page per year, and a new year is a NEW PAGE
+#: (Circulars-issued-in-2026 is a 404 today). A probe re-reads urls we already
+#: store, so it can report a silent replacement but can never see a new circular
+#: or a new year page. RERA published two circulars in 2025, so the case a probe
+#: covers is nearly hypothetical and the case it cannot cover is the whole point.
 CRAWL_AS_SIGNAL = {
     "Ministry of Commerce": ("mc", False),
     "Capital Market Authority (CMA)": ("cma", False),
     "Ministry of Health": ("moh", False),
     "Central Bank of Egypt (CBE)": ("cbe", False),
+    "Real Estate Regulatory Authority (RERA)": ("rera", False),
 }
 
 
@@ -475,6 +494,42 @@ def _monitor_cbe_impl() -> dict:
     return res
 
 
+def monitor_rera() -> dict:
+    """WEEKLY. Eight small section crawls of rera.gov.bh.
+
+    THE CRAWL IS THE SIGNAL BECAUSE DISCOVERY IS, not because a probe fails. RERA
+    answers a probe better than almost anything we hold: 117 of 121 stored urls
+    return both an ETag and a Last-Modified, and they are stable (8/8 identical
+    when fetched twice 0.4s apart). But circulars are partitioned by year, one
+    page per year, and a new year is a NEW PAGE — Circulars-issued-in-2026 is a
+    404 today. A probe re-reads what we already store, so it can never see that.
+
+    WHY IT IS CHEAP ANYWAY. RERA is small: 15 pages and 123 documents in the
+    measured crawl, all server-rendered, no pager, no JS data source, no WAF. This
+    is nothing like the CMA walk that takes 2h49m.
+
+    THE 2026 PAGE IS THE THING TO WATCH. `config/sources/rera.yml` seeds the
+    circulars source at the PARENT so prefix scope picks up a new year page the
+    first time it exists, with no config change. If you ever hand-check it, try
+    BOTH spellings: RERA writes `circulars-issued-in-2020` lower case and
+    `Circulars-issued-in-2024` capitalised.
+
+    EXPECT A FEW `unknown` AND DO NOT CHASE THEM. Four stored CloudFront urls are
+    dead (403 in a browser too — a library problem, not a sweep one), and the two
+    documents hosted on rera.gov.bh itself cannot be fetched by a plain HTTP
+    client at all: the host omits its intermediate CA, so requests raises
+    CERTIFICATE_VERIFY_FAILED where a browser is fine. The crawl is unaffected —
+    Playwright runs with ignore_https_errors.
+    """
+    return _run_exclusive("monitor_rera", _monitor_rera_impl)
+
+
+def _monitor_rera_impl() -> dict:
+    res = _crawl_into_db("rera", False, timeout=5400)
+    logger.info("Real Estate Regulatory Authority: %s", res)
+    return res
+
+
 def _forms_for(regulator: str) -> list:
     """Every hints form that crawls this regulator, sorted for determinism.
 
@@ -500,4 +555,4 @@ def _forms_for(regulator: str) -> list:
 
 
 __all__ = ["monitor_cheap_probes", "monitor_sama", "monitor_mc", "monitor_cma",
-           "monitor_cbe"]
+           "monitor_cbe", "monitor_rera"]
