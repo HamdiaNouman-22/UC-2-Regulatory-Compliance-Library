@@ -1,0 +1,207 @@
+# CBE — Central Bank of Egypt
+#
+# A SPLIT SOURCE. One custom source reads the site's own API; eleven generic
+# sources walk the HTML sections. Both produce List[RegulatoryDocument], so the
+# pipeline cannot tell them apart.
+#
+# ---------------------------------------------------------------------------
+# 1. CIRCULARS ARE AN API, NOT A CRAWL
+# ---------------------------------------------------------------------------
+# The circulars page shows ten rows behind a "Load more" button, so a crawl walks
+# into a 40-page JavaScript pager. MEASURED 2026-08-18: a prefix crawl of
+# /en/laws-regulations recorded 18 of 396 circulars — 4.5% — and reported
+# `status: ok` doing it.
+#
+#   GET /api/listing/circulars?pageNo=0&pageSize=500
+#   -> 396 results, 274 KB, one request, 2005-03-20 .. 2026-08-17
+#
+# and it carries a publication date, the regulator's own category, and a Sitecore
+# GUID per record — none of which a link walk can read.
+#
+# ---------------------------------------------------------------------------
+# 2. WHY `identity: [extra_meta.cbe_item_id]`
+# ---------------------------------------------------------------------------
+# CBE's circular urls embed the date:
+#
+#   /-/media/project/cbe/listing/circulars/2026/august/circular-dated-17-august-2026-....pdf
+#
+# so a re-issued circular lands at a NEW url, and under the default identity
+# (document_url, doc_path, title) that reads as one new document PLUS one
+# disappearance — the exact failure dynamic_crawler/MONITORING.md §2 names. The
+# API hands us `itemId`, a Sitecore GUID measured unique across all 396 rows,
+# which survives both a retitle and a move.
+#
+# Declared HERE rather than in the crawler because the composite's fetch loop
+# stamps it onto every document a source produced
+# (crawler/generic_crawler_wrapper.py:522) — so it works for `mode: custom`
+# exactly as it does for `mode: generic`, and the choice stays config, not code.
+#
+# This is the FIRST source in the repo to override identity. The mechanism is
+# built and read back per document in formfill/orch.py::_identity_for; it has
+# simply never been used. If any record ever lacks an itemId the run aborts
+# rather than merging rows — _check_identities refuses an empty identity, which
+# is the loud failure we want.
+#
+# ---------------------------------------------------------------------------
+# 3. WHY laws-regulations IS SPLIT AND HAS NO TOP-LEVEL SEED
+# ---------------------------------------------------------------------------
+# `prefix` scope on /en/laws-regulations INCLUDES /regulations/circulars, and
+# documents are collected from every in-scope page regardless of the link's own
+# scope. Measured on that crawl: 21 of its 55 documents came from
+# /-/media/project/cbe/listing/ — circular PDFs, which the API source above
+# already holds in full and at far better quality (real title, real date, real
+# category).
+#
+# So the section is seeded at its three real subtrees instead, and the bare
+# /en/laws-regulations landing page is deliberately NOT a source. Sitemap counts
+# for the subtree, 2026-08-18:
+#
+#   /regulations/regulations-book   143 urls   <- the bulk
+#   /regulations/basel                7
+#   /laws (+ banking-laws, other-laws) 3
+#   /regulations/circulars            1        <- the API owns this
+#
+# Splitting also follows ONBOARDING's rule: several small sources beat one large
+# one, because each keeps its own baseline and its own change signal, so one
+# section breaking is visible instead of being absorbed into a bigger number.
+#
+# RESIDUAL RISK, to check in the workbook before promoting: a page under one
+# section can still link a PDF that belongs to another, so a few documents may
+# appear twice under different folders. That is what the workbook review step is
+# for; `document_exists_by_url(url, category)` is category-scoped, so nothing
+# overwrites anything — it would be duplicate rows, not lost ones.
+#
+# ---------------------------------------------------------------------------
+# 4. TWO TRAPS ON THIS HOST
+# ---------------------------------------------------------------------------
+#   * A REJECTION ARRIVES AS HTTP 200 + HTML — a 269-byte "Request Rejected"
+#     page. The status code says success, so cbe_crawler.py judges the content
+#     type and the payload shape instead.
+#   * `urllib` is refused and `requests` is not, with an identical User-Agent;
+#     the WAF reads the header signature. Related: HEAD is 403, GET is 200.
+#
+# News is deliberately out of the library (/api/listing/news, 781 items).
+
+regulator: "Central Bank of Egypt (CBE)"
+owner: lead
+
+sources:
+  # ---- the API ------------------------------------------------------------
+  - name: "Circulars"
+    mode: custom
+    crawler_class: "crawler.cbe_crawler.CBECircularsCrawler"
+    identity: [extra_meta.cbe_item_id]
+    init_kwargs:
+      source_system: "Circulars"
+
+  # ---- laws & regulations, seeded past the circulars listing ---------------
+  - name: "Laws"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/laws-regulations/laws"
+    scope: prefix
+    source_system: "Laws"
+    category: "Laws"
+    max_pages: 60
+    max_depth: 6
+
+  # 143 sitemap urls — the largest section on the site. The cap is raised
+  # accordingly; a crawl that stops at the cap reports `incomplete`, and an
+  # incomplete run must never be read as coverage.
+  - name: "Regulations Book"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/laws-regulations/regulations/regulations-book"
+    scope: prefix
+    source_system: "Regulations Book"
+    category: "Regulations"
+    max_pages: 250
+    max_depth: 8
+
+  - name: "Basel"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/laws-regulations/regulations/basel"
+    scope: prefix
+    source_system: "Basel"
+    category: "Regulations"
+    max_pages: 60
+    max_depth: 6
+
+  # ---- the other sections, as crawled and measured 2026-08-18 -------------
+  # pages / documents from the 9-section run, for comparison on the next run:
+  #   governance 12/5   aml-cft 5/13   financial-stability 19/27
+  #   monetary-policy 10/13   payment-systems 27/37   cybersecurity 4/0
+  #   financial-technology 5/2   sustainability 1/0
+  - name: "Governance"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/governance"
+    scope: prefix
+    source_system: "Governance"
+    category: "Governance"
+    max_pages: 60
+    max_depth: 6
+
+  - name: "AML and CFT"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/aml-cft"
+    scope: prefix
+    source_system: "AML and CFT"
+    category: "AML and CFT"
+    max_pages: 60
+    max_depth: 6
+
+  - name: "Financial Stability"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/financial-stability"
+    scope: prefix
+    source_system: "Financial Stability"
+    category: "Financial Stability"
+    max_pages: 80
+    max_depth: 6
+
+  - name: "Monetary Policy"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/monetary-policy"
+    scope: prefix
+    source_system: "Monetary Policy"
+    category: "Monetary Policy"
+    max_pages: 60
+    max_depth: 6
+
+  - name: "Payment Systems and Services"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/payment-systems-and-services"
+    scope: prefix
+    source_system: "Payment Systems and Services"
+    category: "Payment Systems and Services"
+    max_pages: 80
+    max_depth: 6
+
+  - name: "Cybersecurity"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/cybersecurity"
+    scope: prefix
+    source_system: "Cybersecurity"
+    category: "Cybersecurity"
+    max_pages: 40
+    max_depth: 6
+
+  - name: "Financial Technology"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/financial-technology"
+    scope: prefix
+    source_system: "Financial Technology"
+    category: "Financial Technology"
+    max_pages: 40
+    max_depth: 6
+
+  # A genuine LEAF: 1 page, no attachments. The `thin` note fires on it and the
+  # answer is "fine, it is thin" — the page really is titled "Principles and
+  # Regulatory Framework". Kept so the section is represented; if it stays at 0
+  # documents on the second run it is a candidate for removal, not a bug.
+  - name: "Sustainability"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/sustainability/principles-and-regulatory-framework"
+    scope: prefix
+    source_system: "Sustainability"
+    category: "Sustainability"
+    max_pages: 40
+    max_depth: 6
