@@ -390,5 +390,57 @@ sources:
     confirm: true
     identity: [doc_path, title]
 
+  # EDB (BAHRAIN) — `crawl` IS A MEASURED CONCLUSION HERE TOO, NOT A DEFAULT.
+  #
+  # bahrainbusinesslaws.com, October CMS on Laravel. A law is an HTML PAGE, not
+  # a file — there are no PDFs anywhere on this site. MEASURED 2026-08-19:
+  #
+  #   ETag / Last-Modified   ABSENT on every response, section pages and law
+  #                          pages alike. `stored-inventory` has no token to read.
+  #   HEAD                   returns NO Content-Length at all. A HEAD conveys
+  #                          literally nothing here.
+  #   conditional GET        If-Modified-Since answered 200 + the full
+  #                          95,389-byte body. NO 304 support.
+  #   robots.txt             404.
+  #   sitemap.xml            404 — so `signal: sitemap` cannot work either.
+  #   a publisher feed       NONE EXISTS. /search-result is a query form with no
+  #                          dates and no ordering, so it cannot say what moved.
+  #   /all-laws/all-laws     the index of all 64. Detects a law ADDED, REMOVED or
+  #                          RENAMED in one request — but it is BYTE-IDENTICAL
+  #                          when Article 12 of a law is edited in place. Silence
+  #                          on in-place amendment is the direction that loses a
+  #                          regulation, so this is a companion to the crawl,
+  #                          never a replacement. It also cannot supply the
+  #                          category, so it cannot build doc_path.
+  #   raw body sha256        STABLE — three fetches, byte-identical. This is the
+  #                          OPPOSITE of MLCU: no __VIEWSTATE, no CSRF meta, no
+  #                          nonce. The edb_session cookie rotates but it is a
+  #                          HEADER, so it cannot move a body hash.
+  #   visible text sha256    STABLE across those same three fetches.
+  #
+  # So BOTH bases work here and text is a CHOICE, not a necessity: raw HTML moves
+  # whenever EDB redeploys a template, which would report all 64 laws modified
+  # for a footer change. config/sources/edb.yml carries the same reasoning.
+  #
+  # A probe would also buy nothing. With no ETag to trust, a confirming
+  # stored-inventory probe must fetch and hash all 64 law pages; the full crawl
+  # is 8 category pages + 64 law pages = 72. The probe costs 64 to the crawl's 72
+  # and CANNOT DISCOVER A NEW LAW.
+  #
+  # `confirm: true` is recorded rather than exercised — no probe runs under
+  # `signal: crawl`. It matters only if someone runs a deliberate `--signal
+  # stored-inventory --limit N` against a slice, and then the two measurements
+  # above say it must hash VISIBLE TEXT.
+  #
+  # IDENTITY IS THE DEFAULT, and there is deliberately NO `identity:` line here.
+  # Measured across all 64: no duplicate document_url, title or content_hash, and
+  # no slug carries a version suffix — nothing behaves like MLCU's `_v2`. Leaving
+  # it out means the sweep and the orchestrator CANNOT build different keys,
+  # which removes that hazard rather than documenting it.
+  - regulator: "Bahrain Economic Development Board (EDB)"
+    source_system: "Bahrain Business Laws"
+    signal: crawl
+    confirm: true
+
 # Not listed, deliberately:
 #   MOH x2  same shape as MOE; both forms are still approved=false.

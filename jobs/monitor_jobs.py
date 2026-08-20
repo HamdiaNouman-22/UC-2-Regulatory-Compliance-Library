@@ -25,6 +25,14 @@ and how expensively it can be checked.
                                     dates nor document links — every cheaper
                                     signal was measured and ruled out. SHIPPED
                                     DISABLED: the workbook has not been read yet.
+    monitor_edb            weekly   Bahrain, 72 requests. No ETag, no
+                                    Last-Modified, no robots.txt or sitemap
+                                    (both 404), no 304, and a HEAD with no
+                                    Content-Length. Its /all-laws index would
+                                    catch a law added or renamed in one request
+                                    but is byte-identical on an in-place
+                                    amendment, so it cannot replace the crawl.
+                                    SHIPPED DISABLED, same reason as MLCU.
 
 WHERE THE ROWS GO
 
@@ -184,6 +192,11 @@ CRAWL_AS_SIGNAL = {
     "Ministry of Health": ("moh", False),
     "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)":
         ("mlcu", False),
+    #: EDB joined 2026-08-19. Every cheaper signal was measured and ruled out —
+    #: no ETag, no Last-Modified, no sitemap or robots.txt (both 404), no 304 on
+    #: a conditional GET, and a HEAD that returns no Content-Length at all. Full
+    #: measurements on the change_signals.yml entry.
+    "Bahrain Economic Development Board (EDB)": ("edb", False),
 }
 
 
@@ -423,6 +436,45 @@ def _monitor_mlcu_impl() -> dict:
     # have saved almost nothing even if one had been possible.
     res = _crawl_into_db("mlcu", False, timeout=5400)
     logger.info("MLCU: %s", res)
+    return res
+
+
+def monitor_edb() -> dict:
+    """WEEKLY, AND OFF. The crawl is the signal — measurements on the
+    change_signals.yml entry.
+
+    LEAVE THE SCHEDULER SLOT DISABLED until a person has read the workbook: this
+    path writes straight to MSSQL, and EDB has never been reviewed.
+    """
+    return _run_exclusive("monitor_edb", _monitor_edb_impl)
+
+
+def _monitor_edb_impl() -> dict:
+    # 8 category pages plus 64 law pages. A confirming probe would cost 64 of
+    # those 72 requests and still could not discover a law we do not hold.
+    res = _crawl_into_db("edb", False, timeout=5400)
+
+    # One more request, against the site's own index of all 64. The completeness
+    # gate compares each category to its own last count and so only catches a
+    # LARGE drop; this catches a one-law drop, and also sees a law ADDED, which
+    # no probe over stored rows can. Rows are already written by here, but every
+    # one arrives with status='' and waits for a person.
+    from crawler.edb_crawler import index_slugs, inventory_fingerprint
+    try:
+        index = index_slugs()
+        res["inventory_index"] = len(index)
+        res["inventory_fingerprint"] = inventory_fingerprint(index)
+        res["inventory_verdict"] = "OK" if len(index) == res.get("crawled") else "MISMATCH"
+        if res["inventory_verdict"] == "MISMATCH":
+            logger.error("EDB inventory mismatch: index lists %d law(s), crawl "
+                         "produced %s — review before approving any row",
+                         len(index), res.get("crawled"))
+    except Exception as e:
+        # A failed cross-check must not be reported as a passed one.
+        res["inventory_verdict"] = f"UNCHECKED: {e}"
+        logger.warning("EDB inventory check did not run: %s", e)
+
+    logger.info("EDB: %s", res)
     return res
 
 

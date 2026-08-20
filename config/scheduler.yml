@@ -181,6 +181,24 @@ jobs:
       hour: 6
       minute: 0
 
+  # EDB (BAHRAIN) — 72 requests: 8 category pages plus 64 law pages. Every
+  # cheaper signal was measured and ruled out; see the change_signals.yml entry.
+  #
+  # DISABLED BECAUSE NOBODY HAS READ ITS WORKBOOK YET. This path writes straight
+  # to MSSQL, so enabling it before the review would make the first scheduled run
+  # be the ingest. Turn it on after the workbook is approved and promoted.
+  #
+  # Sunday 07:00 keeps it clear of monitor_mc (04:00), monitor_cma (05:00) and
+  # monitor_mlcu (06:00): all four take the same `_run_exclusive` lock, and an
+  # overlap is a SKIP, so a collision starves a job rather than failing.
+  monitor_edb:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 7
+      minute: 0
+
   # ----------------------------------------------------------
   # NO JOB FOR Saudi Exchange OR SIMAH — deliberately.
   #
