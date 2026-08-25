@@ -203,6 +203,18 @@ CRAWL_AS_SIGNAL = {
     "Ministry of Health": ("moh", False),
     "Central Bank of Egypt (CBE)": ("cbe", False),
     "Real Estate Regulatory Authority (RERA)": ("rera", False),
+    # SIO joined 2026-08-25. Not because a probe fails to be worth it, but
+    # because there is NOTHING TO PROBE: sio.gov.bh returns no ETag, no
+    # Last-Modified and no Content-Length on any page, and its sitemap carries one
+    # single lastmod (its own build time) across all 106 urls. The crawl is ~10
+    # page loads and about five minutes for all 214 documents, because a section's
+    # ~48 laws are modals in the DOM of one page. See config/change_signals.yml.
+    "Social Insurance Organisation (SIO)": ("sio", False),
+    # LLOC joined 2026-08-25, NARROWED. The tuple names the config; the job below
+    # passes only_sources so the nightly run is the 15-request Latest window and
+    # not the 47-minute classification crawl. Anything reading this dict to run a
+    # whole regulator would get both — monitor_lloc() is the entry point.
+    "Legislation and Legal Opinion Commission (LLOC)": ("lloc", False),
 }
 
 
@@ -268,7 +280,7 @@ def _signal_for(regulator: str, source: str) -> str:
     return "stored-inventory"
 
 
-def build_crawler(name: str, is_form: bool, only_urls=None):
+def build_crawler(name: str, is_form: bool, only_urls=None, only_sources=None):
     """(crawler, regulator) for a form name or a source-config name.
 
     PUBLIC because `tools/workbook.py` needs the identical crawler in order to
@@ -293,10 +305,12 @@ def build_crawler(name: str, is_form: bool, only_urls=None):
     cfg = yaml.safe_load(
         (REPO_ROOT / "config" / "sources" / f"{name}.yml").read_text(
             encoding="utf-8")) or {}
-    return build_regulator_crawler(cfg), cfg.get("regulator", name.upper())
+    return (build_regulator_crawler(cfg, only_sources=only_sources),
+            cfg.get("regulator", name.upper()))
 
 
-def _crawl_into_db(name: str, is_form: bool, only_urls=None, timeout=14400) -> dict:
+def _crawl_into_db(name: str, is_form: bool, only_urls=None, timeout=14400,
+                   only_sources=None) -> dict:
     """Crawl a source and write what it finds straight to MSSQL.
 
     The orchestrator classifies each document new / modified / unchanged against
@@ -306,7 +320,8 @@ def _crawl_into_db(name: str, is_form: bool, only_urls=None, timeout=14400) -> d
     from processor.downloader import Downloader
     from orchestrator.orchestrator import Orchestrator
 
-    crawler, regulator = build_crawler(name, is_form, only_urls)
+    crawler, regulator = build_crawler(name, is_form, only_urls,
+                                       only_sources=only_sources)
     orch = Orchestrator(crawler=crawler, repo=_repo(), downloader=Downloader(),
                         source_name=regulator)
     t0 = time.time()
@@ -381,6 +396,64 @@ def _monitor_cheap_probes_impl() -> dict:
     logger.info("Ministry of Health: %s", moh_rep)
 
     return out
+
+
+def monitor_sio() -> dict:
+    """WEEKLY. Bahrain's Social Insurance Organisation, both sectors.
+
+    THE CRAWL IS THE SIGNAL BECAUSE NOTHING ELSE ANSWERS. Measured 2026-08-25:
+    no ETag, no Last-Modified, not even a Content-Length on any sio.gov.bh page,
+    so `stored-inventory` has nothing to read; and /sitemap.xml carries a
+    <lastmod> on all 106 urls with ONE distinct value — its own build time — so
+    the sitemap adapter refuses it by its own gate.
+
+    WHY IT IS CHEAP ANYWAY. Every law is a Bootstrap modal already in the DOM, so
+    a section's ~48 laws come from ONE page load: ten page loads and roughly five
+    minutes for all 214 documents. That is cheaper than the probe loop it
+    replaces would have been.
+
+    ALL TEN SOURCES MUST RUN TOGETHER. `disappeared` is scoped by
+    (regulator, source_system) and sio.yml stores just two — "Private Sectors"
+    and "Public Sectors" — so the five sources of a sector share one bucket. A
+    run that covered only some of them would have the others' documents absent
+    from a run that still claims the sector, and only the completeness gate
+    between that and a withdrawal proposal. Hence no `only_sources` here.
+    """
+    rep = _crawl_into_db("sio", False)
+    logger.info("Social Insurance Organisation (SIO): %s", rep)
+    return {"Social Insurance Organisation (SIO)": rep}
+
+
+def monitor_lloc() -> dict:
+    """DAILY. Bahrain's LLOC, the `Latest Legislation` window ONLY.
+
+    WHY NARROWED. config/sources/lloc.yml holds four sources and they are not the
+    same kind of thing. Latest is 144 records in 15 requests (~40s) and is where
+    new Bahraini legislation appears first, with its Official Gazette number.
+    `Legislation By Classification` is 1,583 documents over 2,838 SECONDS
+    measured — coverage, not a signal. Dragging it into a nightly job would make
+    a 40-second question take 47 minutes.
+
+    WHY `only_sources` AND NOT A SECOND CONFIG. build_crawler is public so the
+    workbook path and this path build the same crawler; a `lloc.latest.yml` would
+    be the second copy its own docstring warns drifts. One config, one source
+    list, narrowed at the call.
+
+    A NAME THAT MATCHES NOTHING RAISES rather than monitoring zero sources — so
+    renaming the source in the yml breaks this loudly instead of silently.
+
+    THE CLASSIFICATIONS STILL NEED RUNNING, by hand or on a slow cadence:
+        python -m tools.workbook export lloc
+    They are not watched by anything today, and that is a deliberate gap, not an
+    oversight.
+
+    THE HOST THROTTLES WITH 404. lloc.gov.bh answers a burst with a 1,245-byte
+    IIS 404 that parses as an empty page; crawler/lloc_crawler.py holds the retry
+    budget for it. Do not schedule this alongside another lloc job.
+    """
+    rep = _crawl_into_db("lloc", False, only_sources=["Latest Legislation"])
+    logger.info("LLOC (Latest Legislation): %s", rep)
+    return {"Legislation and Legal Opinion Commission (LLOC)": rep}
 
 
 def monitor_sama() -> dict:
