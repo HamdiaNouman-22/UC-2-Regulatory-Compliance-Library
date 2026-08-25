@@ -94,6 +94,94 @@
 # stored as e.g. "Ead1A6E678Ba3F8458Ca04478B2Cdf7A" — for those, two of the three
 # identity fields carry no meaning. Fixing the titles is a crawler-side job and
 # would make this identity sound; until then, expect re-uploads to churn.
+#
+# ---------------------------------------------------------------------------
+# WHY EVERY SOURCE PINS strategy: generic
+# ---------------------------------------------------------------------------
+# MEASURED 2026-08-19, shape auto-detection over these eight seeds:
+#   Resolutions   -> list       <-- WRONG
+#   the other 7   -> generic
+#
+# crawl_list() on the resolutions page returns 4 of its 33 documents and reports
+# a clean run. That is why splitting this regulator into per-section sources
+# changed the count: the original crawl seeded /en/regulations, which detects as
+# `generic`, so the BFS walked resolutions correctly as a child page.
+#
+# Pinned on ALL EIGHT rather than only the broken one, because the failure is
+# SILENT and nothing here is a tree or a DataTable. Leaving seven on `auto` means
+# any of them can flip to `list` after a site tweak and quietly start returning a
+# fraction of its documents, with `status: ok`. There is no upside to auto here:
+# the generic BFS is the walker that works on every one of these pages today.
+#
+# ---------------------------------------------------------------------------
+# NAMES COME FROM RERA, NOT FROM US  (corrected 2026-08-20)
+# ---------------------------------------------------------------------------
+# The first version of this file invented a source called "Overview" for the
+# landing page. RERA has no such section -- the page is titled "Regulations", and
+# searching the live site for "overview" returns nothing. Two other labels were
+# paraphrases rather than the site's words.
+#
+# source_system is an IDENTITY key (see the header of config/change_signals.yml),
+# and it also becomes a folder in doc_path, so an invented label puts a section in
+# the library that the regulator does not have. It is free to fix now and a
+# migration once a baseline is promoted -- MHRSD needed reconciling twice for
+# exactly this, and MISA's source_system was changed to "Laws" purely to match
+# the site's own tab.
+#
+# Every name below is now the page's own <h1>, verbatim, including RERA's
+# capitalisation of "RERA Law And Decrees". Faithful and checkable beats tidier
+# and invented.
+#
+# ANY RENAME HERE MUST MOVE WITH config/change_signals.yml, whose RERA entry is
+# looked up by (regulator, source_system). If the two drift, the sweep and the
+# ingest path keep separate memories of the same documents.
+#
+# ---------------------------------------------------------------------------
+# TWO SITE-WIDE PDFs ARE EXCLUDED
+# ---------------------------------------------------------------------------
+# MEASURED 2026-08-20 on the first workbook: Vision2030Englishlowresolution.pdf
+# and the Cloud First Policy pdf appear on ALL EIGHT legislation pages, so they
+# occupied 16 of 150 rows -- two documents, eight times each. Neither is a real
+# estate regulation: one is Bahrain's national economic vision, the other a
+# government IT policy.
+#
+# The chrome rule cannot catch them. JS_LINKS marks a link `chrome` only inside
+# <header>/<footer>, deliberately, so that a genuine in-page sidebar survives --
+# and these are linked from the page body. `check` passed them because they differ
+# by doc_path, which is the "shape, not sense" gap ONBOARDING describes.
+exclude_documents:
+  - "Vision2030Englishlowresolution.pdf"
+  - "ead1a6e678ba3f8458ca04478b2cdf7a.pdf"
+#
+# ---------------------------------------------------------------------------
+# doc_path_sections: false  -- RERA'S BREADCRUMB STILL NAMES THE PARENT
+# ---------------------------------------------------------------------------
+# UPDATED 2026-08-21. RERA's current crumb is a non-link <li class="active">, so
+# until today the crawler read anchors only and section_path was "Home >
+# Regulations" for ALL 15 pages -- every page filed under its parent. The
+# breadcrumb_current fix for www.rera.gov.bh in generic_crawler/crawler.py makes
+# it "Home > Regulations > Circulars issued in 2020" and so on.
+#
+# THAT DOES NOT CHANGE THE VERDICT HERE, because the crumb still leads with the
+# PARENT. With sections on, _doc_path would build (Home is dropped as a
+# non-subject crumb, the repeated section as a duplicate):
+#
+#   with sections     RERA | RERA Law And Decrees | Regulations | <title>
+#   as configured     RERA | RERA Law And Decrees | <title>
+#
+# The site's hierarchy is Regulations -> Laws and Decrees, so the first form still
+# puts a folder called Regulations INSIDE each section. That is the "a folder is
+# upside down" case ONBOARDING says only a person can see -- `check` passed it
+# happily. The section is already named by source_system, so the crumb adds
+# nothing.
+#
+# WHAT IS GENUINELY LOST BY THIS, AND WHY IT IS ACCEPTED: the circulars year is
+# now available (7 year pages, each its own crumb) and this setting discards it,
+# so all 79 circulars land in one flat "RERA Circulars and Instructions" folder.
+# No titles collide, the year is in each circular's own title, and doc_path is an
+# IDENTITY field -- turning sections on would restate every RERA row as new plus
+# disappeared. Revisit only alongside a deliberate identity migration.
+doc_path_sections: false
 
 regulator: "Real Estate Regulatory Authority (RERA)"
 owner: lead
@@ -101,21 +189,23 @@ owner: lead
 sources:
   # The landing page's own two documents, and nothing below it. max_depth: 0 stops
   # the walk at the seed so this source does not duplicate the seven below.
-  - name: "Overview"
+  - name: "Regulations"
     mode: generic
     seed_url: "https://www.rera.gov.bh/en/regulations"
     scope: prefix
-    source_system: "Overview"
-    category: "Overview"
+    strategy: generic
+    source_system: "Regulations"
+    category: "Regulations"
     max_pages: 5
     max_depth: 0
 
-  - name: "Laws and Decrees"
+  - name: "RERA Law And Decrees"
     mode: generic
     seed_url: "https://www.rera.gov.bh/en/regulations/laws-and-decrees"
     scope: prefix
-    source_system: "Laws and Decrees"
-    category: "Laws and Decrees"
+    strategy: generic
+    source_system: "Regulations"
+    category: "RERA Law And Decrees"
     max_pages: 40
     max_depth: 6
 
@@ -124,28 +214,31 @@ sources:
     mode: generic
     seed_url: "https://www.rera.gov.bh/en/regulations/resolutions"
     scope: prefix
-    source_system: "Resolutions"
+    strategy: generic
+    source_system: "Regulations"
     category: "Resolutions"
     max_pages: 40
     max_depth: 6
 
   # Seeded at the PARENT on purpose — see the year-partition note above. The cap
   # allows for one new year page per year for a long time.
-  - name: "Circulars"
+  - name: "RERA Circulars and Instructions"
     mode: generic
     seed_url: "https://www.rera.gov.bh/en/regulations/circulars"
     scope: prefix
-    source_system: "Circulars"
-    category: "Circulars"
+    strategy: generic
+    source_system: "Regulations"
+    category: "RERA Circulars and Instructions"
     max_pages: 60
     max_depth: 6
 
-  - name: "Code of Conduct"
+  - name: "RERA Code of Conduct"
     mode: generic
     seed_url: "https://www.rera.gov.bh/en/regulations/rera-code-of-conduct"
     scope: prefix
-    source_system: "Code of Conduct"
-    category: "Code of Conduct"
+    strategy: generic
+    source_system: "Regulations"
+    category: "RERA Code of Conduct"
     max_pages: 20
     max_depth: 4
 
@@ -153,7 +246,8 @@ sources:
     mode: generic
     seed_url: "https://www.rera.gov.bh/en/regulations/national-real-estate-plan"
     scope: prefix
-    source_system: "National Real Estate Plan"
+    strategy: generic
+    source_system: "Regulations"
     category: "National Real Estate Plan"
     max_pages: 20
     max_depth: 4
@@ -164,8 +258,9 @@ sources:
     mode: generic
     seed_url: "https://www.rera.gov.bh/en/regulations/Real-Estate-Advertising-Guidelines"
     scope: prefix
-    source_system: "Advertising Guidelines"
-    category: "Advertising Guidelines"
+    strategy: generic
+    source_system: "Regulations"
+    category: "Real Estate Advertising Guidelines"
     max_pages: 20
     max_depth: 4
 
@@ -173,7 +268,8 @@ sources:
     mode: generic
     seed_url: "https://www.rera.gov.bh/en/regulations/regulation-templates"
     scope: prefix
-    source_system: "Regulation Templates"
+    strategy: generic
+    source_system: "Regulations"
     category: "Regulation Templates"
     max_pages: 20
     max_depth: 4
