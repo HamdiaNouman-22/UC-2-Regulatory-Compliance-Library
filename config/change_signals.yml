@@ -168,8 +168,86 @@ sources:
   # the rows whose TITLE is also that hash (best_doc_title falls through to the
   # slug when anchor text is generic), where two of the three identity fields
   # carry no meaning. Fixing the titles is crawler-side work.
+  # RECONCILED 2026-08-20: this said source_system "Circulars" while
+  # config/sources/rera.yml now stores RERA's own page title. A sweep looks a
+  # source up by (regulator, source_system), so while the two disagreed this
+  # entry matched nothing and every RERA document was invisible to monitoring --
+  # the same failure CMA hit when its stored regulator became the full name.
   - regulator: "Real Estate Regulatory Authority (RERA)"
-    source_system: "Circulars"
+    source_system: "RERA Circulars and Instructions"
+    signal: crawl
+    confirm: false
+
+  # SOCIAL INSURANCE ORGANISATION (BAHRAIN) — THE CRAWL IS THE ONLY SIGNAL.
+  # MEASURED 2026-08-25, all three cheaper options ruled out rather than assumed:
+  #
+  #   stored-inventory  IMPOSSIBLE. sio.gov.bh returns NO version token at all —
+  #                     no ETag, no Last-Modified, not even a Content-Length, on
+  #                     any page tested. There is nothing for a probe to read.
+  #   sitemap           REFUSED BY ITS OWN GATE. /sitemap.xml exists and carries
+  #                     a <lastmod> on all 106 urls, but ONE distinct value:
+  #                     2025-06-17T09:14:37+00:00, the sitemap's build time.
+  #                     Distinct ratio 0.005 against MIN_DISTINCT_RATIO 0.2. It
+  #                     fails MIN_OVERLAP too (0.047): SIO's documents are
+  #                     `<page>#<modal-id>` urls and `normalise()` keeps
+  #                     fragments, so only the 10 page rows match at all.
+  #   snapshot-articles WRONG TOOL. It re-hashes pages already saved on disk with
+  #                     no request, for hosts we are BLOCKED from. SIO is
+  #                     reachable, and an offline re-hash cannot see new content.
+  #
+  # AND THE CRAWL IS CHEAP, which is what makes this fine rather than a
+  # compromise: ~10 page loads and about five minutes for all 214 documents,
+  # because a section's ~48 laws are Bootstrap modals in the DOM of ONE page.
+  # Same reasoning MOH and CBE joined CRAWL_AS_SIGNAL on — a probe step here
+  # would be pure overhead.
+  #
+  # TWO ENTRIES, ONE PER SECTOR, because that is what config/sources/sio.yml
+  # stores as source_system and a sweep looks a source up by
+  # (regulator, source_system). The eight sections live in `category`; giving
+  # them entries here would name source_systems that do not exist — the drift
+  # that made every RERA document invisible to monitoring until 2026-08-20.
+  - regulator: "Social Insurance Organisation (SIO)"
+    source_system: "Private Sectors"
+    signal: crawl
+    confirm: false
+
+  - regulator: "Social Insurance Organisation (SIO)"
+    source_system: "Public Sectors"
+    signal: crawl
+    confirm: false
+
+  # LLOC (BAHRAIN) — MONITORED THROUGH `Latest Legislation` ONLY.
+  # MEASURED 2026-08-25:
+  #
+  #   sitemap           DOES NOT EXIST. /sitemap.xml, /robots.txt and
+  #                     /en/sitemap.xml all answer 404. That needed proving:
+  #                     this host's throttle serves a 1,245-byte IIS 404 for
+  #                     paths that DO exist, so the first check was worthless.
+  #                     Re-run with a known-good control page in the same
+  #                     session (/en/Legislation/Category, 200, 31,991 bytes)
+  #                     both are genuinely absent.
+  #   stored-inventory  POSSIBLE AND NOT WORTH IT. The files answer honestly —
+  #                     PDF/L1293.pdf returns ETag 0c32ff5f263c41:0,
+  #                     Last-Modified Wed, 07 Jul 2004, Content-Length 79050 —
+  #                     but a probe is one request per stored document, and the
+  #                     classification section holds 1,583. At the mandatory
+  #                     2.5s spacing that is ~66 minutes, SLOWER than the 47
+  #                     minute crawl, on the host that answers bursts with a 404.
+  #
+  # So the signal is the Latest window: 144 records in 15 requests, and
+  # config/sources/lloc.yml already argues it is where new Bahraini legislation
+  # appears first, with its Official Gazette number.
+  #
+  # THE CLASSIFICATION SECTION IS DELIBERATELY NOT MONITORED. It is coverage, not
+  # a signal: 1,583 documents, 2,838 seconds measured. jobs/monitor_jobs.py
+  # narrows the nightly run with `only_sources=["Latest Legislation"]` rather
+  # than a second config file, so the monitored source and the exported source
+  # cannot drift apart. Run the classifications as a periodic refresh by hand.
+  #
+  # No entry for the 24 classification source_systems: the defaults apply, the
+  # same choice CBE's eleven sections made above.
+  - regulator: "Legislation and Legal Opinion Commission (LLOC)"
+    source_system: "Latest Legislation"
     signal: crawl
     confirm: false
 
