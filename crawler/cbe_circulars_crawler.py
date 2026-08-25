@@ -232,12 +232,35 @@ class CBECircularsCrawler:
                 category=cats[0] if cats else self.source_system,
                 title=title,
                 document_url=url,
-                # FLAT, deliberately: regulator > source_system > title, as MOH
-                # and every other source. Putting the API category in the path
-                # would make the folder - and therefore `disappeared` scoping -
-                # move whenever CBE re-files a circular. The taxonomy is kept in
-                # `category` and extra_meta, where it costs nothing.
-                doc_path=[self.regulator, self.source_system, title],
+                # THE SITE'S OWN TRAIL, stated as the constant it is.
+                #
+                # Every one of the 396+ circulars hangs off ONE listing page,
+                # /en/laws-regulations/regulations/circulars, and that page's
+                # breadcrumb is fixed: measured 18 times in the generic crawl of
+                # /en/laws-regulations as "Home > Laws and Regulations >
+                # Regulations > Circulars" (output/cbe_test_3, 2026-08-18). So this
+                # is hardcoding a fact about the site, not inferring one per
+                # document. It also means the API rows join the same folder tree
+                # the generic laws-regulations source builds, instead of sitting in
+                # a flat folder beside it.
+                #
+                # `source_system` stays "Circulars" and is NOT in this path on
+                # purpose: doc_path is what becomes folders, source_system is what
+                # scopes `disappeared` (orch.py::_stored_for_source filters stored
+                # rows by source_system + regulator, NOT by folder). The two are
+                # independent, so the tree costs nothing in change detection. An
+                # earlier version of this comment claimed the opposite and kept the
+                # path flat for a reason that does not hold.
+                #
+                # STILL NOT the API's `categories` taxonomy, and that part of the
+                # old reasoning does hold: a category is per-document and CBE can
+                # re-file one. Worse, a re-file would not even take effect --
+                # `modified` is decided on content_hash alone, the hash does not
+                # include doc_path, so the row would classify `unchanged` and keep
+                # its old folder while the site said otherwise. The taxonomy stays
+                # in `category` and extra_meta, where it costs nothing.
+                doc_path=[self.regulator, "Laws and Regulations",
+                          "Regulations", "Circulars", title],
                 file_type=_ext_type(url) if _is_doc(url) else "HTML",
                 # The publisher states this. No parsing, no guess.
                 published_date=published,
