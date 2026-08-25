@@ -89,7 +89,7 @@ sources:
   # ---- the API ------------------------------------------------------------
   - name: "Circulars"
     mode: custom
-    crawler_class: "crawler.cbe_crawler.CBECircularsCrawler"
+    crawler_class: "crawler.cbe_circulars_crawler.CBECircularsCrawler"
     identity: [extra_meta.cbe_item_id]
     # `regulator` is stated HERE and not left to the class default. build_source
     # passes only init_kwargs to a `mode: custom` crawler
