@@ -1,0 +1,325 @@
+# SIO — Social Insurance Organisation, Bahrain
+#
+# CONFIRM THE REGULATOR STRING BEFORE THE FIRST PROMOTE. "Social Insurance
+# Organisation (SIO)" follows the library's `Full Name (ACRONYM)` rule, but it was
+# written from the site rather than from an existing library row. Config lookups
+# match this string exactly and fall back to defaults SILENTLY on a near-miss, so
+# a wrong spelling is a wrong answer rather than an error.
+#
+# ---------------------------------------------------------------------------
+# 1. THERE ARE NO FILES. EVERY LAW IS A MODAL.
+# ---------------------------------------------------------------------------
+# MEASURED 2026-08-25 from the two exploratory crawls in output/sio:
+#
+#   /en/private-sectors   99 pages, 0 documents, `status: ok`
+#   /en/public-sectors   113 pages, 2 documents, `status: ok`
+#
+# 212 pages walked and nothing collected — because SIO publishes each law as a
+# Bootstrap modal already in the DOM. 94 and 108 of those "pages" are modal
+# records captured as `<page>#<modal-id>`; that is `keep_modals`, already on for
+# www.sio.gov.bh in generic_crawler/crawler.py SITE_PROFILES.
+#
+# So `include_pages: always` is not a tuning choice, it is the whole source: the
+# modal IS the document, and a config left on `auto` collects almost nothing.
+#
+# ---------------------------------------------------------------------------
+# 2. THE SECTIONS ARE SIBLINGS OF THE HUBS, NOT CHILDREN
+# ---------------------------------------------------------------------------
+# /en/private-sectors links to /en/amendment-decrees, /en/ministerial-orders and
+# /en/prime-ministerial-edicts — all at /en/, none under the hub's path. So
+# `scope: prefix` seeded at a hub reaches NOTHING; the exploratory crawls worked
+# only because breadcrumb scope anchored on the sector name.
+#
+# This file seeds the EIGHT SECTIONS, where prefix does work: a modal's url is
+# `<section-page>#<id>`, and a fragment is not part of the path, so every modal
+# of a section is in its own scope and no other's.
+#
+# ---------------------------------------------------------------------------
+# 3. WHAT HAPPENS IF SIO ADDS A NINTH SECTION
+# ---------------------------------------------------------------------------
+# Seeding the sections means a section added to a hub later is invisible to this
+# config. That is why the two HUBS ARE ALSO SOURCES, at `max_pages: 1` — as
+# sentinels, not for coverage.
+#
+# The hub's own text is its section list, verbatim (measured):
+#
+#   /en/private-sectors  "Decree Law No. (24) of 1976 ... Read More Amendment
+#                         Decrees Read More Ministerial Edicts Read More
+#                         Ministerial Orders Read More"      1,734 chars
+#   /en/public-sectors   "Law No. 13 of 1975 Read More Amendment Decrees ..." 1,667
+#
+# `content_hash` is the hash of that text, so the day a ninth section appears the
+# hub row reports `modified` and a person adds the source. It costs one page load
+# per sector per run and needs no new mechanism.
+#
+# THE ALTERNATIVE, AND WHY IT IS NOT USED HERE: one source per sector seeded at
+# the hub with `scope: breadcrumb` covers new sections automatically — measured,
+# that is exactly what reached all 99 and 113 pages. The cost is that it flattens
+# the section away: every modal's breadcrumb is ('Home', 'Private Sectors'), so
+# `category` would read "Private Sectors" for all of them and the only per-record
+# trace of its section would be `linked_from_title` (measured: Ministerial Orders
+# 47, Amendment Decrees 32, Ministerial Edicts 14), which nothing reads today.
+# Automatic coverage, no section structure. Revisit if the sentinel proves too
+# slow a signal — the two shapes are not compatible, so do not run both.
+#
+# ---------------------------------------------------------------------------
+# 4. THE PLACEHOLDERS ARE KEPT ON PURPOSE
+# ---------------------------------------------------------------------------
+#   private   94 modal records -> 69 clear the default 200-char test
+#   public   108 modal records -> 69 clear it
+#
+# 64 of 202 records would have been dropped, silently, because 56 and 66 of them
+# read only "This content will be published soon". The engine keeps those
+# deliberately (see JS_MODALS): the TITLE is a real law, SIO listing an
+# unpublished one is a fact worth holding, and the day it publishes the text
+# changes and the row reports `modified`.
+#
+# `min_page_text: 50` keeps them — the shortest modal measured 62 characters. The
+# usual leaf fallback cannot help: SIO reports `n_children` on 0 of 202 pages.
+#
+# ---------------------------------------------------------------------------
+# 5. source_system IS THE SECTOR. category IS THE SECTION.
+# ---------------------------------------------------------------------------
+# Same shape as rera.yml: several sources sharing one `source_system` (the site's
+# own top-level area), each carrying its section in `category`, with
+# `doc_path_sections: false`.
+#
+# THE SECTION NAMES ARE NOT UNIQUE, which is what forces the sector to be the
+# higher level. The section pages' own titles, read from the crawl:
+#
+#   /en/amendment-decrees          "Amendment Decrees"
+#   /en/public-amendment-decrees   "Amendment Decrees"      <- same words
+#   /en/ministerial-orders         "Ministerial Orders"
+#   /en/public-ministerial-orders  "Ministerial Orders"     <- same words
+#   /en/prime-ministerial-edicts   "Ministerial Edicts"
+#   /en/ministerial-edicts         "Ministerial Edicts"     <- same words
+#
+# So "Ministerial Orders" alone names two different bodies of law. Making the
+# section the source_system would need an invented suffix — exactly what rera.yml
+# warns against: source_system is an IDENTITY key and also a folder, so an
+# invented label puts a section in the library that the regulator does not have.
+# The sector is the site's own distinction, so the sector is the level.
+#
+# EVERY NAME BELOW IS THE PAGE'S OWN TITLE, VERBATIM — including the site's
+# plural "Private Sectors"/"Public Sectors", and including the fact that
+# /en/prime-ministerial-edicts is titled just "Ministerial Edicts": the word
+# "prime" is in the url and not on the page. The titles being identical across
+# sectors means THE SEED IS THE ONLY RELIABLE WAY to tell a row's sector.
+#
+# ANY RENAME HERE MUST MOVE WITH config/change_signals.yml, whose entries are
+# looked up by (regulator, source_system).
+#
+# WHAT THIS COSTS, AND IT IS THE BILL rera.yml ALREADY ACCEPTS: `disappeared` is
+# scoped by (regulator, source_system), so a sector's sources share one bucket and
+# MUST run together. CompositeCrawler logs a failing source and carries on, so if
+# Ministerial Orders fails while the others succeed, its documents are absent from
+# a run that still claims the sector — the completeness gate is what stands
+# between that and a withdrawal.
+#
+# `doc_path_sections: false` because every modal's breadcrumb is
+# ('Home', 'Private Sectors') — the sector, which is now the source_system, so the
+# crumb would only repeat it.
+#
+# `doc_path_title: true` so the trail ends at the law:
+#   SIO | Private Sectors | Ministerial Order No. (X) of Y
+# Without it every modal claims the SECTOR as its leaf and the leaf rule gives
+# each one its own same-named sibling folder — measured in a CBE workbook as 658
+# folder rows for 502 distinct paths. RERA predates this setting and still has
+# that shape; SIO has never been promoted, so it can start correct.
+#
+# ---------------------------------------------------------------------------
+# 6. strategy: generic IS MANDATORY. AUTO-DETECTION RETURNS NOTHING.
+# ---------------------------------------------------------------------------
+# MEASURED 2026-08-25, the same seed twice:
+#
+#   --strategy auto     shape `list`     status `zero`   0 pages,  0 documents
+#   --strategy generic  shape `generic`  status `ok`    48 pages
+#
+# The wrapper already says so about this host — "sio.gov.bh is worse: every one
+# of its content pages detects as `list` and returns 0 pages with status `zero`"
+# — and the first export of this file proved it the expensive way: 7 rows, being
+# the two hubs and the two law pages, because those happen to detect `generic`.
+# The six sections that hold the actual laws each returned zero.
+#
+# `zero` is at least an honest verdict, but the export path does not surface the
+# engine's per-source status (see the note in CBE's config), so the run looked
+# like a small regulator rather than a broken one. Every source here states the
+# strategy rather than relying on a detection that is known wrong for this site.
+#
+# ---------------------------------------------------------------------------
+# 7. WHAT IS NOT COVERED
+# ---------------------------------------------------------------------------
+# The Arabic side (/ar/...), and anything outside the two sector trees —
+# circulars, forms, service pages. Neither has been measured; add a source when
+# one has been.
+
+regulator: "Social Insurance Organisation (SIO)"
+owner: lead
+
+# Shared by every source below, stated per entry so a reader of one sees what it
+# does without scrolling:
+#   include_pages: always     the modal is the document
+#   min_page_text: 50         keep the "published soon" records
+#   doc_path_sections: false  the breadcrumb names the sector, already the source_system
+#   doc_path_title: true      the law is the leaf, not the folder
+#   strategy: generic         auto-detection returns `list` and collects nothing
+
+sources:
+  # ---- PRIVATE SECTOR -----------------------------------------------------
+  # Page counts from the 2026-08-25 crawl of /en/private-sectors, for comparison
+  # on the next run: law-no-24-of-1976 2, amendment-decrees 33,
+  # ministerial-orders 48, prime-ministerial-edicts 15.
+  #
+  # THE SENTINEL. One page, no traversal — its text is the hub's section list, so
+  # its content_hash moves when SIO adds a section. See section 3.
+  - name: "Private Sectors (hub sentinel)"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/private-sectors"
+    scope: prefix
+    strategy: generic
+    source_system: "Private Sectors"
+    # Stated rather than derived: the hub's own breadcrumb is ('Home',) alone and
+    # `_category_for` — unlike `_clean_trail` — does not filter CMS crumbs, so
+    # left to itself this row's category would read "Home".
+    category: "Private Sectors"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 1
+    max_depth: 1
+
+  - name: "Private Sector Law"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/law-no-24-of-1976"
+    scope: prefix
+    strategy: generic
+    source_system: "Private Sectors"
+    category: "Decree Law No. (24) of 1976 Promulgating the Social Insurance Law"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 40
+    max_depth: 3
+
+  - name: "Private Sector Amendment Decrees"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/amendment-decrees"
+    scope: prefix
+    strategy: generic
+    source_system: "Private Sectors"
+    category: "Amendment Decrees"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 120
+    max_depth: 3
+
+  # The largest private section measured (48 pages). The cap is raised
+  # accordingly; a run that stops at the cap reports `incomplete`, and an
+  # incomplete run must never be read as coverage.
+  - name: "Private Sector Ministerial Orders"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/ministerial-orders"
+    scope: prefix
+    strategy: generic
+    source_system: "Private Sectors"
+    category: "Ministerial Orders"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 150
+    max_depth: 3
+
+  # Titled "Ministerial Edicts" on the page; only the url says "prime".
+  - name: "Private Sector Ministerial Edicts"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/prime-ministerial-edicts"
+    scope: prefix
+    strategy: generic
+    source_system: "Private Sectors"
+    category: "Ministerial Edicts"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 80
+    max_depth: 3
+
+  # ---- PUBLIC SECTOR ------------------------------------------------------
+  # Counts from the crawl of /en/public-sectors: law-no-13-of-1975 2,
+  # public-amendment-decrees 37, public-ministerial-orders 50,
+  # ministerial-edicts 23.
+  - name: "Public Sectors (hub sentinel)"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/public-sectors"
+    scope: prefix
+    strategy: generic
+    source_system: "Public Sectors"
+    category: "Public Sectors"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 1
+    max_depth: 1
+
+  - name: "Public Sector Law"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/law-no-13-of-1975"
+    scope: prefix
+    strategy: generic
+    source_system: "Public Sectors"
+    category: "Law No. 13 of 1975"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 40
+    max_depth: 3
+
+  - name: "Public Sector Amendment Decrees"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/public-amendment-decrees"
+    scope: prefix
+    strategy: generic
+    source_system: "Public Sectors"
+    category: "Amendment Decrees"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 120
+    max_depth: 3
+
+  # The largest section on the site measured (50 pages).
+  - name: "Public Sector Ministerial Orders"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/public-ministerial-orders"
+    scope: prefix
+    strategy: generic
+    source_system: "Public Sectors"
+    category: "Ministerial Orders"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 150
+    max_depth: 3
+
+  - name: "Public Sector Ministerial Edicts"
+    mode: generic
+    seed_url: "https://www.sio.gov.bh/en/ministerial-edicts"
+    scope: prefix
+    strategy: generic
+    source_system: "Public Sectors"
+    category: "Ministerial Edicts"
+    include_pages: always
+    min_page_text: 50
+    doc_path_sections: false
+    doc_path_title: true
+    max_pages: 80
+    max_depth: 3
