@@ -83,7 +83,7 @@
 # News is deliberately out of the library (/api/listing/news, 781 items).
 
 regulator: "Central Bank of Egypt (CBE)"
-owner: lead
+owner: teammate B
 
 sources:
   # ---- the API ------------------------------------------------------------
@@ -91,45 +91,31 @@ sources:
     mode: custom
     crawler_class: "crawler.cbe_crawler.CBECircularsCrawler"
     identity: [extra_meta.cbe_item_id]
+    # `regulator` is stated HERE and not left to the class default. build_source
+    # passes only init_kwargs to a `mode: custom` crawler
+    # (crawler/generic_crawler_wrapper.py:614) - the top-level `regulator:` above
+    # is injected for generic sources ONLY. Without this line the two halves of
+    # CBE agree by coincidence, and an edit to the top-level name would silently
+    # split them into two regulators.
     init_kwargs:
+      regulator: "Central Bank of Egypt (CBE)"
       source_system: "Circulars"
 
   # ---- laws & regulations, seeded past the circulars listing ---------------
-  - name: "Laws"
+  - name: "Laws-Regulations"
     mode: generic
-    seed_url: "https://www.cbe.org.eg/en/laws-regulations/laws"
+    seed_url: "https://www.cbe.org.eg/en/laws-regulations"
     scope: prefix
-    source_system: "Laws"
-    category: "Laws"
+    source_system: "Laws-Regulations"
+    category: "Laws-Regulations"
     max_pages: 60
     max_depth: 6
 
-  # 143 sitemap urls — the largest section on the site. The cap is raised
-  # accordingly; a crawl that stops at the cap reports `incomplete`, and an
-  # incomplete run must never be read as coverage.
-  - name: "Regulations Book"
-    mode: generic
-    seed_url: "https://www.cbe.org.eg/en/laws-regulations/regulations/regulations-book"
-    scope: prefix
-    source_system: "Regulations Book"
-    category: "Regulations"
-    max_pages: 250
-    max_depth: 8
-
-  - name: "Basel"
-    mode: generic
-    seed_url: "https://www.cbe.org.eg/en/laws-regulations/regulations/basel"
-    scope: prefix
-    source_system: "Basel"
-    category: "Regulations"
-    max_pages: 60
-    max_depth: 6
-
-  # ---- the other sections, as crawled and measured 2026-08-18 -------------
-  # pages / documents from the 9-section run, for comparison on the next run:
-  #   governance 12/5   aml-cft 5/13   financial-stability 19/27
-  #   monetary-policy 10/13   payment-systems 27/37   cybersecurity 4/0
-  #   financial-technology 5/2   sustainability 1/0
+  # # ---- the other sections, as crawled and measured 2026-08-18 -------------
+  # # pages / documents from the 9-section run, for comparison on the next run:
+  # #   governance 12/5   aml-cft 5/13   financial-stability 19/27
+  # #   monetary-policy 10/13   payment-systems 27/37   cybersecurity 4/0
+  # #   financial-technology 5/2   sustainability 1/0
   - name: "Governance"
     mode: generic
     seed_url: "https://www.cbe.org.eg/en/governance"
@@ -205,3 +191,27 @@ sources:
     category: "Sustainability"
     max_pages: 40
     max_depth: 6
+
+    # ---- the Procurement PDF, from the About CBE landing page's body ---------
+  # The copy in the top nav is inside <header> on every page, so the chrome rule
+  # drops it - correctly, and `chrome_dropped: 2` says so on this crawl. That is
+  # what `--documents` exists for on the CLI and there is no yml equivalent.
+  # But CBE publishes the same file a second time under /page-content/gallery/,
+  # linked from the BODY of /en/about-cbe: 445,093 bytes, sha256 631006cc..3352,
+  # byte-identical to the nav copy, measured 2026-08-24.
+  #
+  # max_pages: 1 keeps the walk on the landing page - the board-of-directors
+  # bios sit below it and are not regulatory documents. The run therefore always
+  # reports `incomplete` with 7 urls queued; here that is the intent, not a
+  # coverage warning.
+  #
+  # include_pages: never because the landing page itself has 9,911 characters of
+  # prose, so `auto` promotes it to a second document row titled "About CBE".
+  - name: "About CBE"
+    mode: generic
+    seed_url: "https://www.cbe.org.eg/en/about-cbe"
+    scope: prefix
+    source_system: "About CBE"
+    max_pages: 1
+    max_depth: 1
+    include_pages: never
