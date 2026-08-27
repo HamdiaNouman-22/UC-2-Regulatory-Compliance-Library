@@ -32,3 +32,21 @@ Thumbs.db
 __pycache__/
 *.pyc
 benchmarks/runs/
+
+# ---- root scratch, untracked 2026-08-26 --------------------------------------
+# One-off scripts, generated artefacts and an unpacked .pptx. They still exist
+# locally; they are simply not the repo's business. Anything genuinely shared
+# belongs in a package (crawler/, jobs/, scripts/, tools/), not at the root.
+#
+# crawl_to_excel.py and sama_finance_sector_to_excel.py are DELIBERATELY still
+# tracked: crawler/sama_rulebook_crawler.py and two tests import them, and a
+# fresh clone would fail without them.
+/*.py
+!/crawl_to_excel.py
+!/sama_finance_sector_to_excel.py
+/*.sql
+/*.json
+/*.pkl
+/*.xlsx
+/*.pptx
+pptx_extract/

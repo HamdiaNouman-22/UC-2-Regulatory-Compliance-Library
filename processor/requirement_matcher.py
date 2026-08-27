@@ -211,19 +211,33 @@ class RequirementMatcher:
         fully   = sum(1 for r in requirement_mappings if r["match_status"] == "fully_matched")
         partial = sum(1 for r in requirement_mappings if r["match_status"] == "partially_matched")
         new_req = sum(1 for r in requirement_mappings if r["match_status"] == "new")
+        # Reported separately, not folded into the three verdict counts: a
+        # borderline call still HAS a verdict, and the point is that a person
+        # gets to see which ones were close rather than reading a stable number
+        # as a confident one.
+        low_conf = [r for r in requirement_mappings
+                    if r.get("match_confidence") == "low"]
         logger.info(
             f"Matching complete for regulation {regulation_id}: "
             f"Reqs: {fully} fully / {partial} partial / {new_req} new | "
             f"New ctrl links: {len(control_links)} | New KPI links: {len(kpi_links)} | "
             f"New controls: {len(new_controls)} | New KPIs: {len(new_kpis)}"
         )
+        if low_conf:
+            logger.warning(
+                f"  {len(low_conf)} of {len(requirement_mappings)} verdict(s) are "
+                f"LOW confidence and want a human look:")
+            for r in low_conf[:5]:
+                logger.warning(f"    [{r['match_status']}] "
+                               f"{r['extracted_requirement_text'][:70]}")
 
         return {
             "requirement_mappings":   requirement_mappings,
             "control_links":          control_links,
             "kpi_links":              kpi_links,
             "new_controls_to_insert": new_controls,
-            "new_kpis_to_insert":     new_kpis
+            "new_kpis_to_insert":     new_kpis,
+            "low_confidence_count":   len(low_conf),
         }
 
     # ================================================================== #
@@ -260,10 +274,18 @@ Verdicts:
 - "partially_matched" → Existing requirement partially covers the new one.
 - "new"               → Nothing covers this at all.
 
+Confidence:
+- "high" → One answer is clearly right.
+- "low"  → Two or more existing requirements are similarly plausible, or the
+           call between a verdict and its neighbour was close. Say "low"
+           whenever you had to choose between comparable options; a flagged
+           borderline verdict is useful, a confident wrong one is not.
+
 Output ONLY raw JSON:
 {{
   "match_status": "fully_matched | partially_matched | new",
   "matched_id": <integer or null>,
+  "confidence": "high | low",
   "explanation": "<brief explanation>"
 }}
 """
@@ -275,6 +297,7 @@ Output ONLY raw JSON:
             "extracted_requirement_text": extracted_req_text,
             "matched_requirement_id":     result.get("matched_id"),
             "match_status":               result.get("match_status", "new"),
+            "match_confidence":           result.get("confidence", "high"),
             "match_explanation":          result.get("explanation", "")
         }
 
@@ -314,10 +337,17 @@ Verdicts:
 - "partially_matched" → Existing {label.lower()} partially covers this.
 - "new"               → Nothing covers this at all.
 
+Confidence:
+- "high" → One answer is clearly right.
+- "low"  → Two or more existing {label.lower()}s are similarly plausible, or the
+           call was close. Say "low" whenever you had to choose between
+           comparable options.
+
 Output ONLY raw JSON:
 {{
   "match_status": "fully_matched | partially_matched | new",
   "matched_id": <integer or null>,
+  "confidence": "high | low",
   "explanation": "<brief explanation>"
 }}
 """
@@ -329,7 +359,10 @@ Output ONLY raw JSON:
     # ================================================================== #
 
     def _parse_response(self, response_text: str) -> Dict[str, Any]:
-        default = {"match_status": "new", "matched_id": None, "explanation": "Parsing failed."}
+        # A parse failure is itself a borderline case -- nobody should read
+        # "new" off a reply we could not understand and treat it as settled.
+        default = {"match_status": "new", "matched_id": None,
+                   "confidence": "low", "explanation": "Parsing failed."}
         try:
             cleaned = re.sub(r'^```(?:json)?\s*', '', response_text.strip(), flags=re.IGNORECASE)
             cleaned = re.sub(r'\s*```$', '', cleaned)
@@ -338,6 +371,12 @@ Output ONLY raw JSON:
             match_status = parsed.get("match_status", "new")
             matched_id   = parsed.get("matched_id")
             explanation  = parsed.get("explanation", "")
+            # Defaults to "high" so a model that ignores the field, or an older
+            # cached reply, behaves exactly as before rather than flooding the
+            # review queue with everything.
+            confidence   = str(parsed.get("confidence") or "high").strip().lower()
+            if confidence not in ("high", "low"):
+                confidence = "high"
 
             if match_status not in ("fully_matched", "partially_matched", "new"):
                 return default
@@ -348,6 +387,7 @@ Output ONLY raw JSON:
             return {
                 "match_status": match_status,
                 "matched_id":   matched_id,
+                "confidence":   confidence,
                 "explanation":  explanation
             }
         except Exception as e:

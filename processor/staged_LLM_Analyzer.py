@@ -6,6 +6,7 @@ import threading
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
 from processor.llm_client import LLMClient
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -127,23 +128,38 @@ class StagedLLMAnalyzer:
         iso = detect_language(text)
         doc_language = LANGUAGE_NAMES.get(iso, "English")
 
-        # ---- Stage 1: extract -----------------------------------------
-        s1_data = self._parse_json(self._call_llm(
-            self._prompt_stage1(text, document_title, regulator, reference,
-                                publication_date, doc_language),
-            temperature=0.1,
-            max_tokens=16000,
-            expect_json=True,
-        ))
-        if not s1_data.get("requirements"):
-            logger.warning(f"Stage 1 returned no requirements for regulation {regulation_id}")
+        # ---- Stage 1: extract (sharded) + group (deterministic) -------
+        # Sharded per article/section so each call's output stays short --
+        # long single-shot generations do not reproduce reliably across
+        # runs even with temperature=0 and a pinned provider/seed (GPU
+        # batching non-determinism cascades through long autoregressive
+        # output; see docs/determinism.md). Grouping used to be a
+        # whole-document LLM judgment call with an unenforced "2-6 per
+        # group" prompt rule -- it is now deterministic code, so the same
+        # extracted obligations always produce the same groups.
+        raw_obligations = self._run_stage1_sharded(
+            text, document_title, regulator, reference, publication_date, doc_language)
+        if not raw_obligations:
+            logger.warning(f"Stage 1 returned no obligations for regulation {regulation_id}")
             return []
 
         # Exact-duplicate removal is string equality, not reasoning -- doing it
-        # here is both cheaper and more reliable than asking the model.
-        removed = self._dedupe_exact(s1_data)
-        if removed:
-            logger.info(f"Stage 1 exact-duplicate obligations removed: {removed}")
+        # here is both cheaper and more reliable than asking the model. Runs
+        # across the whole merged list now, since duplicates can occur across
+        # chunk boundaries and not just within one requirement group.
+        deduped = self._dedupe_exact_flat(raw_obligations)
+        if len(deduped) < len(raw_obligations):
+            logger.info(
+                f"Stage 1 exact-duplicate obligations removed: "
+                f"{len(raw_obligations) - len(deduped)}")
+
+        s1_data = self._group_obligations(deduped)
+        s1_data["regulator"] = regulator
+        s1_data["reference"] = reference
+        s1_data["publication_date"] = publication_date
+        if not s1_data.get("requirements"):
+            logger.warning(f"Stage 1 grouping produced no requirements for regulation {regulation_id}")
+            return []
 
         # ---- Stage 2: normalize + classify ----------------------------
         s2_data = self._run_stage2(s1_data, doc_language)
@@ -173,21 +189,64 @@ class StagedLLMAnalyzer:
     # ------------------------------------------------------------------ #
 
     def _run_stage2(self, s1_data: dict, language: str) -> dict:
-        """Classify every obligation. Model returns deltas keyed by id; we
-        rehydrate into the historical normalized_obligations shape."""
+        """Classify every obligation, sharded per requirement group -- one
+        call per group (2-6 obligations each, per the Stage 1 grouping
+        rule) instead of one whole-document call. The single-call version
+        was itself long enough (~5,000 prompt / ~6,500-6,900 completion
+        tokens, ~185s measured) to be the dominant remaining source of
+        classification drift after Stage 1 was sharded: obligation
+        extraction stayed largely stable between two verification runs
+        while execution_category distribution still swung hard (see
+        docs/determinism.md and the Stage 1 sharding comment above).
+        Mirrors _stage3_shard's pattern exactly -- that function already
+        shards per requirement group for the very same reason."""
         index = self._index_stage1(s1_data)
-        compact = [{"i": ob_id, "t": ob["obligation_text"]}
-                   for ob_id, (ob, _req) in index.items()]
+        requirements = s1_data.get("requirements", [])
+        if not requirements:
+            return {"requirements": []}
 
-        raw = self._call_llm(
-            self._prompt_stage2(json.dumps(compact, ensure_ascii=False,
-                                           separators=(",", ":")), language),
-            temperature=0.1,
-            max_tokens=16000,
-            expect_json=True,
-        )
-        deltas = self._parse_json(raw).get("o") or []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            results = list(pool.map(
+                lambda req: self._stage2_shard(req, language), requirements))
+
+        deltas = [d for shard_deltas in results for d in shard_deltas]
         return self._rehydrate_stage2(s1_data, index, deltas)
+
+    def _stage2_shard(self, req: dict, language: str, depth: int = 0) -> List[dict]:
+        """One requirement group's obligations. On truncation, split in
+        half and retry -- mirrors _stage3_shard's self-healing pattern."""
+        obs = req.get("obligations", [])
+        if not obs:
+            return []
+        compact = [{"i": o["obligation_id"], "t": o["obligation_text"]} for o in obs]
+
+        try:
+            raw = self._call_llm(
+                self._prompt_stage2(json.dumps(compact, ensure_ascii=False,
+                                               separators=(",", ":")), language),
+                temperature=0.1,
+                max_tokens=4000,
+                expect_json=True,
+            )
+            deltas = self._parse_json(raw).get("o") or []
+        except TruncatedResponseError:
+            if len(obs) > 1 and depth < 3:
+                mid = len(obs) // 2
+                logger.warning(
+                    f"Stage 2 truncated for {req.get('requirement_id')} "
+                    f"({len(obs)} obligations); splitting and retrying")
+                first  = self._stage2_shard({**req, "obligations": obs[:mid]}, language, depth + 1)
+                second = self._stage2_shard({**req, "obligations": obs[mid:]}, language, depth + 1)
+                return first + second
+            logger.error(
+                f"Stage 2 truncated for {req.get('requirement_id')} and cannot be "
+                f"split further; {len(obs)} obligation(s) will not be classified")
+            return []
+        except Exception as e:
+            logger.error(f"Stage 2 failed for {req.get('requirement_id')}: {e}")
+            return []
+
+        return [d for d in deltas if isinstance(d, dict)]
 
     def _run_stage3(self, ongoing: List[dict], language: str) -> dict:
         """Design controls. One concurrent call per requirement group, so a
@@ -279,6 +338,308 @@ class StagedLLMAnalyzer:
         except Exception as e:
             logger.error(f"Stage 4 prose generation failed: {e}")
             return {}
+
+    # ------------------------------------------------------------------ #
+    #  STAGE 1 SHARDING + DETERMINISTIC GROUPING                          #
+    #                                                                      #
+    #  Stage 1 used to be one whole-document call that both extracted     #
+    #  obligations AND decided how to group them into 4-8 topic clusters. #
+    #  Long single-shot generations do not reproduce reliably across      #
+    #  runs even with temperature=0 and a pinned provider/seed -- GPU     #
+    #  batching non-determinism on a shared inference provider cascades   #
+    #  through long autoregressive output (measured: ~700-char outputs    #
+    #  reproduced 3/3 identical, ~14,000-char outputs differed every      #
+    #  time -- see docs/determinism.md). Splitting extraction into short  #
+    #  per-article calls keeps each call in the empirically-reproducible  #
+    #  range, and moving the grouping decision into code removes the      #
+    #  other source of run-to-run drift: an unenforced "2-6 obligations   #
+    #  per group" prompt rule that both real production runs violated    #
+    #  independently (observed 7- and 1-obligation groups on one doc).    #
+    # ------------------------------------------------------------------ #
+
+    _CHUNK_MAX_CHARS           = 3500
+    _CHUNK_MAX_SECTIONS        = 5
+    _MIN_OBLIGATIONS_PER_GROUP = 2
+    _MAX_OBLIGATIONS_PER_GROUP = 6
+
+    # Ported from utils/text_chunker.py's (unused) _split_by_sections --
+    # same pattern set, adapted to bare lookahead matching because the text
+    # reaching here has already had every newline collapsed by
+    # LlmAnalyzer.normalize_input_text before analyze() is ever called.
+    #
+    # Split on numbered "Article N"/"Chapter N:"/"Section N" and gate each
+    # match against a running expected-next-number sequence per marker
+    # type: real regulatory text is full of inline cross-references
+    # ("...referred to in Article 15..." inside Article 6's own text), and
+    # those cite article numbers completely out of order. An ungated regex
+    # treats every citation as a new section boundary, fragmenting the
+    # document at every "Article N" mention instead of every real header --
+    # measured on regulation 27868: 6 of 12 "split points" found this way
+    # were citations inside Article 23's penalty clause, not real headers,
+    # and the genuine Article 6-14 span got merged into one 20,000-char
+    # section because no citation-free boundary was found inside it. A
+    # genuine header sequence is strictly 1, 2, 3, ...; a citation is not.
+    # Arabic/Roman-numeral/Part markers have no reliable digit to gate on,
+    # so they're accepted unconditionally, same as before.
+    _NUMBERED_HEADER_RE = re.compile(
+        r'Chapter\s+(?P<chapter>\d+):|Article\s+(?P<article>\d+)|Section\s+(?P<section>\d+)'
+    )
+    _UNCONDITIONAL_HEADER_RE = re.compile(
+        r'(?=CHAPTER\s+[IVXLCDM]+)|(?=Part\s+[A-Z0-9]+)|(?=الفصل\s+)|(?=المادة\s+)'
+    )
+    _ARTICLE_NUM_RE = re.compile(r'(\d+)')
+
+    def _find_header_positions(self, text: str) -> List[int]:
+        """Character offsets of genuine, sequential Article/Chapter/Section
+        headers -- see the class-comment above _NUMBERED_HEADER_RE for why
+        a plain regex match isn't enough on its own."""
+        positions = []
+        expected: Dict[str, int] = {}
+        for m in self._NUMBERED_HEADER_RE.finditer(text):
+            label = m.lastgroup
+            num = int(m.group(label))
+            nxt = expected.get(label)
+            if nxt is None or num == nxt:
+                positions.append(m.start())
+                expected[label] = num + 1
+        for m in self._UNCONDITIONAL_HEADER_RE.finditer(text):
+            positions.append(m.start())
+        return sorted(set(positions))
+
+    def _chunk_document(self, text: str) -> List[str]:
+        """Split flat document text into ordered chunks anchored at
+        article/section boundaries, capped at ~_CHUNK_MAX_CHARS or
+        _CHUNK_MAX_SECTIONS sections, whichever comes first."""
+        text = (text or "").strip()
+        if not text:
+            return []
+        if len(text) <= self._CHUNK_MAX_CHARS:
+            return [text]
+
+        positions = self._find_header_positions(text)
+        if not positions:
+            # No recognizable Article/Chapter/Section markers.
+            return self._chunk_by_char_budget(text)
+
+        bounds = sorted(set([0] + positions + [len(text)]))
+        raw_sections = []
+        for i in range(len(bounds) - 1):
+            sec = text[bounds[i]:bounds[i + 1]].strip()
+            if sec:
+                raw_sections.append(sec)
+
+        # Break down any individually oversized section before bucketing --
+        # a single genuinely long article (or, with header detection now
+        # gated, any stretch with no accepted header inside it) would
+        # otherwise still exceed the reproducible-output budget on its own.
+        sections = []
+        for sec in raw_sections:
+            if len(sec) > self._CHUNK_MAX_CHARS:
+                sections.extend(self._chunk_by_char_budget(sec))
+            else:
+                sections.append(sec)
+
+        chunks, current, current_len = [], [], 0
+        for section in sections:
+            if current and (current_len + len(section) > self._CHUNK_MAX_CHARS
+                             or len(current) >= self._CHUNK_MAX_SECTIONS):
+                chunks.append(" ".join(current))
+                current, current_len = [], 0
+            current.append(section)
+            current_len += len(section)
+        if current:
+            chunks.append(" ".join(current))
+        return chunks
+
+    def _chunk_by_char_budget(self, text: str) -> List[str]:
+        """Fallback for documents with no Article/Chapter/Section markers:
+        break at the nearest sentence boundary before the char budget."""
+        chunks = []
+        start, n = 0, len(text)
+        while start < n:
+            end = min(start + self._CHUNK_MAX_CHARS, n)
+            if end < n:
+                last_period = text.rfind(". ", start, end)
+                if last_period > start + self._CHUNK_MAX_CHARS // 2:
+                    end = last_period + 1
+            chunks.append(text[start:end].strip())
+            start = end
+        return [c for c in chunks if c]
+
+    def _run_stage1_sharded(self, text: str, document_title: str, regulator: str,
+                            reference: str, publication_date: str,
+                            language: str) -> List[dict]:
+        """Extract obligations per chunk, concurrently. Global concurrency
+        is already bounded by _LLM_SEMAPHORE, so no new control is needed."""
+        chunks = self._chunk_document(text)
+        if not chunks:
+            return []
+        if len(chunks) == 1:
+            return self._stage1_shard(chunks[0], document_title, regulator,
+                                      reference, publication_date, language)
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            results = list(pool.map(
+                lambda c: self._stage1_shard(c, document_title, regulator,
+                                             reference, publication_date, language),
+                chunks))
+        merged = [ob for chunk_obs in results for ob in chunk_obs]
+        logger.info(
+            f"Stage 1 sharded extraction: {len(chunks)} chunk(s) -> "
+            f"{len(merged)} raw obligation(s)")
+        return merged
+
+    def _stage1_shard(self, chunk: str, document_title: str, regulator: str,
+                      reference: str, publication_date: str, language: str,
+                      depth: int = 0) -> List[dict]:
+        """One document chunk. On truncation, split the chunk text in half
+        and retry -- mirrors _stage3_shard's self-healing pattern."""
+        try:
+            raw = self._call_llm(
+                self._prompt_stage1_chunk(chunk, document_title, regulator,
+                                          reference, publication_date, language),
+                temperature=0.1,
+                max_tokens=8000,
+                expect_json=True,
+            )
+            obs = self._parse_json(raw).get("o") or []
+        except TruncatedResponseError:
+            if len(chunk) > 500 and depth < 3:
+                mid = len(chunk) // 2
+                split_at = chunk.rfind(" ", 0, mid)
+                split_at = split_at if split_at > 0 else mid
+                logger.warning(
+                    f"Stage 1 truncated for a {len(chunk)}-char chunk; "
+                    f"splitting and retrying")
+                first  = self._stage1_shard(chunk[:split_at], document_title, regulator,
+                                            reference, publication_date, language, depth + 1)
+                second = self._stage1_shard(chunk[split_at:], document_title, regulator,
+                                            reference, publication_date, language, depth + 1)
+                return first + second
+            logger.error(
+                f"Stage 1 truncated and cannot be split further; "
+                f"{len(chunk)}-char chunk dropped")
+            return []
+        except Exception as e:
+            logger.error(f"Stage 1 chunk failed: {e}")
+            return []
+
+        return [o for o in obs if isinstance(o, dict) and o.get("t")]
+
+    def _dedupe_exact_flat(self, obligations: List[dict]) -> List[dict]:
+        """Same normalization as _dedupe_exact, applied once across the
+        whole merged list -- duplicates can now occur across chunk
+        boundaries, not just within one requirement group."""
+        seen, kept = set(), []
+        for ob in obligations:
+            key = self._norm(ob.get("t", ""))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            kept.append(ob)
+        return kept
+
+    def _article_sort_key(self, source_reference: str) -> float:
+        """Leading number in a source_reference like 'Article 9(2)(a)', for
+        deterministic ordering. No match sorts last, never raises."""
+        m = self._ARTICLE_NUM_RE.search(source_reference or "")
+        return float(m.group(1)) if m else float("inf")
+
+    def _group_obligations(self, obligations: List[dict]) -> dict:
+        """Deterministic replacement for the LLM's former whole-document
+        grouping judgment: cluster by the per-obligation topic tag assigned
+        during the short, reproducible per-chunk extraction step, then
+        enforce the 2-6-per-group rule in code instead of unenforced prompt
+        text. Output matches the original s1_data schema exactly, so
+        stages 2-4 and _assemble_rows need no changes."""
+        if not obligations:
+            return {"requirements": []}
+
+        clusters: Dict[str, List[dict]] = {}
+        labels: Dict[str, str] = {}
+        for ob in obligations:
+            topic = (ob.get("p") or "General").strip() or "General"
+            key = self._norm(topic) or "general"
+            clusters.setdefault(key, []).append(ob)
+            labels.setdefault(key, topic)
+
+        groups = [{"label": labels[k], "obligations": obs} for k, obs in clusters.items()]
+        groups = self._merge_undersized_groups(groups)
+        groups = self._split_oversized_groups(groups)
+
+        if not (4 <= len(groups) <= 8):
+            logger.info(
+                f"Stage 1 grouping produced {len(groups)} requirement group(s) "
+                f"(soft target 4-8; the 2-6-per-group rule is the one that's enforced)")
+
+        groups.sort(key=lambda g: min(
+            (self._article_sort_key(o.get("s", "")) for o in g["obligations"]),
+            default=float("inf")))
+
+        requirements = []
+        for i, g in enumerate(groups, start=1):
+            req_id = f"REQ-{i:03d}"
+            requirements.append({
+                "requirement_id":    req_id,
+                "requirement_title": g["label"],
+                "obligations": [
+                    {
+                        "obligation_id":    f"{req_id}-OB-{j:03d}",
+                        "obligation_text":  o.get("t", ""),
+                        "source_reference": o.get("s", ""),
+                    }
+                    for j, o in enumerate(g["obligations"], start=1)
+                ],
+            })
+        return {"requirements": requirements}
+
+    def _merge_undersized_groups(self, groups: List[dict]) -> List[dict]:
+        """Fold any cluster with fewer than _MIN_OBLIGATIONS_PER_GROUP
+        obligations into its most similarly-labeled neighbor. Terminates
+        because every merge strictly reduces the group count."""
+        if len(groups) <= 1:
+            return groups
+        changed = True
+        while changed and len(groups) > 1:
+            changed = False
+            for i, g in enumerate(groups):
+                if len(g["obligations"]) >= self._MIN_OBLIGATIONS_PER_GROUP:
+                    continue
+                others = [j for j in range(len(groups)) if j != i]
+                best = max(others, key=lambda j: SequenceMatcher(
+                    None, g["label"].casefold(), groups[j]["label"].casefold()).ratio())
+                groups[best]["obligations"].extend(g["obligations"])
+                del groups[i]
+                changed = True
+                break
+        return groups
+
+    def _split_oversized_groups(self, groups: List[dict]) -> List[dict]:
+        """Split any cluster with more than _MAX_OBLIGATIONS_PER_GROUP
+        obligations into balanced sub-groups (never a leftover 1-item
+        tail), labeled with their article range to stay distinct."""
+        out = []
+        for g in groups:
+            obs = g["obligations"]
+            if len(obs) <= self._MAX_OBLIGATIONS_PER_GROUP:
+                out.append(g)
+                continue
+            obs_sorted = sorted(obs, key=lambda o: self._article_sort_key(o.get("s", "")))
+            n = len(obs_sorted)
+            n_parts = -(-n // self._MAX_OBLIGATIONS_PER_GROUP)  # ceil division
+            base, extra = divmod(n, n_parts)
+            idx = 0
+            for part in range(n_parts):
+                size = base + (1 if part < extra else 0)
+                sub = obs_sorted[idx: idx + size]
+                idx += size
+                refs = [o.get("s", "") for o in sub if o.get("s")]
+                label = g["label"]
+                if refs:
+                    label = (f"{g['label']} ({refs[0]}–{refs[-1]})"
+                             if len(refs) > 1 else f"{g['label']} ({refs[0]})")
+                out.append({"label": label, "obligations": sub})
+        return out
 
     # ------------------------------------------------------------------ #
     #  STAGE 1/2 SUPPORT                                                   #
@@ -502,6 +863,65 @@ Publication Date: {publication_date}
 
 Regulation Text:
 {text}
+"""
+
+    def _prompt_stage1_chunk(
+            self,
+            chunk_text: str,
+            document_title: str,
+            regulator: str = "",
+            reference: str = "",
+            publication_date: str = "",
+            language="English"
+    ) -> str:
+        """Per-chunk extraction only -- no grouping, no ID assignment.
+        Grouping is decided deterministically in code (_group_obligations)
+        after all chunks are merged, so this call stays short and, per
+        docs/determinism.md, reproducibly so."""
+        return f"""You are a senior regulatory compliance analyst.
+Extract atomic obligations from the excerpt of a regulatory circular below.
+This is one part of a larger document -- extract only what is in THIS excerpt.
+
+━━━ EXTRACTION RULES ━━━
+- Extract ONLY binding obligations that use words like: must, shall, required to, obligated to.
+- Ignore explanatory text, preambles, definitions, and non-binding guidance.
+- If a sentence contains more than one distinct action, split it into separate atomic obligations.
+- Do not split obligations that share a single subject and are logically inseparable into one action.
+- Preserve the exact regulatory meaning — do not paraphrase or interpret beyond what is written.
+- Do not invent any content.
+- Each obligation must be independently testable by an auditor.
+- Note each obligation's source reference (e.g. article/section number) exactly as it appears.
+
+━━━ TOPIC TAGGING ━━━
+- Tag each obligation with a short 2-4 word compliance topic label, e.g. "Capital Adequacy",
+  "Licensing", "Credit Limits", "Reporting", "Governance", "Liquidity", "Consumer Protection",
+  "Data Confidentiality", "Real Estate", "Investment Limits". Prefer one of these when it
+  genuinely fits; otherwise write a short, precise label of your own.
+- Do NOT decide how obligations should be grouped into requirement clusters — that happens
+  separately, outside this call. Just tag the topic per obligation.
+
+━━━ DEDUPLICATION RULES ━━━
+- Before returning, check every obligation against all others in THIS excerpt.
+- If two obligations share the same core action and subject, keep only one — discard the duplicate entirely.
+- Do not extract the same sentence or list item twice even if it appears more than once in the source text.
+
+━━━ LANGUAGE RULES ━━━
+- The document is in {language}. ALL output fields must be written in {language}.
+- Do NOT translate. Preserve exact regulatory meaning in the original language.
+
+━━━ OUTPUT ━━━
+{self._COMPACT}
+Fields: t = obligation_text, s = source_reference, p = topic
+Schema:
+{{"o":[{{"t":"","s":"","p":""}}]}}
+
+Document Title: {document_title}
+Regulator: {regulator}
+Reference Number: {reference}
+Publication Date: {publication_date}
+
+Regulation Excerpt:
+{chunk_text}
 """
 
     def _prompt_stage2(self, obligations_json: str, language="English") -> str:

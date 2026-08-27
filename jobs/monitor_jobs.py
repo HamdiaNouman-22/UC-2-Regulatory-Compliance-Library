@@ -29,6 +29,15 @@ and how expensively it can be checked.
                                     request, and it DISCOVERS) plus eleven
                                     browser crawls of the HTML sections. Weekly
                                     because of the eleven, not the one.
+    monitor_bahrain_bourse weekly   Bahrain. One request (the site's own
+                                    GetFaq API) returns all seven Legal
+                                    Framework sections, ~90 documents. SHIPPED
+                                    DISABLED: the workbook has not been read
+                                    yet. Bahrain Bourse is an exchange, like
+                                    the now-permanently-blocked
+                                    saudiexchange.sa — see
+                                    docs/HANDOFF_bahrain_bourse.md before
+                                    touching this host.
 
 WHERE THE ROWS GO
 
@@ -153,7 +162,7 @@ CHEAP_PROBE_SOURCES = [
     ("Anti-Money Laundering Permanent Committee (AML)", "Rules and Regulations"),
     ("Ministry of Human Resource and Social Development (MHRSD)",
      "Regulations and procedural guidelines"),
-    ("ZATCA", "Rules and Regulations"),
+    ("Zakat, Tax and Customs Authority (ZATCA)", "Rules and Regulations"),
 ]
 
 #: Regulator -> (crawler name, is_form) for the sources whose crawl IS the
@@ -194,6 +203,18 @@ CHEAP_PROBE_SOURCES = [
 #: none — which is why CBE is weekly like MC and CMA rather than daily like MOH.
 #: If daily circulars are ever wanted, the upgrade is to split cbe.yml in two,
 #: not to run eleven browser crawls every night.
+#: Bahrain Bourse joined 2026-08-20, for the same reason MOH and CBE's
+#: circulars did: the Legal Framework accordion is entirely client-rendered
+#: (a plain fetch of the page contains none of it) but the page's own JS calls
+#: one API, GetFaq, which returns all seven sections — Laws, Rules &
+#: Regulations, Resolutions, Guidelines, Circulars, CBB Rules & Regulations,
+#: Consultation — in a single ~20 KB request. No probe can improve on that.
+#: See crawler/bahrain_bourse_crawler.py for the double-encoding this API
+#: requires; doc_path puts the section name in the folder tree, matching the
+#: site's own accordion.
+#:
+#: ITS SCHEDULER SLOT IS `enabled: false` AND MUST STAY THAT WAY until a
+#: person has read the workbook, same as MLCU and CBE were shipped.
 CRAWL_AS_SIGNAL = {
     "Ministry of Commerce": ("mc", False),
     "Capital Market Authority (CMA)": ("cma", False),
@@ -201,6 +222,15 @@ CRAWL_AS_SIGNAL = {
     "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)":
         ("mlcu", False),
     "Central Bank of Egypt (CBE)": ("cbe", False),
+    "Bahrain Bourse (BHB)": ("bahrain_bourse", False),
+    # Migrated off the bespoke cbb_monitoring job 2026-08-20. The Thomson Reuters
+    # revision feed is the cheaper signal and should front this — see monitor_cbb.
+    "Central Bank of Bahrain": ("cbb", False),
+
+    # ---- Bahrain, added by abeeraslam 2026-08-25 ----------------------- #
+    "Real Estate Regulatory Authority (RERA)": ("rera", False),
+    "Social Insurance Organisation (SIO)": ("sio", False),
+    "Legislation and Legal Opinion Commission (LLOC)": ("lloc", False),
 }
 
 
@@ -266,7 +296,8 @@ def _signal_for(regulator: str, source: str) -> str:
     return "stored-inventory"
 
 
-def build_crawler(name: str, is_form: bool, only_urls=None):
+def build_crawler(name: str, is_form: bool, only_urls=None,
+                  only_sources=None):
     """(crawler, regulator) for a form name or a source-config name.
 
     PUBLIC because `tools/workbook.py` needs the identical crawler in order to
@@ -291,10 +322,17 @@ def build_crawler(name: str, is_form: bool, only_urls=None):
     cfg = yaml.safe_load(
         (REPO_ROOT / "config" / "sources" / f"{name}.yml").read_text(
             encoding="utf-8")) or {}
-    return build_regulator_crawler(cfg), cfg.get("regulator", name.upper())
+    # only_sources runs SOME of a regulator's sources -- LLOC's nightly job
+    # wants its 40-second "Latest Legislation" window, not the 2,838-second
+    # classification walk. See build_regulator_crawler for when narrowing is
+    # safe: never where the narrowed sources share a source_system with the
+    # ones left out.
+    return (build_regulator_crawler(cfg, only_sources=only_sources),
+            cfg.get("regulator", name.upper()))
 
 
-def _crawl_into_db(name: str, is_form: bool, only_urls=None, timeout=14400) -> dict:
+def _crawl_into_db(name: str, is_form: bool, only_urls=None, timeout=14400,
+                   only_sources=None) -> dict:
     """Crawl a source and write what it finds straight to MSSQL.
 
     The orchestrator classifies each document new / modified / unchanged against
@@ -304,7 +342,8 @@ def _crawl_into_db(name: str, is_form: bool, only_urls=None, timeout=14400) -> d
     from processor.downloader import Downloader
     from orchestrator.orchestrator import Orchestrator
 
-    crawler, regulator = build_crawler(name, is_form, only_urls)
+    crawler, regulator = build_crawler(name, is_form, only_urls,
+                                       only_sources=only_sources)
     orch = Orchestrator(crawler=crawler, repo=_repo(), downloader=Downloader(),
                         source_name=regulator)
     t0 = time.time()
@@ -513,6 +552,175 @@ def _monitor_cbe_impl() -> dict:
     return res
 
 
+def monitor_bahrain_bourse() -> dict:
+    """WEEKLY, AND OFF. The crawl is the signal, and it is cheap.
+
+    crawler/bahrain_bourse_crawler.py reads the site's own GetFaq API in one
+    ~20 KB request and gets all seven Legal Framework sections — Laws, Rules &
+    Regulations, Resolutions, Guidelines, Circulars, CBB Rules & Regulations,
+    Consultation — so the orchestrator's new/modified/unchanged classification
+    against the DB already does everything a probe step would. It refuses to
+    return a partial inventory (fewer than MIN_EXPECTED_DOCS, or fewer
+    sections than MIN_EXPECTED_SECTIONS) rather than let a short read appear
+    downstream as documents having disappeared.
+
+    LEAVE THE SCHEDULER SLOT DISABLED until a person has read the workbook —
+    this path writes straight to MSSQL, and Bahrain Bourse has never been
+    reviewed. Also: Bahrain Bourse is an exchange, and the last exchange this
+    project crawled (saudiexchange.sa) was permanently blocked within two
+    hours of ordinary automated access. See docs/HANDOFF_bahrain_bourse.md
+    before turning this on or re-measuring anything by hand.
+    """
+    return _run_exclusive("monitor_bahrain_bourse", _monitor_bahrain_bourse_impl)
+
+
+def _monitor_bahrain_bourse_impl() -> dict:
+    # 5400s = 1.5h, matching MLCU's slot: a similarly small document count (86
+    # vs MLCU's 24 PDFs + 5 pages) with OCR on any new/changed PDF.
+    res = _crawl_into_db("bahrain_bourse", False, timeout=5400)
+    logger.info("Bahrain Bourse: %s", res)
+    return res
+
+
+def monitor_cbb() -> dict:
+    """WEEKLY, AND OFF. Seven sources, migrated onto the config flow 2026-08-20.
+
+    THIS REPLACES `cbb_monitoring`, which is retired. That job ran the bespoke
+    crawler/cbb_monitoring_crawler.py straight into MSSQL with no workbook step
+    and no completeness gate, and it was the only monitoring job in the repo left
+    `enabled: true`. MEASURED 2026-08-20 before the migration: 0 CBB rows in the
+    database, 0 `CBB-*` source_systems, 0 CBB entries in run_history. A job that
+    has been enabled and has never produced a row is not monitoring anything, and
+    nothing about its output said so.
+
+    THE REAL SIGNAL IS A NATIVE REVISION FEED, and it should be wired here rather
+    than re-crawling seven sections blind:
+
+        https://cbben.thomsonreuters.com/view-revision-updates
+
+    the regulator's own "what changed in this date range" page, already read by
+    site_runners/cbb_updates.py. SAMA runs on the SAME Thomson Reuters platform
+    with the same endpoint (dynamic_crawler/sama_feed_signal.py) — two regulators,
+    one pattern, and the best class of signal in the repo: no probing, no stale
+    stamp to be fooled by.
+
+    IT CANNOT SEE DELETIONS. A withdrawn document stops appearing rather than
+    saying it went; absence is only visible to a full crawl. So the feed makes the
+    crawl RARE, not unnecessary, and `disappeared` still comes from the crawl.
+
+    WHY IT STAYS OFF: two reasons, and the second outlives the first.
+      1. Nobody has read a CBB workbook. This path writes straight to MSSQL.
+      2. Every monitor job lives in DIRECT_JOB_MAPPING, and the scheduler defaults
+         to EXECUTION_MODE=API, which reads API_JOB_MAPPING — where no monitor job
+         exists and no endpoint backs one. Enabling this today logs
+         "No function mapped for job" and does nothing. Unresolved repo-wide.
+    """
+    return _run_exclusive("monitor_cbb", _monitor_cbb_impl)
+
+
+def _monitor_cbb_impl() -> dict:
+    # 10800s = 3 hours, matching CBE. Mode 2c walks the whole rulebook sidebar and
+    # mode 1 fetches Thomson Reuters resolution pages one at a time; neither is
+    # quick, and a killed run reads downstream as a source that returned nothing.
+    res = _crawl_into_db("cbb", False, timeout=10800)
+    logger.info("Central Bank of Bahrain: %s", res)
+    return res
+
+
+def monitor_rera() -> dict:
+    """WEEKLY. Eight small section crawls of rera.gov.bh.
+
+    THE CRAWL IS THE SIGNAL BECAUSE DISCOVERY IS, not because a probe fails. RERA
+    answers a probe better than almost anything we hold: 117 of 121 stored urls
+    return both an ETag and a Last-Modified, and they are stable (8/8 identical
+    when fetched twice 0.4s apart). But circulars are partitioned by year, one
+    page per year, and a new year is a NEW PAGE — Circulars-issued-in-2026 is a
+    404 today. A probe re-reads what we already store, so it can never see that.
+
+    WHY IT IS CHEAP ANYWAY. RERA is small: 15 pages and 123 documents in the
+    measured crawl, all server-rendered, no pager, no JS data source, no WAF. This
+    is nothing like the CMA walk that takes 2h49m.
+
+    THE 2026 PAGE IS THE THING TO WATCH. `config/sources/rera.yml` seeds the
+    circulars source at the PARENT so prefix scope picks up a new year page the
+    first time it exists, with no config change. If you ever hand-check it, try
+    BOTH spellings: RERA writes `circulars-issued-in-2020` lower case and
+    `Circulars-issued-in-2024` capitalised.
+
+    EXPECT A FEW `unknown` AND DO NOT CHASE THEM. Four stored CloudFront urls are
+    dead (403 in a browser too — a library problem, not a sweep one), and the two
+    documents hosted on rera.gov.bh itself cannot be fetched by a plain HTTP
+    client at all: the host omits its intermediate CA, so requests raises
+    CERTIFICATE_VERIFY_FAILED where a browser is fine. The crawl is unaffected —
+    Playwright runs with ignore_https_errors.
+    """
+    return _run_exclusive("monitor_rera", _monitor_rera_impl)
+
+
+def _monitor_rera_impl() -> dict:
+    res = _crawl_into_db("rera", False, timeout=5400)
+    logger.info("Real Estate Regulatory Authority: %s", res)
+    return res
+
+
+def monitor_sio() -> dict:
+    """WEEKLY. Bahrain's Social Insurance Organisation, both sectors.
+
+    THE CRAWL IS THE SIGNAL BECAUSE NOTHING ELSE ANSWERS. Measured 2026-08-25:
+    no ETag, no Last-Modified, not even a Content-Length on any sio.gov.bh page,
+    so `stored-inventory` has nothing to read; and /sitemap.xml carries a
+    <lastmod> on all 106 urls with ONE distinct value — its own build time — so
+    the sitemap adapter refuses it by its own gate.
+
+    WHY IT IS CHEAP ANYWAY. Every law is a Bootstrap modal already in the DOM, so
+    a section's ~48 laws come from ONE page load: ten page loads and roughly five
+    minutes for all 214 documents. That is cheaper than the probe loop it
+    replaces would have been.
+
+    ALL TEN SOURCES MUST RUN TOGETHER. `disappeared` is scoped by
+    (regulator, source_system) and sio.yml stores just two — "Private Sectors"
+    and "Public Sectors" — so the five sources of a sector share one bucket. A
+    run that covered only some of them would have the others' documents absent
+    from a run that still claims the sector, and only the completeness gate
+    between that and a withdrawal proposal. Hence no `only_sources` here.
+    """
+    rep = _crawl_into_db("sio", False)
+    logger.info("Social Insurance Organisation (SIO): %s", rep)
+    return {"Social Insurance Organisation (SIO)": rep}
+
+
+def monitor_lloc() -> dict:
+    """DAILY. Bahrain's LLOC, the `Latest Legislation` window ONLY.
+
+    WHY NARROWED. config/sources/lloc.yml holds four sources and they are not the
+    same kind of thing. Latest is 144 records in 15 requests (~40s) and is where
+    new Bahraini legislation appears first, with its Official Gazette number.
+    `Legislation By Classification` is 1,583 documents over 2,838 SECONDS
+    measured — coverage, not a signal. Dragging it into a nightly job would make
+    a 40-second question take 47 minutes.
+
+    WHY `only_sources` AND NOT A SECOND CONFIG. build_crawler is public so the
+    workbook path and this path build the same crawler; a `lloc.latest.yml` would
+    be the second copy its own docstring warns drifts. One config, one source
+    list, narrowed at the call.
+
+    A NAME THAT MATCHES NOTHING RAISES rather than monitoring zero sources — so
+    renaming the source in the yml breaks this loudly instead of silently.
+
+    THE CLASSIFICATIONS STILL NEED RUNNING, by hand or on a slow cadence:
+        python -m tools.workbook export lloc
+    They are not watched by anything today, and that is a deliberate gap, not an
+    oversight.
+
+    THE HOST THROTTLES WITH 404. lloc.gov.bh answers a burst with a 1,245-byte
+    IIS 404 that parses as an empty page; crawler/lloc_crawler.py holds the retry
+    budget for it. Do not schedule this alongside another lloc job.
+    """
+    rep = _crawl_into_db("lloc", False, only_sources=["Latest Legislation"])
+    logger.info("LLOC (Latest Legislation): %s", rep)
+    return {"Legislation and Legal Opinion Commission (LLOC)": rep}
+
+
 def _forms_for(regulator: str) -> list:
     """Every hints form that crawls this regulator, sorted for determinism.
 
@@ -538,4 +746,4 @@ def _forms_for(regulator: str) -> list:
 
 
 __all__ = ["monitor_cheap_probes", "monitor_sama", "monitor_mc", "monitor_cma",
-           "monitor_cbe"]
+           "monitor_cbe", "monitor_bahrain_bourse"]

@@ -148,6 +148,37 @@ def first_seg(path: str) -> str:
     return segs[0] if segs else ""
 
 
+def path_excluded(path: str, excludes) -> bool:
+    """Is this url path inside a subtree the source asked to skip?
+
+    WHY A SOURCE WOULD ASK. CBE's laws-regulations section can only be crawled
+    from its PARENT: the /regulations/regulations-book page links to nothing at
+    all (measured 2026-08-25 -- 157 links, 3 of them the Arabic copy of itself),
+    so seeding it directly records 1 document where the sitemap lists 143.
+    Seeding the parent reaches them, but `prefix` scope then also swallows
+    /regulations/circulars -- and those 396 circulars already arrive through
+    CBE's own API with real titles, dates and categories. 21 of 55 documents on
+    that crawl were duplicate circular PDFs.
+
+    So the choice was: lose 142 documents, or duplicate 21 badly. This is the
+    third answer -- crawl from the parent and skip the one subtree that is
+    already owned by a better source.
+
+    Matched on the PATH PREFIX, and it stops BOTH the page walk and document
+    collection. Excluding a page but still harvesting its files would defeat the
+    point, since it is the files that duplicate -- and documents are collected
+    regardless of scope.
+    """
+    if not excludes:
+        return False
+    p = (path or "").rstrip("/").lower()
+    for ex in excludes:
+        ex = (ex or "").rstrip("/").lower()
+        if ex and (p == ex or p.startswith(ex + "/")):
+            return True
+    return False
+
+
 def scope_prefix(path: str) -> str:
     """The path that `scope: prefix` means by "under the seed".
 
@@ -330,9 +361,28 @@ def html_document(fragment: str, page_url: str, title: str = "") -> str:
 def write_page_html(out, html_file: str, fragment: str, page_url: str,
                     title: str = "") -> None:
     """The ONE place a captured page becomes a file on disk."""
+    body = html_document(fragment, page_url, title)
     path = Path(out) / html_file
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(html_document(fragment, page_url, title), encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return html_file
+    except OSError as e:
+        # Almost always a path over Windows' 260-character limit, which surfaces
+        # as a misleading FileNotFoundError. A crawl that finished must not be
+        # lost to a filename, so fall back to a short digest and say so.
+        short = f"html/_long/{hashlib.md5(html_file.encode('utf-8')).hexdigest()[:16]}.html"
+        try:
+            p2 = Path(out) / short
+            p2.parent.mkdir(parents=True, exist_ok=True)
+            p2.write_text(body, encoding="utf-8")
+            emit({"event": "long_path", "wanted": html_file, "written": short,
+                  "error": f"{type(e).__name__}: {str(e)[:80]}"})
+            return short
+        except OSError as e2:
+            emit({"event": "error", "message":
+                  f"could not write {html_file}: {type(e2).__name__}"})
+            return ""
 
 
 # ---- external portals that HOST law text themselves ----
@@ -588,6 +638,42 @@ def doc_section_path(breadcrumb: list, group: str = "", nav_path: str = "",
     return _append([group or ""])
 
 
+# A trailing file size is never part of a title. RERA renders every document link
+# as the title, a run of tabs, then the size, so 73 of its 134 documents were
+# stored as "Royal Decree No. (69) for 2017 ...<tabs>  380.13Kb".
+#
+# Whitespace is collapsed for the same reason: best_doc_title returns the anchor's
+# raw textContent, which — unlike `ctx` — JS_LINKS never normalises, so the
+# padding travelled all the way into the library.
+#
+# NOTE FOR ANY REGULATOR ALREADY STORED: `title` is part of DEFAULT_IDENTITY, so a
+# row whose stored title carried padding or a size reads as one `new` plus one
+# `disappeared` the first time it is re-crawled. That is a one-time correction of
+# a wrong title, not churn to be avoided — but run baseline.py before and after so
+# the size of it is known rather than discovered.
+#: A trailing size, and/or a trailing page count. Applied repeatedly, so the
+#: combined form sio.gov.bh uses — "2.7 MB, 58 Pages" — comes off in two passes:
+#: the page count first, then the size. RERA's "380.13Kb" needs only one.
+#: A PAGE COUNT IS ONLY STRIPPED WITH THE WORD "page(s)" PRESENT, so a title
+#: ending in a bare year or number ("Report 2024", "Decision No. 12") is safe.
+_SIZE_TAIL = re.compile(
+    r"[\s\-–—|,;(\[]*"
+    r"(?:\d+(?:[.,]\d+)?\s*(?:[KMGT]i?B|bytes?)"
+    r"|\d+\s*pages?)"
+    r"\s*[)\]]*\s*$",
+    re.I)
+
+
+def clean_doc_title(s) -> str:
+    """One space between words, and no trailing file size."""
+    s = re.sub(r"\s+", " ", (s or "")).strip()
+    prev = None
+    while prev != s:              # "(1.2 MB)" can leave a bracket behind
+        prev = s
+        s = _SIZE_TAIL.sub("", s).strip()
+    return s.strip(" -|–—")
+
+
 def best_doc_title(link: dict, url: str) -> str:
     """Pick a human title for a document link, best source first:
       1. the anchor text            — unless it's a generic 'Download' button
@@ -596,17 +682,25 @@ def best_doc_title(link: dict, url: str) -> str:
       3. the row/card context       — holds the real title + date on table rows
       4. the URL slug               — last resort
     """
-    t = (link.get("text") or "").strip()
+    # Cleaned FIRST, so the length tests judge the real title rather than the
+    # padding around it, and returned from ONE exit so a fifth candidate added
+    # later cannot skip the cleaning.
+    t = clean_doc_title(link.get("text"))
+    picked = ""
     if _norm_link_text(t) not in GENERIC_LINK_TEXT and len(t) > 3:
-        return t[:200]
-    ta = (link.get("title_attr") or "").strip()
-    if len(ta) > 3:
-        return ta[:200]
-    ctx = (link.get("ctx") or "").strip()
-    ctx = re.sub(r"\b(download|pdf|view|click here|read more)\b", "", ctx, flags=re.I).strip(" -|")
-    if len(ctx) > 3:
-        return ctx[:200]
-    return title_from_slug(url) or t
+        picked = t
+    if not picked:
+        ta = clean_doc_title(link.get("title_attr"))
+        if len(ta) > 3:
+            picked = ta
+    if not picked:
+        ctx = clean_doc_title(link.get("ctx"))
+        ctx = re.sub(r"\b(download|pdf|view|click here|read more)\b", "", ctx,
+                     flags=re.I).strip(" -|")
+        ctx = clean_doc_title(ctx)      # removing "download" can expose a size
+        if len(ctx) > 3:
+            picked = ctx
+    return (picked or clean_doc_title(title_from_slug(url)) or t)[:200]
 
 
 # ============================================================================
@@ -637,6 +731,126 @@ SITE_PROFILES = {
         # "FOLLOW US", on CMA they are the document titles — junk levels there.
         "group_headings": True,
     },
+    "www.rera.gov.bh": {
+        # RERA'S CURRENT CRUMB IS NOT A LINK.  MEASURED 2026-08-21 on
+        # /en/regulations/circulars/circulars-issued-in-2020:
+        #
+        #   <ol class="breadcrumb">
+        #     <li class="breadcrumb-item"><a href="/en">Home</a></li>
+        #     <li class="breadcrumb-item"><a href="/en/regulations">Regulations</a></li>
+        #     <li class="breadcrumb-item active">Circulars issued in 2020</li>
+        #   </ol>
+        #
+        # Anchors-only reading therefore returned ['Home', 'Regulations'] for ALL
+        # 15 pages -- every child page filed under its PARENT, with nothing naming
+        # the page itself. That is what made section_path look truncated in
+        # documents.xlsx.
+        #
+        # Safe here, unlike the two risks the flag carries elsewhere:
+        #   * it can select a DIFFERENT breadcrumb container (measured on CMA).
+        #     RERA has exactly ONE .breadcrumb, and it is the same one either way.
+        #   * it moves the scope anchor to the current page, which matters only
+        #     for `scope: breadcrumb`. All eight RERA sources pin `scope: prefix`,
+        #     and auto-detection never reaches the breadcrumb branch because
+        #     RERA's links cluster under the seed path and prefix wins first.
+        #
+        # NOTE RERA'S BREADCRUMB IS ONLY EVER THREE DEEP. It jumps straight from
+        # Regulations to the current page, so the 2020 circulars page reads
+        # "Home > Regulations > Circulars issued in 2020" and NOT
+        # "... > Circulars > Circulars issued in 2020". The missing middle is the
+        # site's, not ours -- the section is named by source_system in
+        # config/sources/rera.yml, one source per section.
+        "breadcrumb_current": True,
+        # No main/article/#content on the page, so extraction fell back to <body>
+        # and kept the whole shell: 43 chrome divs (mobile-menu, main-footer,
+        # top-side-menu, d-print-none blocks holding 27,558 characters).
+        # MEASURED 2026-08-20: #page-content holds 77% of the body text at depth 4.
+        "content_selector": "#page-content",
+        # Two blocks sit INSIDE #page-content and are not the document:
+        #
+        #   .sider-bar   RERA's right-hand column. One container holding the QR
+        #                image (a base64 svg), its "Scan to view from mobile"
+        #                caption, an <hr>, and the <h4>Other links</h4> list of
+        #                sibling sections. Removing it takes all three at once.
+        #   .file-size   the "380.13Kb" label under each document link. A file's
+        #                byte count is never part of a regulation, and it is what
+        #                was polluting titles through the row context.
+        #
+        # Both are RERA's own class names, so they are scoped to this host rather
+        # than added to the shared junk list.
+        "drop_selectors": ".sider-bar, .file-size",
+    },
+    "www.lloc.gov.bh": {
+        # `document.querySelector` returns the first match in DOCUMENT order, not
+        # selector order, and this site has NINE matches for the generic list
+        # `main, [role="main"], article, #content, .content, #main`:
+        #
+        #   DIV.content      depth 5      59 chars   <- what was picked: the
+        #                                               phone / email / dark-mode bar
+        #   DIV.content      depth 5     118
+        #   DIV.content      depth 6     152
+        #   DIV.bodycontent  depth 3    1714 chars   <- role="main", the real one
+        #
+        # MEASURED 2026-08-21: a prefix crawl of /Legislation/Latest captured 58
+        # characters of text and reported `status: ok`. Naming the site's own
+        # wrapper is the same fix RERA and SIO needed, for the same reason.
+        "content_selector": "div.bodycontent",
+        # FURNITURE INSIDE THE CONTENT WRAPPER, so `content_selector` cannot
+        # exclude it by selection. Measured 2026-08-25 on the captured HTML of
+        # /en/page/Legislations within the reform project frame (24,939 bytes):
+        #
+        #   div.bodycontent
+        #     div.mainImage                    0 chars   the banner photo
+        #     div.page
+        #       div.breadcrumbs               70 chars   "(current)/Legislation/..."
+        #       div.pagecontent
+        #         div.article             20,586 chars   <- THE DOCUMENT
+        #       div.pagemenu                 225 chars   6 links: "Search in
+        #                                                Legislations", "Legislations
+        #                                                related to women", ...
+        #
+        # `.pagemenu` is the section nav repeated on every page of the site, and
+        # `.breadcrumbs` duplicates in the body what the `breadcrumb` column
+        # already holds. Both rendered as blue link lists above and below the
+        # text in the saved HTML.
+        #
+        # Dropping the breadcrumb from the CLONE does not cost the breadcrumb
+        # column: JS_BREADCRUMB queries the LIVE document, as does JS_LINKS, so
+        # neither the trail nor link discovery is affected.
+        #
+        # NOT dropped: div.mainImage. It carries no text, so it costs nothing in
+        # the extracted content, and it is the only thing distinguishing one of
+        # these pages from another when a person opens the saved file. Add it here
+        # if the saved HTML should be text-only.
+        "drop_selectors": ".breadcrumbs, .pagemenu",
+    },
+    "www.sio.gov.bh": {
+        "keep_modals": True,
+        # NO content_selector, deliberately. #govbh-main looks like the content
+        # root and is on a LAW page, but on an INDEX page it holds only 1,734
+        # characters: the section cards live in a sibling block
+        # (SECTION > .container > .row > .services-facilities-main >
+        # .documents-single), so selecting #govbh-main silently dropped every
+        # READ MORE card and with it the route to Ministerial Edicts and Orders.
+        #
+        # Naming the chrome instead keeps both shapes of page whole. Measured on
+        # the default (body) capture, SIO's chrome was only ~13% of the text, so
+        # there is little to gain from selection here and a section to lose.
+        "drop_selectors": (
+            # site furniture, all top-level siblings of the content
+            ".header-menu-banner, footer.footer-sec, .govbh-user-rating, "
+            # the "Search / exact.match" box that opens every law list
+            ".search-main, "
+            # "2.7 MB, 58 Pages" — a sibling of .link-name inside each trigger
+            # anchor, which is also why it leaked into titles via a.innerText
+            ".pdf-size, "
+            # UserWay accessibility widget, injected at body level: uw-sl,
+            # uw-s10-*-ruler-guide, userway_buttons_wrapper, uai, ulsti. It only
+            # became visible once content_selector was removed, because #govbh-main
+            # had been excluding it by accident.
+            '[class*="userway"], [class*="uw-s"], [class*="uw-sl"], .uai, .ulsti'
+        ),
+    },
     "sdaia.gov.sa": {
         # SharePoint, same as aml.gov.sa: the whole page is inside <form
         # id="aspnetForm"> and there is no <main>/#content.
@@ -650,6 +864,142 @@ SITE_PROFILES = {
         # same "[Laws and Regulations]" label for all 36.
         "group_headings": True,
     },
+    "www.cbe.org.eg": {
+        # CBE HAS NO CONTENT WRAPPER AT ALL. Measured 2026-08-24 on /en/governance:
+        # no <main>, no role="main", no <article>, no #content, no .content. So
+        # JS_MAIN_CONTENT falls through to <body> and captures the whole page --
+        # the same situation as sio.gov.bh and rera.gov.bh.
+        #
+        # And there is nothing to name instead: the content sections are SIBLINGS
+        # of the furniture inside div.site-container.main, in this order --
+        #   <header>  accessibilityToolbar  breadcrumbs  <content...>  pagenote
+        #   <footer>
+        # -- so `content_selector` cannot select the content without also picking
+        # a wrapper that holds the chrome. Naming the chrome is the only option
+        # here, exactly as SIO's note argues.
+        #
+        # Each selector below, and what it removes (chars per page, measured on
+        # /en/governance, /en/laws-regulations/laws/banking-laws and
+        # /en/aml-cft/related-regulations):
+        #
+        #   .cbe-accessibility-toolbar  12   "A A contrast" -- the font-size and
+        #       contrast strip. It is a <section> OUTSIDE </header>, which is why
+        #       the junk list's `header` entry never touched it, and it is the
+        #       reason every CBE page's captured text used to OPEN with the three
+        #       words "A", "A", "contrast" before any of the document.
+        #
+        #   .most-searched              51   "Most Searched: Inflation Targets,
+        #       Financial Stability" -- sits inside the hero block. Both its links
+        #       point at /en/search-results, so it is also junk LINKS on every
+        #       page, and being outside <header> they are not marked chrome.
+        #
+        # DO NOT reach for [data-comp-name="pagenoteLayout"] instead of .pagenote.
+        # CBE renders the page's REAL body under that same comp name: 851 chars of
+        # law titles on banking-laws, 461 on aml-cft/related-regulations. Only the
+        # trailing note carries `pagenote`, and dropping by comp name would delete
+        # the document.
+        #
+        # NOT dropped, deliberately: the `breadcrumbs` section. It also holds the
+        # page's <h1>, which JS_DOC_TITLE reads, so removing it costs the title.
+        # The search box itself needs nothing -- data-comp-name search-bar-toggle
+        # and search-btn-toggle are both INSIDE <header> and the junk list already
+        # removes them (measured: 0 of 4 pages have either outside the header).
+        #   .relatedlinks-section    57-116  "In this section: Internal Audit
+        #       Charter, ..." -- the in-page anchor nav. Measured on the four
+        #       captures that have one: 2-4 links, never more than 116 chars, and
+        #       never any prose.
+        #
+        #       NOT `.overview-column-layout`, which is TWO LEVELS UP and holds
+        #       the document. That block is
+        #           .overview-column-layout > .two-column-layout >
+        #               .right-section-overview  -> .relatedlinks-section (nav)
+        #               .left-section-overview   -> section.rich-texts (the TEXT)
+        #       so dropping the outer class deletes the page body: measured 809 of
+        #       1,558 chars on governance/internal-audit -- 56% of the page -- plus
+        #       960 on aml-cft/egyptian-fiu, which is where the law is quoted.
+        #
+        #   .Image-Container         1,583 bytes of html, ZERO text -- the hero
+        #       banner: a <picture> with three srcset breakpoints, a base64 LQIP
+        #       placeholder, and the .bg/.blur overlay divs. Presentation only.
+        #       It does not reduce network traffic -- the browser has already
+        #       fetched the banner by capture time, so `asset_failures` is
+        #       unaffected.
+        #
+        #   .ui-helper-hidden-accessible  jQuery UI's aria-live region, injected
+        #       at body level and always empty. 109 bytes of nothing.
+        #
+        #   .breadcrumbdropdown      the mobile breadcrumb's collapsed <ul>. Present
+        #       on 62 of 62 captures, 43 bytes each, and EMPTY on every one of them
+        #       -- 0 characters of text in total.
+        #
+        #       It survived the junk list because that list names `[hidden]`, the
+        #       HTML ATTRIBUTE, and this is Tailwind's `class="hidden"` -- a
+        #       display:none utility the attribute selector does not match.
+        #
+        #       Dropping bare `.hidden` would catch all 64 such elements on this
+        #       site (3,138 bytes, 28 chars of text) and was NOT done: Tailwind
+        #       pairs `hidden` with `md:block` to mean "hidden on mobile, VISIBLE on
+        #       desktop", so the class is not a reliable statement that content is
+        #       furniture. Measured today CBE has zero such elements carrying text,
+        #       but that is a fact about this month's markup, not about the class.
+        #
+        # MEASURED on the deepest governance page (project-risk): the capture was
+        # 13,729 bytes for 2,229 characters of actual document -- 18%. The toolbar
+        # alone was 3,942 bytes, 29% of the file, for twelve characters of text.
+        #
+        #   section[data-comp-name="breadcrumbs"] .breadcrumbs   1,214 bytes / 84
+        #       chars -- the visible trail, which the `breadcrumb` column already
+        #       holds properly. Its first <li> is EMPTY (it existed only to hold
+        #       the .breadcrumbdropdown above), so the saved file rendered a stray
+        #       bullet over the trail in a browser. SCOPED to the hero on purpose:
+        #       a bare `.breadcrumbs` is a common enough class to catch something
+        #       else the day CBE reskins.
+        #
+        # WHAT IS LEFT IN, AND WHY:
+        #   .newsupdateddata -- the page's own date, and it MOVES. Corrected
+        #       2026-08-24: three sampled pages all read "23 Mar 2023" and it was
+        #       first written up here as a static string carrying nothing. It is
+        #       not. governance/compliance reads 09 Feb 2026 while
+        #       .../market-risk reads 23 Mar 2023. This is the publisher's own
+        #       last-updated stamp, and keeping it inside the captured TEXT is what
+        #       lets a page whose only change is that stamp still classify as
+        #       `modified`. The `.pagenote` section at the foot of the page repeats
+        #       the same date, so dropping that one costs nothing -- dropping BOTH
+        #       would make a date-only update invisible.
+        #
+        #   the hero <section> itself, which is what holds .newsupdateddata and the
+        #       <h1>. Removing it would also close the ~500px white gap the saved
+        #       HTML renders now, because JS stamps a computed
+        #       style="height: 501.203px" on the section before capture and
+        #       dropping .Image-Container leaves that height behind with nothing in
+        #       it. The gap is cosmetic in a browser; the change stamp is not.
+        #
+        #   content images: /-/media/.../rich-text/others/compliance.png sits in a
+        #       rich-texts section and is part of the document, not furniture.
+        #
+        # NONE OF THIS AFFECTS DISCOVERY. JS_LINKS and JS_BREADCRUMB query the
+        # LIVE document; drop_selectors applies to JS_MAIN_CONTENT's clone. So a
+        # selector here can never lose a document or a folder level -- only
+        # captured text. It CAN delete real text, which is what the
+        # .overview-column-layout note above is about.
+        "drop_selectors": (
+            ".cbe-accessibility-toolbar, "
+            ".most-searched, "
+            ".relatedlinks-section, "
+            ".Image-Container, "
+            ".ui-helper-hidden-accessible, "
+            # COMPOUND, not descendant. `.hidden breadcrumbdropdown` -- the form
+            # this had on 2026-08-24 -- reads as "an element of TYPE
+            # breadcrumbdropdown inside something with class hidden". Both classes
+            # are on the SAME <ul class="hidden breadcrumbdropdown">, and there is
+            # no such element type, so it matched 0 of 62 captures. It is also
+            # valid CSS, so the try/catch around drop_selectors never fired: the
+            # removal simply never happened, silently. Verified: the descendant
+            # form matches 0, `.hidden.breadcrumbdropdown` matches 1.
+            ".hidden.breadcrumbdropdown, "
+            'section[data-comp-name="breadcrumbs"] .breadcrumbs'
+        ),
+    },
 }
 
 DEFAULT_PROFILE = {
@@ -657,6 +1007,21 @@ DEFAULT_PROFILE = {
     "unwrap_forms": False,
     "sharepoint_main": False,
     "group_headings": False,
+    "keep_modals": False,
+    #: A CSS selector for the site's real content wrapper, prepended to
+    #: JS_MAIN_CONTENT's list. Empty means "use the defaults", which is what every
+    #: host without an entry does.
+    "content_selector": "",
+    #: Extra selectors to delete from the captured content, comma-separated.
+    #:
+    #: For furniture that sits INSIDE the content wrapper, so naming the wrapper
+    #: cannot exclude it. One list rather than a boolean per widget: the next site
+    #: with a sidebar needs an entry here, not another flag.
+    #:
+    #: It only edits the CAPTURED HTML. JS_LINKS reads the live document
+    #: separately, so nothing here can hide a link from the crawl or drop a
+    #: document from the documents sheet.
+    "drop_selectors": "",
 }
 
 
@@ -738,7 +1103,19 @@ JS_MAIN_CONTENT = r"""
   // picked on a site that already matched one.
   const sels = 'main, [role="main"], article, #content, .content, #main' +
                (opts.sharepoint_main ? ',[id*="PlaceHolderMain"], #contentBox, .main-content' : '');
-  const pick = document.querySelector(sels);
+  // A per-host content wrapper wins over the generic list. querySelector returns
+  // the first match in DOCUMENT order, not selector order, so the site's own
+  // container has to be asked for SEPARATELY or a shallower generic match would
+  // beat it. Sites whose markup has no main/article/#content fall back to <body>
+  // and capture the entire page — measured on sio.gov.bh (143 chrome divs
+  // surviving) and rera.gov.bh (43). Naming the wrapper excludes chrome by
+  // SELECTION, so a widget added later is outside it automatically and there is
+  // no junk list to keep extending.
+  let pick = null;
+  if (opts.content_selector) {
+    try { pick = document.querySelector(opts.content_selector); } catch (e) { pick = null; }
+  }
+  if (!pick) pick = document.querySelector(sels);
   const src = pick || document.body || document.documentElement;
   if (!src) return { html: '', text: '' };   // frameset top docs have no <body>
   const clone = src.cloneNode(true);
@@ -754,17 +1131,127 @@ JS_MAIN_CONTENT = r"""
       f.remove();
     });
   }
+  // `keep_modals` does NOT inline the panels. Each one becomes its own record
+  // (see JS_MODALS below and the collector in crawl()), because a page holding 47
+  // laws is one document where the library wants 47. So here the panels stay
+  // stripped by the junk sweep and only the trigger's dead href is repaired:
+  // javascript:void(0) becomes "#<id>", which absolutize_html turns into
+  // <page>#<id> — the same url the per-law record is stored under, so the page
+  // reads as an index over its own children.
+  if (opts.keep_modals) {
+    clone.querySelectorAll('a[data-bs-target], [data-target]').forEach(a => {
+      const t = a.getAttribute('data-bs-target') || a.getAttribute('data-target') || '';
+      if (t.charAt(0) === '#') a.setAttribute('href', t);
+    });
+  }
   const junk = [
     'script','style','noscript','nav','aside','header','footer','button','iframe',
     ...(opts.unwrap_forms ? [] : ['form']),
     '[aria-hidden="true"]','[hidden]','.no-print',
+    // The SITE'S OWN "this is not content" marker. Bootstrap's d-print-none means
+    // "hide when printing", which is what a page says about its own furniture.
+    // rera.gov.bh puts its Back / share / print / font-size toolbar in a
+    // <ul class="d-print-none"> INSIDE #page-content, so naming the content
+    // container cannot exclude it — only this can.
+    '.d-print-none','[class*="print-none"]',
     '#pdfDownloadLayout','[id*="pdfDownload"]','[id*="Clone"]','[id*="clone"]',
     '#accessibility-modal','[id*="accessibility"]','.back-to-top',
     '.overlay-mega-menu','.bg-overlay','.pages-banner','.bread-crumb','.breadcrumb',
     '[style*="display:none"]','[style*="display: none"]'
   ];
   clone.querySelectorAll(junk.join(',')).forEach(n => n.remove());
+  // Per-host furniture that lives INSIDE the content wrapper. Wrapped in a
+  // try/catch so one bad selector in a profile cannot empty a whole crawl — a
+  // typo should cost the removal, not the page.
+  if (opts.drop_selectors) {
+    try {
+      clone.querySelectorAll(opts.drop_selectors).forEach(n => n.remove());
+    } catch (e) { /* invalid selector: keep the content, drop nothing */ }
+  }
   return { html: clone.innerHTML, text: (clone.innerText || '').trim() };
+}
+"""
+
+# ONE RECORD PER MODAL PANEL — for `keep_modals` hosts.
+#
+# sio.gov.bh publishes each law as a Bootstrap modal already in the DOM: the
+# visible page is a list of titles, and clicking one opens the law's full text.
+# Captured as a page, that is ONE document holding up to 49 laws. The library
+# wants one row per law, which is what this returns.
+#
+# MEASURED 2026-08-20 across SIO's eight legislation pages: 202 panels, 202
+# UNIQUE ids, a title on every one from both the trigger and the panel's own
+# heading (and the two agree).
+#
+# THE ID IS FOR IDENTITY, NEVER FOR A NAME. Every SIO id begins
+# "amiri-decree-law-no-1976-27-concerning-amendments-to-articles-38-and-139-of-
+# social-insurance-law-" and differs only in a trailing number, whatever the law
+# actually is — a template artefact. So the url is <page>#<id>, which is unique
+# and is the site's own fragment, and the TITLE comes from the trigger text.
+#
+# 122 of the 202 read only "This content will be published soon". They are kept
+# deliberately: the title is real, SIO listing a law it has not published yet is
+# a fact worth holding, and the day it publishes one the text changes and change
+# detection reports `modified`.
+JS_MODALS = r"""
+(opts) => {
+  opts = opts || {};
+  const out = [], seen = new Set();
+  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  // A file's size and page count are never part of a regulation. Inside a modal
+  // sio.gov.bh renders them as a CLASS-LESS <div> after <h4>Download Document</h4>
+  //     <h4>Download Document</h4><div>2.7 MB, 58 Pages</div>
+  // so no selector can name it. Matched on its text instead, and only when the
+  // element's WHOLE text is the measurement, so a sentence that happens to
+  // mention a size is untouched.
+  const SIZE_ONLY = /^\s*\d+(?:[.,]\d+)?\s*(?:[KMGT]i?B|bytes?)?\s*[,;]?\s*(?:\d+\s*pages?)?\s*$/i;
+  const isSizeOnly = t => {
+    const s = (t || '').trim();
+    if (!s || s.length > 30) return false;
+    if (!/\d/.test(s)) return false;
+    if (!/(?:[KMGT]i?B|bytes?|pages?)/i.test(s)) return false;
+    return SIZE_ONLY.test(s);
+  };
+  const scrub = el => {
+    // Same drop_selectors the page capture uses — a modal is content too.
+    if (opts.drop_selectors) {
+      try { el.querySelectorAll(opts.drop_selectors).forEach(n => n.remove()); }
+      catch (e) { /* invalid selector: drop nothing */ }
+    }
+    el.querySelectorAll('*').forEach(n => {
+      if (n.children.length === 0 && isSizeOnly(n.textContent)) n.remove();
+    });
+    return el;
+  };
+  for (const a of document.querySelectorAll('[data-bs-target], [data-target]')) {
+    const raw = a.getAttribute('data-bs-target') || a.getAttribute('data-target') || '';
+    if (raw.charAt(0) !== '#' || raw.length < 2) continue;
+    const id = raw.slice(1);
+    if (seen.has(id)) continue;
+    const m = document.getElementById(id);
+    if (!m) continue;
+    seen.add(id);
+    // The BODY, not the whole dialog. Measured on sio.gov.bh: all 47 panels
+    // carry a .modal-header whose only content is the close button, and none
+    // has a .modal-footer, so storing the dialog stored that wrapper on every
+    // law.
+    // CLONED before scrubbing, so the live page is never mutated — the crawl
+    // reads this same DOM again for links and for the page capture.
+    const body = scrub((m.querySelector('.modal-body') || m).cloneNode(true));
+    // innerText on a hidden element is unreliable, so read textContent and
+    // normalise it ourselves. Computed ONCE, from the body.
+    const text = (body.textContent || '').replace(/[ \t]+/g, ' ')
+                                         .replace(/\n{3,}/g, '\n\n').trim();
+    const head = m.querySelector('h1,h2,h3,h4,.modal-title');
+    out.push({
+      id: id,
+      title: clean(a.innerText || a.textContent) || clean(head && head.textContent),
+      text: text,
+      html: (body.innerHTML || ''),
+      placeholder: /will be published soon/i.test(text)
+    });
+  }
+  return out;
 }
 """
 
@@ -1183,7 +1670,161 @@ REVEAL_CLICK_BUDGET = 25   # hard cap on clicks per page — stops runaway loops
 REVEAL_SETTLE_MS    = 600  # how long to let the page redraw after a click
 REVEAL_MAX_BARREN   = 1    # stop after the first click that gains nothing
 
+#: Hard cap on how many pages a NUMBERED pager is walked (tier 0b below). LLOC's
+#: "Latest Legislation" is 15; the cap allows a section to grow fourfold before
+#: this, rather than the site, is what stops the walk. A run that hits it says so.
+PAGER_MAX_PAGES = 60
+#: Give up on a numbered pager after this many consecutive pages that add
+#: nothing. Two, not one: a pager whose first step is a no-op is broken, but one
+#: genuinely duplicate page in the middle of a long list is not a reason to stop.
+PAGER_MAX_BARREN = 2
+#: How long to wait for one pager step's content to actually replace the old.
+PAGER_STEP_TIMEOUT_MS = 8000
+#: Settle AFTER the link set is seen to change, before reading it. The change
+#: fires on the first mutation, which may be part-way through the render.
+PAGER_SETTLE_MS = 700
+#: Attempts per pager PAGE. A step whose XHR was refused leaves the previous
+#: page's rows on screen, which is indistinguishable from an empty page until it
+#: is asked for again.
+PAGER_STEP_ATTEMPTS = 3
+
+#: How many times to load a page whose own scripts 404'd. Was effectively 2 (the
+#: goto retry); a third attempt costs one page load only on a host that is
+#: actually refusing assets, and on lloc.gov.bh each load is an independent roll.
+ASSET_RELOAD_ATTEMPTS = 3
+#: Pause before re-loading a page whose scripts were refused. Long enough for a
+#: burst limiter to forget, short enough not to dominate a crawl.
+ASSET_RELOAD_WAIT_MS = 2500
+
+#: A page that answered 4xx/5xx is still recorded IF it carries at least this
+#: much text, because a handful of CMSs serve real content under a wrong status
+#: and silently dropping those would shrink crawls that work today. Below it, the
+#: page is an error page and is skipped. lloc.gov.bh's throttled 404 body is
+#: ~300 characters of IIS boilerplate.
+HTTP_ERROR_MIN_TEXT = 600
+
 # The old hardcoded guesses, kept as a cheap fast path before the discovery tier.
+# ---------------------------------------------------------------------------
+# NUMBERED PAGERS  ("1 2 3 ... 15", or a <select> of page numbers)
+# ---------------------------------------------------------------------------
+# The Next-button tiers below advance one step at a time and STOP at the first
+# step that gains nothing (REVEAL_MAX_BARREN = 1). That is right for an infinite
+# "Load more", and wrong for a pager that states its own length: if step 1 fails
+# for any reason, the other fourteen pages are never even attempted.
+#
+# MEASURED on www.lloc.gov.bh/Legislation/Latest, 144 records over 15 pages:
+# the reveal event read `"clicks": 1, "gained": 0` and the crawl recorded ten
+# documents with `status: ok`.
+#
+# So a pager that ENUMERATES its pages is walked explicitly. Two forms, both
+# site-agnostic:
+#
+#   select  a <select> whose option values are exactly the consecutive integers
+#           1..N. That is a page-NUMBER menu. It is deliberately distinguished
+#           from a page-SIZE menu ("Show 10 / 25 / 50 / 100 entries", which tier
+#           0 maximises): 10,25,50,100 is not 1..N, so SECP's DataTables length
+#           menu can never be mistaken for one.
+#   links   sibling clickable controls whose visible text is 1..N — the ordinary
+#           "1 2 3 4 5" pager, whether the site builds it from <a>, <span> or
+#           <li>. The current page is usually not a link, which is why the set is
+#           allowed to be missing exactly one member.
+#
+# THE CHANGE EVENT IS DISPATCHED NATIVELY, not through the site's framework, so a
+# pager wired with an inline onchange="..." works without jQuery being involved
+# in the dispatch. It cannot help if the site's OWN handler is missing — see the
+# script-reload guard in crawl(), which is what makes that survivable.
+JS_NUMBERED_PAGER = r"""
+() => {
+  const ints = xs => xs.every(x => /^[0-9]+$/.test(x));
+  // A page-number menu: option values are exactly 1..N, in order, N >= 2.
+  const selects = Array.from(document.querySelectorAll('select'));
+  for (let i = 0; i < selects.length; i++) {
+    const vals = Array.from(selects[i].options).map(o => (o.value || '').trim());
+    if (vals.length < 2 || !ints(vals)) continue;
+    const nums = vals.map(Number);
+    let seq = true;
+    for (let k = 0; k < nums.length; k++) if (nums[k] !== k + 1) seq = false;
+    if (!seq) continue;
+    return { kind: 'select', key: selects[i].id ? '#' + selects[i].id : String(i),
+             byId: !!selects[i].id, pages: nums.length };
+  }
+  // A numbered link pager: clickable siblings labelled 1..N, at most one absent
+  // (the current page is commonly rendered as plain text).
+  const cand = Array.from(document.querySelectorAll('a, span, li, button'))
+    .filter(n => n.children.length === 0 && /^[0-9]+$/.test((n.textContent || '').trim()));
+  const byParent = new Map();
+  cand.forEach(n => {
+    const par = n.closest('ul, ol, nav, div');
+    if (!par) return;
+    if (!byParent.has(par)) byParent.set(par, []);
+    byParent.get(par).push(n);
+  });
+  let best = null;
+  byParent.forEach((nodes, par) => {
+    const nums = Array.from(new Set(nodes.map(n => Number((n.textContent || '').trim()))))
+                      .sort((a, b) => a - b);
+    if (nums.length < 2 || nums[0] !== 1) return;
+    const max = nums[nums.length - 1];
+    if (max - nums.length > 1) return;      // at most one member missing
+    if (!best || max > best.pages) best = { kind: 'links', key: '', pages: max };
+  });
+  return best;
+}
+"""
+
+# Drive one step of a pager found by JS_NUMBERED_PAGER. Returns true if the page
+# was asked to move; the CALLER decides whether anything was gained, because a
+# request that was made and refused must not read as "the pager ended".
+# What the page's link set looks like right now. Used to WAIT for a pager step to
+# land, because `wait_for_load_state("networkidle")` is useless here: at the
+# moment the step is driven the page IS idle — the XHR has not started — so the
+# wait returns instantly and the harvest reads the OLD page. Measured on
+# lloc.gov.bh: the select was driven successfully (`moved: True`) and the link set
+# was still page 1 after 6 seconds of network-idle waiting.
+JS_LINK_SIG = r"""
+() => {
+  const a = Array.from(document.querySelectorAll('a[href]'));
+  return a.length + '|' + a.map(n => n.getAttribute('href')).join(',').slice(0, 4000);
+}
+"""
+
+JS_PAGER_GOTO = r"""
+(a) => {
+  if (a.kind === 'select') {
+    const el = a.byId ? document.querySelector(a.key)
+                      : document.querySelectorAll('select')[Number(a.key)];
+    if (!el) return false;
+    const want = String(a.n);
+    if (!Array.from(el.options).some(o => (o.value || '').trim() === want)) return false;
+    el.value = want;
+    // Native events, so an inline onchange="fetchResult(...)" fires without the
+    // site's own framework being needed for the dispatch itself.
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }
+  const want = String(a.n);
+  // RE-VERIFY THE PAGER CONTEXT AT CLICK TIME. Matching "the first leaf whose
+  // text is 2" anywhere in the document would happily click a year, a table
+  // cell or a footnote marker. The control must sit in a container that also
+  // holds a sibling leaf reading "1" — which is what made it look like a pager
+  // during detection.
+  const leaves = Array.from(document.querySelectorAll('a, span, li, button'))
+    .filter(n => n.children.length === 0);
+  const hit = leaves.find(n => {
+    if ((n.textContent || '').trim() !== want) return false;
+    const par = n.closest('ul, ol, nav, div');
+    if (!par) return false;
+    return leaves.some(o => o !== n && par.contains(o) &&
+                            (o.textContent || '').trim() === '1');
+  });
+  if (!hit) return false;
+  hit.click();
+  return true;
+}
+"""
+
+
 KNOWN_ADVANCE_SELECTORS = [
     ".paginate_button.next", "a.paginate_button.next", "li.next a", "a.next",
     "[rel='next']", ".pagination .next a", "button.next",
@@ -1238,6 +1879,163 @@ def _click_and_keep(page, el, seen, opts=None):
     return len(seen) > before_n
 
 
+def watch_asset_failures(page, host):
+    """Record SCRIPT responses from `host` that failed, and return the live set.
+
+    WHY A CRAWLER HAS TO CARE ABOUT SCRIPT 404s
+    -------------------------------------------
+    A page whose JavaScript did not arrive still renders. It renders its
+    server-side first screen, looks completely healthy, and does none of the
+    things its JavaScript would have done — so a crawl reads the first ten rows
+    of a fifteen-page listing and reports success.
+
+    MEASURED on www.lloc.gov.bh, three separate Playwright loads minutes apart,
+    same User-Agent, no change on our side:
+
+        load A   4 of 8 scripts 404 (jquery, wow, Chart1, main1)
+                 -> "jQuery is not defined" x3, window.fetchResult undefined
+        load B   2 of 2 scripts 404 after blocking the other six
+                 -> same
+        load C   6 of 8 scripts 200, jquery STILL 404
+                 -> window.fetchResult IS a function, but it calls $.ajax
+
+    and a plain `requests` GET of that same main1.js returned 200 / 35,113 chars.
+    Nothing is broken on the site; the host refuses a share of the burst and picks
+    a different share each time. Which is exactly why RELOADING WORKS — the next
+    load is a fresh roll.
+
+    Only SCRIPTS are watched, and only on the crawl's own host. A missing image or
+    a third-party analytics 404 changes nothing about what we extract, and
+    treating those as failures would reload half the web.
+
+    `host` IS PASSED IN RATHER THAN READ FROM page.url. The first version compared
+    against `page.url` and caught nothing: responses arrive while Playwright still
+    reports the page as `about:blank`, so every comparison failed and the run
+    reported `asset_failures: 0` on a page whose jQuery had not loaded. Measured
+    directly — every response logged with page.url alongside it read
+    `(404, 'document', 'about:blank', 'Latest')`.
+    """
+    want = (host or "").lower()
+    failed = set()
+
+    def _on_response(resp):
+        try:
+            if resp.status < 400:
+                return
+            if resp.request.resource_type != "script":
+                return
+            if urlparse(resp.url).netloc.lower() != want:
+                return
+            failed.add(resp.url)
+        except Exception:
+            pass                      # a listener must never break the crawl
+
+    page.on("response", _on_response)
+    return failed
+
+
+def walk_numbered_pager(page, seen, opts=None):
+    """Walk a pager that STATES ITS OWN LENGTH, merging each page's links.
+
+    Returns (gained, pages_walked, note). `note` is non-empty when the walk ended
+    for a reason worth reporting rather than because it finished — an unreachable
+    page, a dead pager, or the cap.
+
+    WHY THIS EXISTS AS A SEPARATE TIER: the Next-button tiers stop at the first
+    barren step, which throws away a stated page count. Here the count is known,
+    so a failure to advance is a FINDING and is reported, not the end of the list.
+    """
+    try:
+        info = page.evaluate(JS_NUMBERED_PAGER)
+    except Exception as e:
+        return 0, 0, f"pager scan failed: {type(e).__name__}"
+    if not info:
+        return 0, 0, ""
+
+    declared = int(info.get("pages") or 0)
+    last = min(declared, PAGER_MAX_PAGES)
+    gained = walked = barren = 0
+    note = ""
+
+    for n in range(2, last + 1):
+        before_url = page.url
+        before = len(seen)
+        # RE-DRIVE, don't just re-read. MEASURED on lloc.gov.bh across four runs
+        # of the same 15-page listing: 146, 122, 136 documents. The host refuses a
+        # share of requests, so an individual pager step's XHR can fail while the
+        # steps around it succeed — and the page then still shows the PREVIOUS
+        # page's rows, which reads as "this page added nothing". Asking for the
+        # same page number again is the only thing that recovers it.
+        moved = False
+        for step_try in range(1, PAGER_STEP_ATTEMPTS + 1):
+            try:
+                sig = page.evaluate(JS_LINK_SIG)
+                moved = page.evaluate(JS_PAGER_GOTO, {**info, "n": n})
+            except Exception as e:
+                note = f"page {n} could not be driven: {type(e).__name__}"
+                moved = False
+                break
+            if not moved:
+                break
+            try:
+                page.wait_for_function(
+                    "(old) => { const a = Array.from(document.querySelectorAll('a[href]'));"
+                    " return a.length + '|' + a.map(n => n.getAttribute('href'))"
+                    ".join(',').slice(0, 4000) !== old; }",
+                    arg=sig, timeout=PAGER_STEP_TIMEOUT_MS)
+            except Exception:
+                pass
+            page.wait_for_timeout(PAGER_SETTLE_MS)
+            if page.url != before_url:
+                break                      # navigated — handled below
+            _merge_links(seen, _harvest(page, opts).values())
+            if len(seen) > before:
+                break                      # this page gave us something
+            if step_try < PAGER_STEP_ATTEMPTS:
+                page.wait_for_timeout(PAGER_SETTLE_MS * 3)
+        if note:
+            break
+        if not moved:
+            note = f"page {n} of {declared} was not reachable in the pager"
+            break
+        # A PAGER STEP THAT NAVIGATED IS NOT A REVEAL. If the control was a real
+        # <a href> the pages have real urls, so the BFS reaches them by itself —
+        # and continuing to drive a pager on a document we have moved away from
+        # would corrupt everything after this. Harvest what this page offered,
+        # go back, and stop. MEASURED: cma_regs (3 pages) and secp_acts (2) both
+        # expose numbered link pagers, so this path is not hypothetical.
+        if page.url != before_url:
+            _before = len(seen)
+            _merge_links(seen, _harvest(page, opts).values())
+            gained += len(seen) - _before
+            walked += 1
+            try:
+                page.go_back(wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
+            note = (f"pager page {n} is a real link, not an in-page control — "
+                    f"left to the BFS")
+            break
+
+        step = len(seen) - before
+        gained += step
+        walked += 1
+        barren = 0 if step else barren + 1
+        if barren >= PAGER_MAX_BARREN:
+            # The pager is present and states N pages, but driving it adds
+            # nothing. On lloc.gov.bh that means the site's own handler never
+            # loaded — a silent 10-of-144 unless it is said out loud.
+            note = (f"pager declares {declared} pages but {barren} consecutive "
+                    f"page(s) added no links — the site's pager is not working")
+            break
+
+    if not note and declared > last:
+        note = (f"pager declares {declared} pages, walked {last} "
+                f"(PAGER_MAX_PAGES)")
+    return gained, walked, note
+
+
 def reveal_all_links(page, budget=REVEAL_CLICK_BUDGET, opts=None):
     """Click things that might reveal more links; return the union of all states.
 
@@ -1269,6 +2067,13 @@ def reveal_all_links(page, budget=REVEAL_CLICK_BUDGET, opts=None):
         pass
     _merge_links(seen, _harvest(page, opts).values())
     g0 = len(seen) - baseline
+    _mark = len(seen)
+
+    # ---- tier 0b: a pager that states its own length ----
+    # Before the Next tiers, because it is cheaper and more complete: it knows how
+    # many pages there are, so it neither stops at the first barren step nor
+    # depends on a Next control existing.
+    gp, pager_pages, pager_note = walk_numbered_pager(page, seen, opts)
     _mark = len(seen)
 
     # ---- tier 1: the known selectors ----
@@ -1334,11 +2139,17 @@ def reveal_all_links(page, budget=REVEAL_CLICK_BUDGET, opts=None):
 
     _unstamp(page)
     ev = {"event": "reveal", "links": len(seen), "gained": len(seen) - baseline,
-          "t0_select": g0, "t1_known": g1, "t2_discovered": len(seen) - _mark,
+          "t0_select": g0, "t0b_pager": gp, "t1_known": g1,
+          "t2_discovered": len(seen) - _mark,
           "clicks": clicks, "t1_clicks": c1, "t2_clicks": clicks - c1,
-          "cands": n_cands}
+          "pager_pages": pager_pages, "cands": n_cands}
     if js_error:                 # tier 2 never ran — a code bug, not a site
         ev["js_error"] = js_error
+    # A pager that was found and did not work is the single most dangerous thing
+    # on this path: the page still renders its first screen and the crawl looks
+    # healthy. Never let that be silent.
+    if pager_note:
+        ev["pager_note"] = pager_note
     emit(ev)
     return list(seen.values())
 
@@ -1502,7 +2313,17 @@ def expand_tree(page, max_rounds=40):
 
 def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
           headless=True, wait_ms=700, nav_timeout=60000, strategy="auto",
-          group_headings=False, list_details=True, max_details=None):
+          group_headings=False, list_details=True, max_details=None,
+          outer_prefix=None, section_name=None, max_widened=60,
+          exclude_paths=None):
+    """`outer_prefix` / `section_name` / `max_widened` drive --follow-section-links.
+
+    They are None by default, which leaves prefix scope byte-identical to what it
+    has always been. Only the --subpaths driver passes them, and only when the
+    flag is set — so no existing caller, including the pipeline's
+    GenericSiteCrawler, can reach the widened branch. See its comment at the
+    enqueue gate below.
+    """
     out = Path(out_dir)
     (out / "html").mkdir(parents=True, exist_ok=True)
 
@@ -1520,8 +2341,17 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
     lang_lock = _seg0 if re.fullmatch(r"[a-z]{2,3}", _seg0 or "") else None
 
     visited = set()
+    # Urls queued by the WIDENED branch: they sit outside the section's own path
+    # and were followed on suspicion, so the site's breadcrumb — not the url —
+    # decides whether they belong. Empty unless --follow-section-links is on.
+    widened_urls = set()
+    section_needle = re.sub(r"[-_]+", " ", (section_name or "").strip()).strip().lower()
     content_hashes = {}     # content_key -> url that first recorded it
     records = []
+    # keep_modals hosts only: one record per modal panel, collected separately so
+    # they do NOT consume --max-pages. 202 panels behind 10 pages would otherwise
+    # stop the walk at the cap with most of the site unvisited.
+    modal_records = []
     documents = {}          # normalized doc url -> record
     chrome_documents = {}   # same, for links found only in the site header/footer
     link_titles = {}        # normalized url -> the anchor text that linked to it
@@ -1531,7 +2361,7 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
     # What the walk learned about itself. These were all emitted as events and
     # then forgotten — baseline.py re-parsed stdout to get them back — so nothing
     # downstream of the process could tell a clean run from a truncated one.
-    note = {"blocked_pages": 0, "errors": 0, "retries": 0,
+    note = {"blocked_pages": 0, "errors": 0, "retries": 0, "asset_failures": 0,
             "cap_hit": False, "seed_loaded": True, "stopped": "", "resume": {}}
 
     emit({"event": "start", "seed": seed_norm, "scope": scope,
@@ -1550,6 +2380,9 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
             locale="en-US",
         )
         page = ctx.new_page()
+        # Live set of same-host scripts that failed to load. Read by the page
+        # loop below, which reloads rather than crawling a half-built page.
+        asset_failures = watch_asset_failures(page, seed_host)
 
         # ---- shape-aware dispatch (additive) ---------------------------------
         # Load the seed once, detect its layout, and hand off to a specialised
@@ -1663,27 +2496,84 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
             url, depth = queue.popleft() if queue else page_queue.popleft()
             nav_ok = False
             last_err = ""
-            for attempt in range(1, 3):  # goto can be slow on protected/heavy sites
+            # ATTEMPTS COUNT TWO DIFFERENT FAILURES. A goto that raises is the
+            # obvious one. The other is a load that SUCCEEDS while the page's own
+            # scripts 404 — see watch_asset_failures: the page renders its
+            # server-side first screen, looks healthy, and its pager does
+            # nothing. Reloading is the fix because the host refuses a different
+            # share of the burst each time.
+            http_status = None
+            for attempt in range(1, ASSET_RELOAD_ATTEMPTS + 1):
+                asset_failures.clear()
                 try:
                     # Load the DOM fast, then give late XHR a SHORT settle window.
                     # (Using wait_until="networkidle" in goto hangs the full timeout on
                     #  chatty sites like SBP whose analytics beacons never go idle.)
-                    page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout)
+                    resp = page.goto(url, wait_until="domcontentloaded",
+                                     timeout=nav_timeout)
+                    http_status = resp.status if resp is not None else None
                     try:
                         page.wait_for_load_state("networkidle", timeout=2500)
                     except Exception:
                         pass
                     nav_ok = True
-                    break
                 except Exception as e:
                     last_err = str(e)[:200]
                     note["retries"] += 1
-                    emit({"event": "retry", "url": url, "attempt": attempt, "message": last_err})
+                    emit({"event": "retry", "url": url, "attempt": attempt,
+                          "message": last_err})
                     page.wait_for_timeout(1500)
+                    continue
+                # A 4xx/5xx DOCUMENT is retried for the same reason a refused
+                # script is: on a throttling host the next load is a fresh roll.
+                # Measured on lloc.gov.bh — /Legislation/Latest itself came back
+                # `(404, 'document')` with no scripts requested at all, and the
+                # same url served the full 48 KB page a minute later.
+                if (http_status or 0) >= 400 and attempt < ASSET_RELOAD_ATTEMPTS:
+                    note["retries"] += 1
+                    emit({"event": "retry", "url": url, "attempt": attempt,
+                          "message": f"HTTP {http_status} on the page itself; "
+                                     f"reloading"})
+                    page.wait_for_timeout(ASSET_RELOAD_WAIT_MS)
+                    continue
+                if not asset_failures or attempt == ASSET_RELOAD_ATTEMPTS:
+                    if asset_failures:
+                        # Kept, but SAID. A crawl standing on a page whose scripts
+                        # never arrived must not look like a clean one.
+                        note["asset_failures"] = (note.get("asset_failures", 0)
+                                                  + len(asset_failures))
+                        emit({"event": "assets_missing", "url": url,
+                              "attempt": attempt,
+                              "scripts": sorted(asset_failures)[:6],
+                              "count": len(asset_failures)})
+                    break
+                note["retries"] += 1
+                emit({"event": "retry", "url": url, "attempt": attempt,
+                      "message": f"{len(asset_failures)} same-host script(s) "
+                                 f"failed to load; reloading",
+                      "scripts": sorted(asset_failures)[:6]})
+                page.wait_for_timeout(ASSET_RELOAD_WAIT_MS)
             if not nav_ok:
                 note["errors"] += 1
                 emit({"event": "error", "url": url, "depth": depth, "message": last_err})
                 continue
+            # AN ERROR PAGE IS NOT A PAGE. Before this, a throttled 404 was
+            # recorded as an ordinary thin page: `status: ok`, one page, twelve
+            # documents. The text test is the safety valve — a few CMSs serve real
+            # content under a 404 status, and those are kept and flagged rather
+            # than dropped, because dropping them would silently shrink a crawl
+            # that used to work.
+            if (http_status or 0) >= 400:
+                note["errors"] += 1
+                try:
+                    body_len = len((page.inner_text("body") or "").strip())
+                except Exception:
+                    body_len = 0
+                emit({"event": "http_error", "url": url, "depth": depth,
+                      "status": http_status, "text_len": body_len,
+                      "recorded": body_len >= HTTP_ERROR_MIN_TEXT})
+                if body_len < HTTP_ERROR_MIN_TEXT:
+                    continue
             # Checked on every page, not just the seed: a WAF usually lets the
             # first few through and starts serving challenges once it has decided
             # we are a bot — which is exactly how SIMAH was tripped.
@@ -1791,6 +2681,36 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
             elif scope == "host":
                 in_scope = True  # same-host already enforced at enqueue time
 
+            # --- a WIDENED page is judged by the site's own breadcrumb, FIRST ---
+            #
+            # This runs BEFORE the document collection below, unlike the ordinary
+            # out-of-scope check. An ordinary out-of-scope page was linked from
+            # inside the section and its files are still the section's; a widened
+            # page was fetched on nothing but suspicion, so if the site says it is
+            # not in this section then nothing on it belongs here — not its text,
+            # not its files.
+            #
+            # Measured on sio.gov.bh, which is why the breadcrumb is trusted:
+            #   /en/law-no-24-of-1976   ['Home', 'Private Sectors']   content
+            #   /en/amendment-decrees   ['Home', 'Private Sectors']   content
+            #   /en/about-sio           ['Home']                      nav
+            #   /en/faqs                ['Home']                      nav
+            #   /en/privacy-policy      ['Privacy Policy']             nav
+            # The site knows the page sits under Private Sectors even though its
+            # url does not say so. That is the whole basis of this rule.
+            if url in widened_urls:
+                if not section_needle or section_needle not in crumb_l:
+                    emit({"event": "skip", "url": url, "depth": depth,
+                          "reason": "widened-not-in-section",
+                          "section": section_needle, "breadcrumb": breadcrumb})
+                    continue
+                # The breadcrumb vouched for it, so it IS in the section — which
+                # the prefix rule above could never say, since being outside the
+                # prefix is what made it widened in the first place.
+                in_scope = True
+                emit({"event": "widened", "url": url, "depth": depth,
+                      "section": section_needle, "breadcrumb": breadcrumb})
+
             # --- collect document links on this page regardless of scope ---
             # Includes plain .pdf/.docx AND download-manager links (SECP "Download"
             # buttons → /document/<slug>/?wpdmdl=<id>) that carry the title as link text.
@@ -1799,6 +2719,8 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                 href = l["href"]
                 if urlparse(href).scheme in ("http", "https") and is_document_link(href, seed_host):
                     dn = normalize_url(href)
+                    if path_excluded(urlparse(dn).path, exclude_paths):
+                        continue          # its files belong to that source too
                     rec_doc = {
                         "title": best_doc_title(l, dn),   # real title/date, not "Download"
                         "doc_url": dn,
@@ -1873,6 +2795,46 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                 "breadcrumb": breadcrumb,
             }
             records.append(rec)
+
+            # --- one record per modal panel (keep_modals hosts) --------------
+            # The page above is now just the index; the law texts are these.
+            if prof.get("keep_modals"):
+                try:
+                    panels = page.evaluate(JS_MODALS, prof) or []
+                except Exception as e:
+                    panels = []
+                    note["errors"] += 1
+                    emit({"event": "error", "url": url,
+                          "message": f"modal extraction failed: {str(e)[:120]}"})
+                for m in panels:
+                    mid = (m.get("id") or "").strip()
+                    mtitle = clean_doc_title(m.get("title"))
+                    if not mid or not mtitle:
+                        continue
+                    murl = f"{url}#{mid}"
+                    if murl in visited:
+                        continue
+                    visited.add(murl)
+                    modal_records.append({
+                        "section_path": rec["section_path"],
+                        "title": mtitle,
+                        "url": murl,
+                        "depth": depth + 1,
+                        "linked_from_title": title,
+                        "parent_page_url": url,
+                        "status": status,
+                        "n_pdfs": 0,
+                        "pdf_links": "",
+                        "text_len": len(m.get("text") or ""),
+                        "html_file": "",
+                        "text": m.get("text") or "",
+                        "html": m.get("html") or "",
+                        "breadcrumb": breadcrumb,
+                    })
+                if panels:
+                    emit({"event": "modals", "url": url, "found": len(panels),
+                          "kept": len(modal_records),
+                          "placeholders": sum(1 for m in panels if m.get("placeholder"))})
             emit({"event": "visit", "url": url, "depth": depth, "title": title,
                   "section_path": rec["section_path"], "n_pdfs": len(page_docs),
                   "text_len": rec["text_len"], "recorded": len(records),
@@ -1898,8 +2860,43 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
                     continue
                 if DENY_PATH_PAT.search(pu.path) or pu.path in ("/", f"/{lang_lock}"):  # chrome pages
                     continue
+                if path_excluded(pu.path, exclude_paths):
+                    continue          # a subtree another source owns
                 if scope == "prefix" and not pu.path.startswith(seed_prefix):
-                    continue
+                    # WIDENED BRANCH (--follow-section-links). A section's own
+                    # content does not always live under the section's path.
+                    # sio.gov.bh publishes flat: /en/private-sectors links its
+                    # four instruments at /en/law-no-24-of-1976,
+                    # /en/amendment-decrees and so on — siblings, not children.
+                    # Prefix scope rejected all four here, silently (this used to
+                    # be a bare `continue` with no event), so the crawl recorded
+                    # the listing page and reported `ok`: 8,171 characters where
+                    # the section actually holds 96,941.
+                    #
+                    # THREE CONDITIONS, and all three matter:
+                    #   outer_prefix     the wider boundary is the --seed, not the
+                    #                    section, so this can only ever wander
+                    #                    inside the site the user already named
+                    #   url == seed_norm found ON the section page. One hop only:
+                    #                    a widened page's own off-prefix links are
+                    #                    NOT followed, or this decays into `host`
+                    #   not chrome       the header/footer flag JS_LINKS already
+                    #                    computes. A pre-filter, not the decision:
+                    #                    on SIO it takes 39 candidates down to 7,
+                    #                    and every candidate costs a page load
+                    #                    because a rejected page is not recorded
+                    #                    and therefore does not count toward
+                    #                    max_pages. `max_widened` is the backstop.
+                    #
+                    # The DECISION is the breadcrumb test above, not any of these.
+                    # These only choose what is worth asking about.
+                    if not (outer_prefix
+                            and url == seed_norm
+                            and not l.get("chrome")
+                            and pu.path.startswith(outer_prefix)
+                            and len(widened_urls) < max_widened):
+                        continue
+                    widened_urls.add(nh)
                 # Remember HOW we reached this page: the anchor text that linked to
                 # it, and the page it was linked from. A detail page's own <title>
                 # is often generic ("Details"), while the link that led to it
@@ -1941,7 +2938,9 @@ def crawl(seed_url, out_dir, max_pages=150, max_depth=8, scope="auto",
     kept_urls = {k[0] for k in documents}
     dropped_chrome = [d for u, d in chrome_documents.items() if u not in kept_urls]
 
-    return _finish(out, seed_norm, records, list(documents.values()),
+    # Panels come after the pages so the index reads before its children.
+    return _finish(out, seed_norm, records + modal_records,
+                   list(documents.values()),
                    dropped_chrome, shape="generic", note=note)
 
 
@@ -2066,18 +3065,38 @@ def _finish(out, seed_norm, records, documents, chrome_dropped, shape, note=None
             continue
         name = r.get("html_file") or ""
         if not name:
-            slug = slugify(urlparse(page_url).path or r.get("title") or "")
-            slug = slug or f"page-{i}"
-            n = used.get(slug, 0)
-            used[slug] = n + 1
-            name = f"html/{slug}.html" if not n else f"html/{slug}-{n}.html"
+            _pu = urlparse(page_url)
+            parent = r.get("parent_page_url") or ""
+            page_part = slugify(urlparse(parent).path) if (_pu.fragment and parent)                 else slugify(_pu.path or "")
+            if _pu.fragment and parent:
+                # A CHILD RECORD (a modal panel). FLAT, in the same html/ folder as
+                # everything else — but named from its own TITLE, not its fragment
+                # id. sio.gov.bh gives every panel an id beginning
+                # "amiri-decree-law-no-1976-27-concerning-amendments-to-articles-
+                # 38-and-139-of-social-insurance-law-", whatever the law is, so a
+                # fragment-derived name made all 202 identical after slugify's
+                # 80-character cut and the collision counter turned them into
+                # ...-with-resp-1 .. -19. Titles are distinct and searchable.
+                stem = slugify(f"{page_part}-{clean_doc_title(r.get('title')) or _pu.fragment}")
+            else:
+                stem = page_part or slugify(r.get("title") or "")
+            base = "html/" + (stem or f"page-{i}")
+            n = used.get(base, 0)
+            used[base] = n + 1
+            name = f"{base}.html" if not n else f"{base}-{n}.html"
             r["html_file"] = name
-        write_page_html(out, name, r["html"], page_url, r.get("title") or "")
+        written = write_page_html(out, name, r["html"], page_url,
+                                 r.get("title") or "")
+        r["html_file"] = written or name
 
     n = dict(note or {})
     counts = {"pages": len(records), "documents": len(documents),
               "blocked_pages": n.get("blocked_pages", 0),
               "errors": n.get("errors", 0), "retries": n.get("retries", 0),
+              # Pages we crawled anyway, standing on incomplete JavaScript. Zero
+              # on every site measured except lloc.gov.bh; non-zero means "read
+              # the assets_missing events before trusting this run".
+              "asset_failures": n.get("asset_failures", 0),
               "cap_hit": bool(n.get("cap_hit")),
               "seed_loaded": n.get("seed_loaded", True),
               "stopped": n.get("stopped", "")}
@@ -2218,11 +3237,47 @@ def preflight(url: str, timeout: int = 20) -> tuple:
     without building the page; GET after, since plenty of government servers
     reject HEAD outright.
 
-    KNOWN LIMIT: cbe.org.eg answers ANY path with 200, and answers urllib's
-    header signature with a 269-byte "Request Rejected" page under that same 200.
-    So on that host this approves everything, including a typo. It never wrongly
-    stops a run; the `thin` note below is what catches the typo instead.
+    REQUESTS, NOT URLLIB. Measured on cbe.org.eg with an IDENTICAL User-Agent:
+    urllib gets a 269-byte "Request Rejected" page served as HTTP 200, requests
+    gets the real page. The WAF is judging the header signature, not the client
+    being a browser — so a urllib preflight there reported `ok 200` for every
+    path including a typo, which is worse than no check. urllib is kept as the
+    fallback for an environment without requests.
+
+    MEASURED 2026-08-18 once it used requests: cbe.org.eg returns a real HTTP 404
+    for /en/no-such-section-xyz and 200 for every genuine section. So the check
+    works there after all — the "this host answers 200 for anything" reading was
+    an artefact of urllib being refused, not the site's behaviour.
+
+    KNOWN LIMIT that remains: a site CAN answer any path with 200 and render a
+    soft-404, and a browser navigation does not fail on a 404 page either — so a
+    section can still crawl to one recorded page. The `thin` note is what catches
+    that; this only has to catch the hard 404.
     """
+    if requests is not None:
+        for method in ("head", "get"):
+            try:
+                r = getattr(requests, method)(
+                    url, headers={"User-Agent": USER_AGENT}, timeout=timeout,
+                    allow_redirects=True,
+                    **({"stream": True} if method == "get" else {}))
+                if method == "get":
+                    r.close()
+                if r.status_code in (403, 405, 501) and method == "head":
+                    continue      # the server dislikes HEAD, not the URL
+                if r.status_code == 403:
+                    # Often the WAF, not a missing page. Let the crawl decide;
+                    # blocked_reason reads the actual rendered page.
+                    return True, "403 (may be bot protection - the crawl will judge)"
+                if r.status_code < 400:
+                    return True, f"{r.status_code} {method.upper()}"
+                return False, f"HTTP {r.status_code}"
+            except Exception as e:
+                if method == "head":
+                    continue
+                return False, f"{type(e).__name__}: {str(e)[:80]}"
+        return False, "unreachable"
+
     for method in ("HEAD", "GET"):
         req = urllib.request.Request(url, method=method,
                                      headers={"User-Agent": USER_AGENT})
@@ -2231,10 +3286,8 @@ def preflight(url: str, timeout: int = 20) -> tuple:
                 return True, f"{resp.status} {method}"
         except urllib.error.HTTPError as e:
             if e.code in (403, 405, 501) and method == "HEAD":
-                continue          # the server dislikes HEAD, not the URL
+                continue
             if e.code == 403:
-                # A 403 is not proof the page is missing — it is often the WAF.
-                # Let the crawl decide; blocked_reason reads the actual page.
                 return True, "403 (may be bot protection - the crawl will judge)"
             return False, f"HTTP {e.code}"
         except Exception as e:
@@ -2267,11 +3320,15 @@ def read_outcome(out_dir: Path) -> dict:
 def thin_note(row: dict) -> str:
     """A section that answered but produced almost nothing.
 
-    Preflight cannot catch every typo: cbe.org.eg returns 200 for ANY path, so a
-    misspelled section renders a soft-404, records its one page, and run_status
-    correctly calls that `ok` — one page IS a successful crawl of one page.
-    Measured: `/en/definitely-not-a-real-section` gives 1 page and 0 documents,
-    beside `/en/laws-regulations` at 17 pages and 55 documents.
+    Preflight cannot catch every typo. A browser navigation does NOT fail on a
+    404 page — it renders it — so a bad sub-path still records one page, and
+    run_status correctly calls that `ok`: one page IS a successful crawl of one
+    page. Measured on cbe.org.eg 2026-08-18:
+    `/en/definitely-not-a-real-section` renders a page titled "404" and yields
+    1 page / 0 documents, beside `/en/laws-regulations` at 17 pages / 55
+    documents. (Its HTTP status IS 404, so the requests-based preflight above
+    now stops that one earlier — but a site that soft-404s with a 200 would slip
+    through, and this is the net under it.)
 
     So this is a NOTE, not a status. A sixth status word would put a second
     definition of a working run next to run_status. The number is the evidence; a
@@ -2534,6 +3591,15 @@ def crawl_sections(args) -> int:
 
         out_dir = root / item["dir"]
         print(f"[{i}/{len(plan)}] {item['url']}  ->  {out_dir}")
+        # --follow-section-links only: the section's own name, from its sub-path,
+        # is what the breadcrumb must contain. The last segment, so a nested
+        # sub-path like sustainability/principles-and-regulatory-framework is
+        # matched on the part the site would actually name.
+        widen = {}
+        if args.follow_section_links:
+            widen = {"outer_prefix": scope_prefix(urlparse(seed).path) or "/",
+                     "section_name": item["subsite"].rstrip("/").split("/")[-1],
+                     "max_widened": args.max_widened}
         try:
             crawl(item["url"], out_dir,
                   max_pages=args.max_pages, max_depth=args.max_depth,
@@ -2541,7 +3607,7 @@ def crawl_sections(args) -> int:
                   wait_ms=args.wait_ms, strategy=args.strategy,
                   group_headings=args.group_headings,
                   list_details=not args.no_details,
-                  max_details=args.max_details or None)
+                  max_details=args.max_details or None, **widen)
         except Exception as e:
             print(f"  crawl raised {type(e).__name__}: {e}", file=sys.stderr)
 
@@ -2626,7 +3692,25 @@ def main():
                          "loud)")
     ap.add_argument("--no-preflight", action="store_true",
                     help="--subpaths: do not check the sections before crawling")
+    ap.add_argument("--follow-section-links", action="store_true",
+                    help="--subpaths + --scope prefix: also follow links found ON "
+                         "a section page that fall OUTSIDE its path but inside the "
+                         "--seed, and keep them only if the site's own breadcrumb "
+                         "names the section. For sites that publish flat, where a "
+                         "section's content lives at sibling urls (sio.gov.bh). "
+                         "One hop, header/footer links skipped, capped by "
+                         "--max-widened. Off by default: it changes what a prefix "
+                         "crawl walks")
+    ap.add_argument("--max-widened", type=int, default=60,
+                    help="--follow-section-links: most off-path candidates one "
+                         "section may fetch. A rejected page is not recorded, so "
+                         "it does not count toward --max-pages; this is the cap "
+                         "that does (default 60)")
     ap.add_argument("--out", required=True, help="Output directory")
+    ap.add_argument("--exclude", action="append", default=[],
+                    help="url path prefix to skip, repeatable. Skips both the "
+                         "page walk and any document under it -- for a subtree "
+                         "another source already owns, e.g. CBE circulars.")
     ap.add_argument("--max-pages", type=int, default=150)
     ap.add_argument("--max-depth", type=int, default=8)
     ap.add_argument("--scope", choices=["auto", "breadcrumb", "prefix", "host"],
@@ -2668,7 +3752,8 @@ def main():
           list_details=not args.no_details,
           max_details=args.max_details or None,
           scope=args.scope, headless=not args.headful, wait_ms=args.wait_ms,
-          strategy=args.strategy, group_headings=args.group_headings)
+          strategy=args.strategy, group_headings=args.group_headings,
+          exclude_paths=args.exclude)
 
     if declared:
         # Appended to the run's own documents list rather than kept in a second

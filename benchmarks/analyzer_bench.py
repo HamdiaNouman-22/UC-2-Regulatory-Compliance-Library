@@ -284,12 +284,16 @@ def estimate_cost(prompt_tokens, completion_tokens):
 def label_for_prompt(prompt: str, index: int) -> str:
     """Infer the stage from the prompt itself.
 
-    Stage 3 now shards and stage 4 runs concurrently, so call order no longer
+    Stage 1 and stage 3 now both shard (one call per document chunk / per
+    requirement group) and stage 4 runs concurrently, so call order no longer
     maps onto stage number -- labelling by index mislabels every call after the
-    second.
+    second. Sharded calls all match the same phrase and get grouped under one
+    stage name with a "#N" suffix by the seen_counts logic in run().
     """
     p = prompt or ""
     if "Extract structured requirements" in p:
+        return "stage1_extract"
+    if "Extract atomic obligations from the excerpt" in p:
         return "stage1_extract"
     if "refining previously extracted" in p:
         return "stage2_normalize"

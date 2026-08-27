@@ -1,0 +1,275 @@
+# RERA — Real Estate Regulatory Authority, Bahrain
+#
+# ---------------------------------------------------------------------------
+# HOW RERA PUBLISHES, MEASURED 2026-08-19
+# ---------------------------------------------------------------------------
+# A plain server-rendered site. No API, no feed, no changelog, and no sitemap
+# lastmod. Verified: rendering /en/regulations makes exactly ONE json call and it
+# is a feedback widget; there is no __NEXT_DATA__, no __NUXT__, no graphql.
+#
+# A new regulation appears in two steps:
+#
+#   1. the PDF is uploaded to their CMS, which stores it on CloudFront at
+#        d3rsft5ep764nm.cloudfront.net/reracms/uploads/cms-medias/<YYYY>/<MM>/<md5>.pdf
+#      so the path carries the UPLOAD month and the filename is a content hash
+#   2. it is linked from a server-rendered page under /en/regulations/...
+#
+# CIRCULARS ARE PARTITIONED BY YEAR, AND A NEW YEAR IS A NEW PAGE:
+#
+#     /en/regulations/circulars/circulars-issued-in-2019    25 documents
+#     /en/regulations/circulars/circulars-issued-in-2020    25
+#     /en/regulations/circulars/circulars-issued-in-2021    13
+#     /en/regulations/circulars/circulars-issued-in-2022    13
+#     /en/regulations/circulars/circulars-issued-in-2023     8
+#     /en/regulations/circulars/Circulars-issued-in-2024     2
+#     /en/regulations/circulars/Circulars-issued-in-2025     2
+#     /en/regulations/circulars/Circulars-issued-in-2026     404 — does not exist yet
+#
+# The falling counts are real, not a short crawl: fetched each page directly and
+# 2025 and 2024 genuinely hold two CDN documents each while 2020 holds 25.
+#
+# NOTE THE CASE INCONSISTENCY. RERA writes `circulars-issued-in-2020` in lower
+# case and `Circulars-issued-in-2024` capitalised. Anything that PREDICTS the next
+# year's url must try both spellings, or it will conclude a page is missing when
+# it is only cased differently.
+#
+# THIS IS WHY THE CIRCULARS SOURCE IS SEEDED AT THE PARENT, not per year. `prefix`
+# scope on /en/regulations/circulars walks every year page it finds, so the 2026
+# page is picked up the first time it exists with no config change. Splitting per
+# year would need an edit every January, and the January nobody remembers is the
+# January the new circulars go missing.
+#
+# ---------------------------------------------------------------------------
+# WHY MONITORING IS THE CRAWL AND NOT A PROBE — even though a probe would work
+# ---------------------------------------------------------------------------
+# The documents answer a probe better than almost any source we hold. MEASURED
+# over all 121 stored CloudFront urls:
+#
+#     117  HTTP 200, and ALL 117 return BOTH an ETag and a Last-Modified
+#       4  HTTP 403 AccessDenied — dead objects, see below
+#
+# and the tokens are real, not a clock: eight urls fetched twice 0.4s apart came
+# back 8/8 IDENTICAL. That is what earns `confirm: false` here, unlike ZATCA and
+# CMA where the token moves on every request.
+#
+# But a probe answers the wrong question for RERA. It re-reads urls we already
+# store, so it can only ever report that an existing PDF was silently replaced —
+# and what actually happens here is that a NEW circular appears at a NEW url, on a
+# page that may itself be new. A probe cannot see either. Since RERA published
+# only two circulars in 2025, the modification case a probe covers is close to
+# hypothetical while the discovery case a probe cannot cover is the whole point.
+#
+# So: `signal: crawl`, weekly. See config/change_signals.yml for the numbers, and
+# note that a deliberate stored-inventory run is still worth doing occasionally —
+# it is the only thing that would catch a silent replacement.
+#
+# ---------------------------------------------------------------------------
+# TWO THINGS THAT WILL BITE WHOEVER RUNS THE SWEEP
+# ---------------------------------------------------------------------------
+# 1. www.rera.gov.bh SERVES AN INCOMPLETE CERTIFICATE CHAIN. It omits the
+#    intermediate CA, which browsers tolerate and python does not:
+#      requests.get(...)                -> SSLError, CERTIFICATE_VERIFY_FAILED,
+#                                          "unable to get local issuer certificate"
+#      requests.get(..., verify=False)  -> 200, 206 KB
+#    The CRAWL is unaffected — Playwright is launched with ignore_https_errors —
+#    but any plain-HTTP probe of a rera.gov.bh url fails. Only 2 of 123 documents
+#    are hosted there; the other 121 are on CloudFront, whose chain is fine. Do
+#    NOT "fix" this by disabling verification globally in the sweep.
+#
+# 2. FOUR STORED URLS ARE DEAD (403 AccessDenied from CloudFront, in a browser as
+#    well as a plain client). That is a library problem, not a sweep one — the
+#    same call MHRSD's 63rd document got: the sweep reports it and stops.
+#
+# ---------------------------------------------------------------------------
+# IDENTITY IS THE DEFAULT, AND IT HAS A KNOWN WEAKNESS
+# ---------------------------------------------------------------------------
+# Unlike CBE there is no publisher id to key on — no GUID, no reference number
+# exposed per document. So identity stays (document_url, doc_path, title), and the
+# consequence must be stated rather than discovered later: because the CDN
+# filename is a content hash, a re-uploaded document arrives at a NEW url and
+# reads as one `new` document plus one `disappeared`, not as `modified`.
+#
+# It is worse for the rows whose title is also the hash. `best_doc_title` falls
+# through to the url slug when the anchor text is generic, so some documents are
+# stored as e.g. "Ead1A6E678Ba3F8458Ca04478B2Cdf7A" — for those, two of the three
+# identity fields carry no meaning. Fixing the titles is a crawler-side job and
+# would make this identity sound; until then, expect re-uploads to churn.
+#
+# ---------------------------------------------------------------------------
+# WHY EVERY SOURCE PINS strategy: generic
+# ---------------------------------------------------------------------------
+# MEASURED 2026-08-19, shape auto-detection over these eight seeds:
+#   Resolutions   -> list       <-- WRONG
+#   the other 7   -> generic
+#
+# crawl_list() on the resolutions page returns 4 of its 33 documents and reports
+# a clean run. That is why splitting this regulator into per-section sources
+# changed the count: the original crawl seeded /en/regulations, which detects as
+# `generic`, so the BFS walked resolutions correctly as a child page.
+#
+# Pinned on ALL EIGHT rather than only the broken one, because the failure is
+# SILENT and nothing here is a tree or a DataTable. Leaving seven on `auto` means
+# any of them can flip to `list` after a site tweak and quietly start returning a
+# fraction of its documents, with `status: ok`. There is no upside to auto here:
+# the generic BFS is the walker that works on every one of these pages today.
+#
+# ---------------------------------------------------------------------------
+# NAMES COME FROM RERA, NOT FROM US  (corrected 2026-08-20)
+# ---------------------------------------------------------------------------
+# The first version of this file invented a source called "Overview" for the
+# landing page. RERA has no such section -- the page is titled "Regulations", and
+# searching the live site for "overview" returns nothing. Two other labels were
+# paraphrases rather than the site's words.
+#
+# source_system is an IDENTITY key (see the header of config/change_signals.yml),
+# and it also becomes a folder in doc_path, so an invented label puts a section in
+# the library that the regulator does not have. It is free to fix now and a
+# migration once a baseline is promoted -- MHRSD needed reconciling twice for
+# exactly this, and MISA's source_system was changed to "Laws" purely to match
+# the site's own tab.
+#
+# Every name below is now the page's own <h1>, verbatim, including RERA's
+# capitalisation of "RERA Law And Decrees". Faithful and checkable beats tidier
+# and invented.
+#
+# ANY RENAME HERE MUST MOVE WITH config/change_signals.yml, whose RERA entry is
+# looked up by (regulator, source_system). If the two drift, the sweep and the
+# ingest path keep separate memories of the same documents.
+#
+# ---------------------------------------------------------------------------
+# TWO SITE-WIDE PDFs ARE EXCLUDED
+# ---------------------------------------------------------------------------
+# MEASURED 2026-08-20 on the first workbook: Vision2030Englishlowresolution.pdf
+# and the Cloud First Policy pdf appear on ALL EIGHT legislation pages, so they
+# occupied 16 of 150 rows -- two documents, eight times each. Neither is a real
+# estate regulation: one is Bahrain's national economic vision, the other a
+# government IT policy.
+#
+# The chrome rule cannot catch them. JS_LINKS marks a link `chrome` only inside
+# <header>/<footer>, deliberately, so that a genuine in-page sidebar survives --
+# and these are linked from the page body. `check` passed them because they differ
+# by doc_path, which is the "shape, not sense" gap ONBOARDING describes.
+exclude_documents:
+  - "Vision2030Englishlowresolution.pdf"
+  - "ead1a6e678ba3f8458ca04478b2cdf7a.pdf"
+#
+# ---------------------------------------------------------------------------
+# doc_path_sections: false  -- RERA'S BREADCRUMB STILL NAMES THE PARENT
+# ---------------------------------------------------------------------------
+# UPDATED 2026-08-21. RERA's current crumb is a non-link <li class="active">, so
+# until today the crawler read anchors only and section_path was "Home >
+# Regulations" for ALL 15 pages -- every page filed under its parent. The
+# breadcrumb_current fix for www.rera.gov.bh in generic_crawler/crawler.py makes
+# it "Home > Regulations > Circulars issued in 2020" and so on.
+#
+# THAT DOES NOT CHANGE THE VERDICT HERE, because the crumb still leads with the
+# PARENT. With sections on, _doc_path would build (Home is dropped as a
+# non-subject crumb, the repeated section as a duplicate):
+#
+#   with sections     RERA | RERA Law And Decrees | Regulations | <title>
+#   as configured     RERA | RERA Law And Decrees | <title>
+#
+# The site's hierarchy is Regulations -> Laws and Decrees, so the first form still
+# puts a folder called Regulations INSIDE each section. That is the "a folder is
+# upside down" case ONBOARDING says only a person can see -- `check` passed it
+# happily. The section is already named by source_system, so the crumb adds
+# nothing.
+#
+# WHAT IS GENUINELY LOST BY THIS, AND WHY IT IS ACCEPTED: the circulars year is
+# now available (7 year pages, each its own crumb) and this setting discards it,
+# so all 79 circulars land in one flat "RERA Circulars and Instructions" folder.
+# No titles collide, the year is in each circular's own title, and doc_path is an
+# IDENTITY field -- turning sections on would restate every RERA row as new plus
+# disappeared. Revisit only alongside a deliberate identity migration.
+doc_path_sections: false
+
+regulator: "Real Estate Regulatory Authority (RERA)"
+owner: lead
+
+sources:
+  # The landing page's own two documents, and nothing below it. max_depth: 0 stops
+  # the walk at the seed so this source does not duplicate the seven below.
+  - name: "Regulations"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations"
+    scope: prefix
+    strategy: generic
+    source_system: "Regulations"
+    category: "Regulations"
+    max_pages: 5
+    max_depth: 0
+
+  - name: "RERA Law And Decrees"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/laws-and-decrees"
+    scope: prefix
+    strategy: generic
+    source_system: "Regulations"
+    category: "RERA Law And Decrees"
+    max_pages: 40
+    max_depth: 6
+
+  # 33 documents, the largest single page.
+  - name: "Resolutions"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/resolutions"
+    scope: prefix
+    strategy: generic
+    source_system: "Regulations"
+    category: "Resolutions"
+    max_pages: 40
+    max_depth: 6
+
+  # Seeded at the PARENT on purpose — see the year-partition note above. The cap
+  # allows for one new year page per year for a long time.
+  - name: "RERA Circulars and Instructions"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/circulars"
+    scope: prefix
+    strategy: generic
+    source_system: "Regulations"
+    category: "RERA Circulars and Instructions"
+    max_pages: 60
+    max_depth: 6
+
+  - name: "RERA Code of Conduct"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/rera-code-of-conduct"
+    scope: prefix
+    strategy: generic
+    source_system: "Regulations"
+    category: "RERA Code of Conduct"
+    max_pages: 20
+    max_depth: 4
+
+  - name: "National Real Estate Plan"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/national-real-estate-plan"
+    scope: prefix
+    strategy: generic
+    source_system: "Regulations"
+    category: "National Real Estate Plan"
+    max_pages: 20
+    max_depth: 4
+
+  # RERA capitalises this path. Kept verbatim: a lower-cased seed is a different
+  # url to a case-sensitive server, and prefix scope compares paths as given.
+  - name: "Real Estate Advertising Guidelines"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/Real-Estate-Advertising-Guidelines"
+    scope: prefix
+    strategy: generic
+    source_system: "Regulations"
+    category: "Real Estate Advertising Guidelines"
+    max_pages: 20
+    max_depth: 4
+
+  - name: "Regulation Templates"
+    mode: generic
+    seed_url: "https://www.rera.gov.bh/en/regulations/regulation-templates"
+    scope: prefix
+    strategy: generic
+    source_system: "Regulations"
+    category: "Regulation Templates"
+    max_pages: 20
+    max_depth: 4

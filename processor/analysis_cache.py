@@ -51,6 +51,18 @@ HASH_KEY = "analysis_input_hash"
 MODEL_KEY = "analysis_model"
 STAMP_KEY = "analysis_hashed_at"
 
+# Requirement matching gets its OWN hash, because its input is not the document.
+#
+# Analysis reads the document text. Matching reads (a) the obligations analysis
+# produced and (b) the internal register it compares them against. Those move
+# independently: a requirement added to the register can legitimately change a
+# verdict from `new` to `partially_matched` on a document whose text never
+# changed. Keying matching on the document text would cache that away and the
+# library would keep a verdict it should have revised.
+MATCH_HASH_KEY = "matching_input_hash"
+MATCH_MODEL_KEY = "matching_model"
+MATCH_STAMP_KEY = "matching_hashed_at"
+
 
 def compute_input_hash(clean_text: str, model: str) -> str:
     """Fingerprint of exactly what the pipeline will send to the LLM."""
@@ -104,6 +116,91 @@ def decide(
     if previous != input_hash:
         return True, input_hash, "document text changed since last analysis"
     return False, input_hash, "input unchanged; reused stored analysis"
+
+
+# --------------------------------------------------------------------------- #
+#  requirement matching                                                        #
+# --------------------------------------------------------------------------- #
+
+def corpus_fingerprint(*collections) -> str:
+    """A hash of the internal register the matcher compares against.
+
+    Built from each item's id and title, SORTED, so it is stable against the
+    order a SELECT happens to return and moves only when the register's contents
+    move. Included in the matching key so that adding a requirement re-opens the
+    verdicts it could affect -- which is the whole point of a register.
+
+    Descriptions are deliberately excluded: they are long, they get copy-edited,
+    and a typo fix in one description should not force every regulation in the
+    library to be re-matched.
+    """
+    h = hashlib.sha256()
+    for coll in collections:
+        parts = sorted(
+            f"{item.get('id')}\x1f{(item.get('title') or '').strip()}"
+            for item in (coll or [])
+        )
+        h.update("\x1e".join(parts).encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def compute_match_hash(obligation_texts, corpus_hash: str, model: str) -> str:
+    """Fingerprint of everything the matcher's verdicts depend on."""
+    h = hashlib.sha256()
+    h.update((model or "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update((corpus_hash or "").encode("utf-8"))
+    h.update(b"\x00")
+    # Sorted: the matcher decides each obligation independently, so the order the
+    # analyzer happened to emit them in is not part of the input.
+    for t in sorted((t or "").strip() for t in (obligation_texts or [])):
+        h.update(t.encode("utf-8"))
+        h.update(b"\x1e")
+    return h.hexdigest()
+
+
+def decide_matching(
+    extra_meta: Any,
+    obligation_texts,
+    corpus_hash: str,
+    model: str,
+    has_existing_rows: bool,
+    force: bool,
+) -> Tuple[bool, str, str]:
+    """Should requirement matching be re-run? Same contract as `decide`.
+
+    Matching disagrees with itself on roughly 2-3 of every 39 obligations, and
+    determinism settings do not help because the disagreements are genuine ties
+    rather than sampling noise (docs/determinism.md). Deciding once and keeping
+    the answer is the only way the stored verdicts stay stable.
+    """
+    match_hash = compute_match_hash(obligation_texts, corpus_hash, model)
+    previous = as_dict(extra_meta).get(MATCH_HASH_KEY)
+
+    if force:
+        return True, match_hash, "force=true requested"
+    if not has_existing_rows:
+        return True, match_hash, "no existing mappings"
+    if not previous:
+        return False, match_hash, "existing mappings predate the cache; hash recorded"
+    if previous != match_hash:
+        return True, match_hash, "obligations or internal register changed since last matching"
+    return False, match_hash, "input unchanged; reused stored mappings"
+
+
+def record_matching(repo, regulation_id: int, extra_meta: Any,
+                    match_hash: str, model: str) -> None:
+    """Persist the matching hash. Never raises, for the same reason as `record`."""
+    try:
+        meta = as_dict(extra_meta)
+        meta[MATCH_HASH_KEY] = match_hash
+        meta[MATCH_MODEL_KEY] = model
+        meta[MATCH_STAMP_KEY] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        repo.update_regulation(regulation_id, extra_meta=json.dumps(meta, ensure_ascii=False))
+        logger.info(f"Matching hash recorded for regulation {regulation_id}: {match_hash[:12]}")
+    except Exception as e:
+        logger.error(f"Could not record matching hash for regulation {regulation_id}: {e}")
 
 
 def record(repo, regulation_id: int, extra_meta: Any, input_hash: str, model: str) -> None:
