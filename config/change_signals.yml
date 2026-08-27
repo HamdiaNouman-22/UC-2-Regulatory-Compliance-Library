@@ -341,104 +341,139 @@ sources:
     signal: crawl
     confirm: true
 
-  # MLCU (EGYPT) — `crawl` IS A MEASURED CONCLUSION HERE, NOT A DEFAULT.
+  # MLCU (EGYPT) - `crawl` IS A MEASURED CONCLUSION, NOT A DEFAULT.
   #
-  # Every cheaper candidate was tested and ruled out. MEASURED 2026-08-17:
+  # MEASURED 2026-08-17:
+  #   ETag / Last-Modified   ABSENT on every response, section pages and PDFs
+  #                          alike - `stored-inventory` has no token to read.
+  #   sitemap.xml            190 urls, NO <lastmod> on any - `sitemap` cannot work.
+  #   news page 3145 as feed RULED OUT, and worth recording because it looks
+  #                          promising until you fetch it: 0 document links, 0
+  #                          dates, 0 four-digit years, no pagination, no
+  #                          ordering by id, and all 15 items titled "read more"
+  #                          (اقرا المزيد). It could only ever say "a news post
+  #                          appeared" - over-firing on FATF notices and SILENT
+  #                          when a PDF is replaced in place. Silence is the
+  #                          direction that loses a regulation.
+  #   raw body sha256        MOVES ON EVERY FETCH - 3 hashes in 3 seconds, from
+  #                          ASP.NET __VIEWSTATE regenerated per render.
+  #   visible text sha256    STABLE across those same 3 (ff2617829798322d).
   #
-  #   ETag / Last-Modified   ABSENT on every response — section pages and PDFs
-  #                          alike. So `stored-inventory` has no token to read.
-  #   sitemap.xml            190 urls and NO <lastmod> on any of them, so
-  #                          `signal: sitemap` cannot work either.
-  #   3145 اخبار as a feed   RULED OUT, and this is the one worth recording
-  #                          because it looks promising until you fetch it. The
-  #                          page carries 0 links to documents, 0 date-shaped
-  #                          strings, 0 four-digit years, no pagination and no
-  #                          ordering by id. Its 15 news items are ALL titled
-  #                          "اقرا المزيد" ("read more"); nearly every other
-  #                          link on it is the site navigation menu. A feed
-  #                          signal needs dates or instrument links to be worth
-  #                          anything, and it has neither — so it could only
-  #                          ever say "a news post appeared", which over-fires
-  #                          on events and FATF notices and stays SILENT when a
-  #                          PDF is replaced in place. Silence is the direction
-  #                          that loses a regulation.
-  #   raw body sha256        MOVES ON EVERY FETCH — three different hashes in
-  #                          three seconds. Cause found: ASP.NET __VIEWSTATE,
-  #                          regenerated per render.
-  #   visible text sha256    STABLE across those same three fetches
-  #                          (ff2617829798322d).
+  # A probe would save little anyway: 5 section pages plus 24 PDFs.
   #
-  # The crawl is also small enough that a probe would save almost nothing: five
-  # section pages plus 24 PDFs.
+  # `confirm: true` is recorded, not exercised - no probe runs under `crawl`. If
+  # anyone runs `--signal stored-inventory` here it MUST hash visible text: the
+  # raw body would reproduce the CMA pathology of 1,134 false changes.
   #
-  # `confirm: true` is recorded rather than exercised. No probe runs under
-  # `signal: crawl`. But if anyone ever runs a deliberate `--signal
-  # stored-inventory --limit N` against a slice here, the two measurements above
-  # say it MUST hash visible text — the raw body would report every document as
-  # changed on every run, which is exactly the CMA pathology that produced 1,134
-  # false changes.
-  #
-  # IDENTITY IS NOT THE DEFAULT, and it has to match the crawl's.
-  # config/sources/mlcu.yml sets `identity: [doc_path, title]` because 3144
-  # already holds a `_v2` filename and a `_v3` re-upload moves document_url. If
-  # monitoring keyed on the default the sweep and the orchestrator would build
-  # different keys, and no withdrawal could ever accumulate — silently, which is
-  # how that fault behaved for a whole day on 2026-08-16.
+  # IDENTITY IS NOT THE DEFAULT and must match the crawl's.
+  # config/sources/mlcu.yml sets `identity: [doc_path, title]` because 3144 holds
+  # a `_v2` filename and a `_v3` re-upload moves document_url. Keyed differently,
+  # the sweep and the orchestrator build different keys and no withdrawal can
+  # accumulate - silently, as it did for a whole day on 2026-08-16.
   - regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
     source_system: "Legislative and Supervisory Framework"
     signal: crawl
     confirm: true
     identity: [doc_path, title]
 
-  # EDB (BAHRAIN) — `crawl` IS A MEASURED CONCLUSION HERE TOO, NOT A DEFAULT.
+  # EDB (BAHRAIN) - `crawl` IS A MEASURED CONCLUSION HERE TOO.
   #
-  # bahrainbusinesslaws.com, October CMS on Laravel. A law is an HTML PAGE, not
-  # a file — there are no PDFs anywhere on this site. MEASURED 2026-08-19:
+  # October CMS on Laravel. A law is an HTML PAGE - no PDFs on this site at all.
+  # MEASURED 2026-08-19:
+  #   ETag / Last-Modified   ABSENT on every response, section and law pages
+  #                          alike - `stored-inventory` has no token to read.
+  #   conditional GET        If-Modified-Since answered 200 + the full 95,389-byte
+  #                          body. No 304 support.
+  #   robots.txt / sitemap   both 404 - so `sitemap` cannot work either.
+  #   HEAD                   returns NO Content-Length. It conveys nothing here.
+  #   a publisher feed       NONE. /search-result has no dates and no ordering.
+  #   /all-laws/all-laws     names all 64 in one request, so it catches a law
+  #                          ADDED, REMOVED or RENAMED - but it is BYTE-IDENTICAL
+  #                          when Article 12 is edited in place, and it carries no
+  #                          category so it cannot build doc_path. A companion to
+  #                          the crawl, never a replacement.
+  #   raw body sha256        STABLE - 3 fetches byte-identical. The OPPOSITE of
+  #                          MLCU: no __VIEWSTATE, no nonce; the edb_session
+  #                          cookie is a HEADER and cannot move a body hash.
+  #   visible text sha256    STABLE across those same 3.
   #
-  #   ETag / Last-Modified   ABSENT on every response, section pages and law
-  #                          pages alike. `stored-inventory` has no token to read.
-  #   HEAD                   returns NO Content-Length at all. A HEAD conveys
-  #                          literally nothing here.
-  #   conditional GET        If-Modified-Since answered 200 + the full
-  #                          95,389-byte body. NO 304 support.
-  #   robots.txt             404.
-  #   sitemap.xml            404 — so `signal: sitemap` cannot work either.
-  #   a publisher feed       NONE EXISTS. /search-result is a query form with no
-  #                          dates and no ordering, so it cannot say what moved.
-  #   /all-laws/all-laws     the index of all 64. Detects a law ADDED, REMOVED or
-  #                          RENAMED in one request — but it is BYTE-IDENTICAL
-  #                          when Article 12 of a law is edited in place. Silence
-  #                          on in-place amendment is the direction that loses a
-  #                          regulation, so this is a companion to the crawl,
-  #                          never a replacement. It also cannot supply the
-  #                          category, so it cannot build doc_path.
-  #   raw body sha256        STABLE — three fetches, byte-identical. This is the
-  #                          OPPOSITE of MLCU: no __VIEWSTATE, no CSRF meta, no
-  #                          nonce. The edb_session cookie rotates but it is a
-  #                          HEADER, so it cannot move a body hash.
-  #   visible text sha256    STABLE across those same three fetches.
+  # So BOTH bases work and text is a CHOICE: raw HTML moves whenever EDB redeploys
+  # a template, reporting all 64 laws modified for a footer change. A probe would
+  # also buy nothing - with no ETag it must fetch and hash all 64 law pages
+  # against the crawl's 72, and it CANNOT DISCOVER A NEW LAW.
   #
-  # So BOTH bases work here and text is a CHOICE, not a necessity: raw HTML moves
-  # whenever EDB redeploys a template, which would report all 64 laws modified
-  # for a footer change. config/sources/edb.yml carries the same reasoning.
-  #
-  # A probe would also buy nothing. With no ETag to trust, a confirming
-  # stored-inventory probe must fetch and hash all 64 law pages; the full crawl
-  # is 8 category pages + 64 law pages = 72. The probe costs 64 to the crawl's 72
-  # and CANNOT DISCOVER A NEW LAW.
-  #
-  # `confirm: true` is recorded rather than exercised — no probe runs under
-  # `signal: crawl`. It matters only if someone runs a deliberate `--signal
-  # stored-inventory --limit N` against a slice, and then the two measurements
-  # above say it must hash VISIBLE TEXT.
-  #
-  # IDENTITY IS THE DEFAULT, and there is deliberately NO `identity:` line here.
-  # Measured across all 64: no duplicate document_url, title or content_hash, and
-  # no slug carries a version suffix — nothing behaves like MLCU's `_v2`. Leaving
-  # it out means the sweep and the orchestrator CANNOT build different keys,
-  # which removes that hazard rather than documenting it.
+  # `confirm: true` is recorded, not exercised; if ever run it must hash text.
+  # IDENTITY IS THE DEFAULT: measured across all 64, no duplicate document_url,
+  # title or content_hash and no version suffix in any slug.
   - regulator: "Bahrain Economic Development Board (EDB)"
     source_system: "Bahrain Business Laws"
+    signal: crawl
+    confirm: true
+
+  # MLSD (BAHRAIN) - `crawl`, AND THE MEASUREMENT THAT DECIDED IT IS UNUSUAL.
+  #
+  # One page, 30 rows, 28 of them Arabic PDFs behind `download.php?...&id=<32
+  # hex>`. MEASURED 2026-08-20:
+  #   ETag / Last-Modified   ABSENT on the listing AND on all 28 PDFs.
+  #   Content-Length         PRESENT on every PDF - the only per-document token
+  #                          this host offers, AND STILL NOT USABLE:
+  #                          dynamic_crawler/fingerprint.py reads ETag then
+  #                          Last-Modified and returns BASIS_NONE otherwise, so a
+  #                          sweep would compare "" against "" and report zero
+  #                          changes FOREVER - which reads like a quiet regulator.
+  #                          Reading it means changing the one shared token
+  #                          definition, which is a change to every source in this
+  #                          file, so it is recorded here and not done here.
+  #   robots.txt / sitemap   both 404.
+  #   a publisher feed       NONE. News and infographics say no law moved.
+  #   listing body sha256    STABLE - 3 fetches byte-identical (3d9b79a1c0e55c95).
+  #   the `id` values        STABLE across fetches AND across a fresh session with
+  #                          a new PHPSESSID, so identity holds.
+  #
+  # The crawl is 31 requests and it DISCOVERS A NEW LAW, which no probe can.
+  #
+  # `confirm: true` is recorded, not exercised; these are FILES, so confirm would
+  # hash their bytes, which is the right basis for a PDF.
+  # IDENTITY IS THE DEFAULT: 30 rows, 30 distinct urls. Titles are stored in
+  # ENGLISH and only 29 are distinct - the ministry's translation drops "amending
+  # some provisions of" and collapses two distinct resolutions onto one title.
+  # document_url separates them, and the Arabic name is kept per row as
+  # extra_meta["title_ar"] so a person can tell them apart.
+  - regulator: "Ministry of Labour and Social Development (MLSD)"
+    source_system: "Legislation and Regulations"
+    signal: crawl
+    confirm: true
+
+  # LMRA (BAHRAIN) - `crawl` IS A MEASURED CONCLUSION.
+  #
+  # An instrument is normally an HTML PAGE carrying its own full text.
+  # MEASURED 2026-08-20:
+  #   ETag                   ABSENT everywhere.
+  #   Last-Modified          ABSENT on every DYNAMIC page; PRESENT on the static
+  #                          files under /files/cms/. Only 3 of the 46 documents
+  #                          draw text from such a file, so it cannot carry a
+  #                          probe - it is kept per row as pdf_last_modified.
+  #   robots.txt / sitemap   both 404. /en/page/show/446 is a human sitemap page,
+  #                          not XML with lastmod.
+  #   a publisher feed       NONE that says what CHANGED. The listings badge a
+  #                          POSTING date, not the instrument's - Resolution
+  #                          1/2014 is badged 29-03-2026.
+  #   raw body sha256        STABLE - 3 fetches each of a listing, an instrument
+  #                          and an article page, all byte-identical.
+  #   `#page_content` text   STABLE across those same 3.
+  #
+  # The crawl is 97 requests; a probe would cost 46 and could not discover a new
+  # decree.
+  #
+  # THE FINGERPRINT IS SCOPED TO `#page_content` because every page carries a
+  # service-outage modal WITH DATES IN IT outside that block - a whole-body hash
+  # would move all 46 fingerprints the next time LMRA scheduled maintenance.
+  # `confirm: true` on the same reasoning: these are server-rendered pages, so a
+  # confirming probe must hash VISIBLE TEXT, which `confirm` already does for HTML.
+  # IDENTITY IS THE DEFAULT: across all 46, no duplicate document_url, doc_path or
+  # title, and no url carries a version suffix.
+  - regulator: "Labour Market Regulatory Authority (LMRA)"
+    source_system: "LMRA Legislations"
     signal: crawl
     confirm: true
 

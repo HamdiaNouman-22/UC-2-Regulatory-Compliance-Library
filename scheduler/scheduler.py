@@ -248,8 +248,8 @@ def load_scheduler_config():
 # The KSA monitoring jobs. Imported lazily inside the mapping build so a broken
 # import here cannot stop the existing SBP/SECP jobs from being scheduled.
 from jobs.monitor_jobs import (monitor_cheap_probes, monitor_cma,  # noqa: E402
-                               monitor_edb, monitor_mc, monitor_mlcu,
-                               monitor_sama)
+                               monitor_edb, monitor_lmra, monitor_mc,
+                               monitor_mlcu, monitor_mlsd, monitor_sama)
 
 DIRECT_JOB_MAPPING = {
     "sbp_pipeline": run_sbp_pipeline,
@@ -271,6 +271,8 @@ DIRECT_JOB_MAPPING = {
     "monitor_cma": monitor_cma,
     "monitor_mlcu": monitor_mlcu,
     "monitor_edb": monitor_edb,
+    "monitor_mlsd": monitor_mlsd,
+    "monitor_lmra": monitor_lmra,
 }
 
 API_JOB_MAPPING = {

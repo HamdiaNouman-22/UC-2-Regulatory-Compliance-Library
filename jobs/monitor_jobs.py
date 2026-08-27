@@ -33,6 +33,17 @@ and how expensively it can be checked.
                                     but is byte-identical on an in-place
                                     amendment, so it cannot replace the crawl.
                                     SHIPPED DISABLED, same reason as MLCU.
+    monitor_mlsd           weekly   Bahrain, 31 requests. One page, 30 rows, 28
+                                    of them Arabic PDFs. No ETag or
+                                    Last-Modified anywhere; Content-Length is
+                                    returned but the shared token reader does not
+                                    read it, so a probe would report zero changes
+                                    forever. SHIPPED DISABLED, same reason.
+    monitor_lmra           weekly   Bahrain, 97 requests. 44 instrument pages
+                                    that carry their own full text, plus the 47
+                                    article sub-pages that make up LMRA Law —
+                                    walked so an article amended in place moves
+                                    the law's fingerprint. SHIPPED DISABLED.
 
 WHERE THE ROWS GO
 
@@ -197,6 +208,17 @@ CRAWL_AS_SIGNAL = {
     #: a conditional GET, and a HEAD that returns no Content-Length at all. Full
     #: measurements on the change_signals.yml entry.
     "Bahrain Economic Development Board (EDB)": ("edb", False),
+    #: MLSD joined 2026-08-20. No ETag or Last-Modified anywhere, no robots.txt
+    #: or sitemap (both 404). Content-Length IS returned on every PDF, but
+    #: `dynamic_crawler/fingerprint.py` reads only ETag then Last-Modified, so a
+    #: probe would report zero changes forever rather than none. Full
+    #: measurements on the change_signals.yml entry.
+    "Ministry of Labour and Social Development (MLSD)": ("mlsd", False),
+    #: LMRA joined 2026-08-20. No ETag; Last-Modified only on the static files
+    #: under /files/cms/, which back 3 of its 46 documents — not enough to carry
+    #: a probe. No robots.txt or sitemap (both 404), and the listings badge a
+    #: POSTING date, not the instrument's.
+    "Labour Market Regulatory Authority (LMRA)": ("lmra", False),
 }
 
 
@@ -475,6 +497,64 @@ def _monitor_edb_impl() -> dict:
         logger.warning("EDB inventory check did not run: %s", e)
 
     logger.info("EDB: %s", res)
+    return res
+
+
+def monitor_mlsd() -> dict:
+    """WEEKLY, AND OFF. The crawl is the signal — measurements on the
+    change_signals.yml entry.
+
+    LEAVE THE SCHEDULER SLOT DISABLED until a person has read the workbook: this
+    path writes straight to MSSQL, and MLSD has never been reviewed.
+    """
+    return _run_exclusive("monitor_mlsd", _monitor_mlsd_impl)
+
+
+def _monitor_mlsd_impl() -> dict:
+    # 31 requests: the listing read twice (Arabic, then English — the order is
+    # load-bearing) plus 29 document fetches. Most of the wall time is OCR, not
+    # network — 28 Arabic PDFs, seventeen of which need it on some or all pages.
+    res = _crawl_into_db("mlsd", False, timeout=5400)
+
+    # WHETHER ARABIC OCR WAS ACTUALLY AVAILABLE, recorded on the run rather than
+    # assumed. Without `ara`, nine of these PDFs return Latin transliteration
+    # noise at zero Arabic characters, which the crawler discards — so the run
+    # would write nine documents with no text and look otherwise normal. This job
+    # reaches OCR through `_repo()`, which loads `.env`, so the languages ARE
+    # configured here; the check is what proves it on the day that changes.
+    try:
+        from processor.Text_Extractor import OCRProcessor
+        langs = OCRProcessor.ocr_langs()
+        res["ocr_langs"] = langs
+        if "ara" not in langs.split("+"):
+            logger.error("MLSD crawled with ocr_langs=%r — 'ara' is missing, so "
+                         "scanned Arabic PDFs stored NO text. Fix the tesseract "
+                         "language setup in .env and re-run before approving any "
+                         "row.", langs)
+    except Exception as e:
+        res["ocr_langs"] = f"UNCHECKED: {e}"
+        logger.warning("MLSD OCR language check did not run: %s", e)
+
+    logger.info("MLSD: %s", res)
+    return res
+
+
+def monitor_lmra() -> dict:
+    """WEEKLY, AND OFF. The crawl is the signal — measurements on the
+    change_signals.yml entry.
+
+    LEAVE THE SCHEDULER SLOT DISABLED until a person has read the workbook: this
+    path writes straight to MSSQL, and LMRA has never been reviewed.
+    """
+    return _run_exclusive("monitor_lmra", _monitor_lmra_impl)
+
+
+def _monitor_lmra_impl() -> dict:
+    # 97 requests: 6 landing/listing pages, 44 instrument pages and the 47
+    # article sub-pages that make up LMRA Law, plus 2 PDF downloads. The article
+    # walk is what lets an article amended IN PLACE move the law's fingerprint.
+    res = _crawl_into_db("lmra", False, timeout=5400)
+    logger.info("LMRA: %s", res)
     return res
 
 

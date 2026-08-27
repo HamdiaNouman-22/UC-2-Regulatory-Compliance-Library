@@ -169,10 +169,6 @@ jobs:
   # workbook first; this path writes straight to MSSQL, so enabling it before
   # the review would make the first scheduled run be the ingest. Turn it on
   # after the workbook is approved and promoted, not before.
-  #
-  # Sunday 06:00 keeps it clear of monitor_mc (04:00) and monitor_cma (05:00) —
-  # all three take the same `_run_exclusive` lock, and an overlap is a SKIP, so
-  # a colliding slot would silently starve a job rather than fail.
   monitor_mlcu:
     enabled: false
     trigger: cron
@@ -187,16 +183,43 @@ jobs:
   # DISABLED BECAUSE NOBODY HAS READ ITS WORKBOOK YET. This path writes straight
   # to MSSQL, so enabling it before the review would make the first scheduled run
   # be the ingest. Turn it on after the workbook is approved and promoted.
-  #
-  # Sunday 07:00 keeps it clear of monitor_mc (04:00), monitor_cma (05:00) and
-  # monitor_mlcu (06:00): all four take the same `_run_exclusive` lock, and an
-  # overlap is a SKIP, so a collision starves a job rather than failing.
   monitor_edb:
     enabled: false
     trigger: cron
     schedule:
       day_of_week: 'sun'
       hour: 7
+      minute: 0
+
+  # MLSD (BAHRAIN) — 31 requests, but most of the wall time is OCR: 28 Arabic
+  # PDFs, seventeen of which need it on some or all pages. Every cheaper signal
+  # was measured and ruled out; see the change_signals.yml entry.
+  #
+  # DISABLED BECAUSE NOBODY HAS READ ITS WORKBOOK YET. This path writes straight
+  # to MSSQL, so enabling it before the review would make the first scheduled run
+  # be the ingest. Turn it on after the workbook is approved and promoted.
+  monitor_mlsd:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 8
+      minute: 0
+
+  # LMRA (BAHRAIN) — 97 requests: 6 landing/listing pages, 44 instrument pages
+  # and the 47 article sub-pages that make up LMRA Law. Almost all HTML, so it is
+  # network-bound rather than OCR-bound and runs far quicker than MLSD despite
+  # the larger request count.
+  #
+  # DISABLED BECAUSE NOBODY HAS READ ITS WORKBOOK YET. This path writes straight
+  # to MSSQL, so enabling it before the review would make the first scheduled run
+  # be the ingest. Turn it on after the workbook is approved and promoted.
+  monitor_lmra:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 9
       minute: 0
 
   # ----------------------------------------------------------
