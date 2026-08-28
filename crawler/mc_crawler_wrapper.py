@@ -222,10 +222,22 @@ class MCLawsCrawler:
             # Sort key above, and the join back to the on-disk part files.
             "law_slug": law_slug,
         }
-        if files:
+        # THE FILE RULE (lead, 2026-08-24): exactly one file -> document_url;
+        # more than one -> attachment_links with document_url empty. It counts
+        # FILES, and a page is not a file. This used to put the PAGE in
+        # document_url and the file(s) beside it in attachment_links, so 16 MC
+        # rows carried both -- see scripts/normalise_file_links.py, which
+        # migrated the stored rows to match this.
+        if len(files) == 1:
+            document_url = files[0]
+        elif len(files) > 1:
             extra["attachment_links"] = " | ".join(files)
+            document_url = ""
+        else:
+            document_url = page_url
 
-        document_url = page_url
+        # The page itself is still recorded, as the place the file came from.
+        extra.setdefault("found_on", page_url)
         file_type = "HTML"
         # The page's TEXT, not its HTML. Hashing markup makes every CMS deploy —
         # rotated build ids, cache-busting query strings, re-rendered widgets —

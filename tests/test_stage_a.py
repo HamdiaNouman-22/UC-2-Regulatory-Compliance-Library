@@ -181,7 +181,15 @@ def test_a1_second_run_is_a_no_op():
 # --------------------------------------------------------------------------- #
 
 def test_a2_mappings_clear_before_inserting():
-    """Insert-only was the bug: re-analysis appended a second full set."""
+    """Insert-only was the bug: re-analysis appended a second full set.
+
+    Asserted on the WRITE verbs only. `store_requirement_mappings` also probes
+    INFORMATION_SCHEMA once per process to see whether `match_confidence` exists
+    yet, so it can write the column after the migration and omit it before.
+    That read is not part of the clear-then-insert contract this test exists to
+    protect, and pinning it here would make the test fail the day the probe is
+    cached rather than repeated.
+    """
     cur = RecordingCursor()
     repo_with(cur).store_requirement_mappings([
         {"regulation_id": 42, "extracted_requirement_text": "a",
@@ -190,7 +198,8 @@ def test_a2_mappings_clear_before_inserting():
          "match_status": "new"},
     ], version_id=None)
 
-    assert cur.verbs == ["DELETE", "INSERT", "INSERT"]
+    writes = [v for v in cur.verbs if v in ("DELETE", "INSERT", "UPDATE")]
+    assert writes == ["DELETE", "INSERT", "INSERT"]
 
 
 def test_a2_null_version_uses_is_null_not_equals():

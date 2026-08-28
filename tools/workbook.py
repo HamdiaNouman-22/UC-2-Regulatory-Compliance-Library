@@ -49,6 +49,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Windows consoles default to cp1252 and this tool prints regulator titles --
+# MLCU's are entirely Arabic. Without this, `promote` finishes its work and then
+# dies with UnicodeEncodeError while printing the report, which reads as a failed
+# promote. The same trap cost a completed 600s CMA sweep a FAILED verdict; see
+# jobs/monitor_jobs.py::_run. generic_crawler/crawler.py does this at its top for
+# the same reason.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 logger = logging.getLogger("workbook")
 
 DEFAULT_DIR = PROJECT_ROOT / "output" / "workbooks"
@@ -77,7 +89,40 @@ def cmd_export(a) -> int:
     repo = ExcelRepo(out)
     orch = Orchestrator(crawler=crawler, repo=repo, downloader=Downloader(),
                         source_name=regulator, analyse=False, limit=a.limit)
-    report = orch.run_for_regulator(regulator) or {}
+    # SAVE WHAT WE HAVE, EVEN WHEN THE CRAWL DIES.
+    #
+    # MEASURED 2026-08-25: the uncapped CBB export ran 22 hours and produced
+    # NOTHING. `cbben.thomsonreuters.com` stopped resolving overnight
+    # ([Errno 11001] getaddrinfo failed -- the machine slept), the crawl raised,
+    # and because ExcelRepo buffers everything in memory and writes only on
+    # save(), every document collected before the network went away was lost
+    # with the process.
+    #
+    # The partial file is written under a DIFFERENT NAME on purpose. A partial
+    # inventory that looks like a finished one is the dangerous artefact: it
+    # would promote as though the regulator really had that many documents, and
+    # the missing rows would read as `disappeared` on the next full crawl.
+    # `.partial.xlsx` is not what `check`/`promote` are pointed at by the
+    # printed next-step, so using it takes a deliberate act.
+    try:
+        report = orch.run_for_regulator(regulator) or {}
+    except BaseException as exc:                    # KeyboardInterrupt included
+        partial = out.with_suffix(".partial.xlsx")
+        try:
+            repo.out_path = partial
+        except Exception:
+            pass
+        if hasattr(repo, "save"):
+            try:
+                repo.save()
+                print()
+                print(f"crawl FAILED: {type(exc).__name__}: {exc}")
+                print(f"partial workbook written: {partial}")
+                print("It is INCOMPLETE. Do not promote it -- re-run the export.")
+            except Exception as save_exc:
+                print()
+                print(f"crawl failed AND the partial save failed: {save_exc}")
+        raise
 
     # ExcelRepo accumulates in memory and writes on save(); without this the
     # process exits with a correct crawl and an empty file.
@@ -224,6 +269,25 @@ def cmd_check(a) -> int:
         warnings.append(f"{len(nofp)} of {len(rows)} row(s) have no "
                         f"content_hash -- each will classify `modified` on every "
                         f"run and write a version row each time")
+
+    # 8. the country -- a warning, not an error: the rows still land, they just
+    #    sit at the TREE ROOT instead of under their country, and nobody notices
+    #    that by looking at the documents. Caught here because `check` is the one
+    #    step a person always runs before a new regulator enters the library, so
+    #    it is the last honest moment to say "you have not declared where this
+    #    belongs". Adding it is one line in config/countries.yml.
+    try:
+        from utils.countries import country_for, CONFIG
+        unmapped = sorted({_flat(r.get("regulator")) for r in rows
+                           if _flat(r.get("regulator"))
+                           and not country_for(_flat(r.get("regulator")))})
+        for reg in unmapped:
+            warnings.append(
+                f"{reg!r} is not listed in {CONFIG.name} -- its folders will sit "
+                f"at the tree root instead of under a country. Add it under the "
+                f"right country, matching this name EXACTLY")
+    except Exception as e:                      # never let a warning break check
+        logger.debug("country check skipped: %s", e)
 
     report = {
         "workbook": str(path),

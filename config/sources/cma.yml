@@ -39,7 +39,16 @@
 # the same render-as-one-document path if ever added here, but are not
 # requested and so are not crawled.
 
-regulator: "CMA"
+# MUST MATCH `regulations.regulator` EXACTLY. This file used the bare
+# acronym while every stored row carries the full name, written by the
+# hand-written crawler / formfill form that actually produced them. The
+# value was dormant because no crawl had ever run through this config --
+# but `regulator` becomes doc_path[0], which is an identity field, so the
+# first run under the short name would have matched nothing, inserted the
+# whole regulator again as `new`, and left `disappeared` silent because it
+# scopes by regulator and would have found no rows under the short name.
+# Corrected 2026-08-20, before any such run.
+regulator: "Capital Market Authority (CMA)"
 owner: lead
 
 sources:

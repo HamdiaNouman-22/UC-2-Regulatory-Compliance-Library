@@ -1,0 +1,206 @@
+# LLOC — Legislation and Legal Opinion Commission, Bahrain
+#
+# ---------------------------------------------------------------------------
+# ONE SOURCE, AND IT IS NOT A CRAWL
+# ---------------------------------------------------------------------------
+# MEASURED 2026-08-21. A generic prefix crawl of the seed returned:
+#
+#   --seed https://www.lloc.gov.bh/Legislation/Latest --scope prefix
+#   -> 1 page, 58 characters of text, 12 documents, `status: ok`
+#
+# against 144 records the site declares on that very page. The four reasons are
+# written out in crawler/lloc_crawler.py; the one that cannot be fixed in the
+# generic crawler is that THERE IS NO URL FOR PAGE 2. The pager is a `<select>`
+# and a `<span onclick>` calling `fetchResult(...)`, which POSTs back to the same
+# url with an antiforgery token and swaps the results div. All 15 pages are
+# `/Legislation/Latest`.
+#
+# So this is `mode: custom`, the same call CBE's circulars needed — read what the
+# site's own JavaScript reads.
+#
+# ---------------------------------------------------------------------------
+# THE HOST THROTTLES, AND IT THROTTLES WITH 404
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE CHANGING ANY TIMING. After a burst, www.lloc.gov.bh answers
+# with a 1,245-byte IIS "404 - File or directory not found" and then starts
+# dropping connections outright. It recovers by itself within a minute.
+#
+# The danger is not the 404, it is that A 404 PARSES AS AN EMPTY PAGE. A first
+# pass stopped at 20 of 144 records and looked like a clean, complete run — the
+# same way CBE's crawl reported `status: ok` over 4.5% coverage. The crawler now
+# ends its walk ONLY on HTTP 200 with zero record blocks, retries a non-200 with
+# backoff and a fresh token, and refuses to return a count that does not match
+# the total the site prints above its own list.
+#
+# `request_delay` below is that protection. 15 requests at 2.5s is under a minute
+# for the whole section. Do not lower it to make a test faster.
+#
+# ---------------------------------------------------------------------------
+# WHAT "LATEST" IS, AND WHAT IT IS NOT
+# ---------------------------------------------------------------------------
+# `/Legislation/Latest` is a ROLLING WINDOW of 144 records, not the corpus. It is
+# the right thing to hold for monitoring — new Bahraini legislation appears here
+# first, with its Official Gazette number — but nobody should read it as "all
+# Bahraini legislation".
+#
+# The rest of the site, measured the same day:
+#
+#   /Legislation/Search             a FORM; returns nothing until submitted
+#   /Legislation/Category           legislation by classification
+#   /Legislation/Women              women-specific legislation
+#   /Legislation/WomenAppointments  women's appointments register
+#   /Legislation/English            "Results (2784 records found)"
+#   /LegalOpinion/Search            the Commission's legal opinions
+#
+# /Legislation/English is the same POST shape and is the BEST-STRUCTURED section
+# on the site: its `div.EnTitle` holds a real anchor whose text IS the title, its
+# dates and gazette numbers are already in English, and its files are `.docx`
+# under /FullEn/. `LLOCLatestCrawler` takes a `listing_path`, so adding it is a
+# source entry here — not a new module. It is 2,784 records / 279 requests, so it
+# is a deliberate decision rather than a freebie, and it is NOT enabled here.
+#
+# ---------------------------------------------------------------------------
+# IDENTITY IS THE DEFAULT, ON PURPOSE
+# ---------------------------------------------------------------------------
+# CBE needed `identity: [extra_meta.cbe_item_id]` because its urls embed the
+# publication date, so a re-issue lands at a new url and reads as one `new` plus
+# one `disappeared`. LLOC does not have that problem: the url carries the
+# instrument's own id — /PDF/O2726.pdf is Royal Order 27 of 2026, /PDF/D4126.pdf
+# is Decree 41 of 2026 — derived from type, number and year, none of which move
+# when a document is re-issued.
+#
+# So identity stays (document_url, doc_path, title). `lloc_legislation_id` is
+# carried in extra_meta anyway, so if that assumption ever breaks the migration
+# has its key ready without a re-crawl.
+#
+# ---------------------------------------------------------------------------
+# THE TITLES ARE ARABIC
+# ---------------------------------------------------------------------------
+# Every title in this section is Arabic, and the date is written with an Arabic
+# month name (`6-أغسطس-2026`). The crawler converts the date to ISO for
+# `published_date` and leaves the title exactly as published. Two consequences
+# worth stating before someone hits them:
+#
+#   * ANY console that prints these rows must be UTF-8. A cp1252 Windows console
+#     raises UnicodeEncodeError in `print` AFTER the read succeeded, which reads
+#     as a crawler failure and is not one.
+#   * `reference_no` is the Official Gazette number (e.g. 3898) — a real, citable
+#     reference the publisher assigns. It is not derived from anything.
+
+regulator: "Legislation and Legal Opinion Commission (LLOC)"
+owner: lead
+
+sources:
+  - name: "Latest Legislation"
+    mode: custom
+    crawler_class: "crawler.lloc_crawler.LLOCLatestCrawler"
+    init_kwargs:
+      source_system: "Latest Legislation"
+      listing_path: "/Legislation/Latest"
+      # See the throttle note above. This is protection, not politeness.
+      request_delay: 2.5
+
+  # ---- legislation by classification ------------------------------------- #
+  # ONE ENTRY, ~30 SOURCE SYSTEMS. LLOCCategoryCrawler reads
+  # /en/legislation/category, then runs the same paging machinery once per
+  # classification with the classification as its source_system — so each one
+  # gets its own folder and its own change signal from a single config line.
+  #
+  # THIS CANNOT BE A GENERIC PREFIX CRAWL, for two independent reasons, both
+  # measured 2026-08-25:
+  #
+  #   1. CASE. The menu links /en/Legislation/Category; the page's own children
+  #      are /en/legislation/category/<Name>. Both serve 200 (ASP.NET routing is
+  #      case-insensitive) but the crawler's scope test is a case-sensitive
+  #      startswith (generic_crawler/crawler.py:2620), so a prefix crawl seeded
+  #      at the menu url rejects every child, walks one page and reports
+  #      `status: ok`.
+  #   2. THE PAGER. Each classification renders 10 records behind the same
+  #      `fetchResult` select as /Legislation/Latest — Criminal Legislation
+  #      declares 17 and shows 10. There is no url for page 2.
+  #
+  # Budget two to three minutes: ~30 classifications, 1-2 pages each, at
+  # request_delay between every request.
+  - name: "Legislation By Classification"
+    mode: custom
+    crawler_class: "crawler.lloc_crawler.LLOCCategoryCrawler"
+    init_kwargs:
+      # Same protection as Latest, for the same host. Not politeness.
+      request_delay: 2.5
+      # For a cheap verification run, shortlist one classification:
+      #   only: ["Criminal Legislation"]
+      # Like `--limit`, such a run is a partial read and not coverage.
+
+  # ---- the two explanatory pages ----------------------------------------- #
+  # These are NARRATIVE pages, not listings. Measured 2026-08-25:
+  #   Legal instruments in Bahraini legislation      6,298 chars
+  #   Legislations within the reform project frame  20,915 chars
+  # No pager, no fetchResult. The PAGE IS THE DOCUMENT, which is why
+  # `include_pages: always` is stated rather than left to `auto` — auto happens
+  # to include them today because both clear MIN_PAGE_TEXT (200), and would
+  # silently yield zero documents if either page were ever trimmed.
+  #
+  # They are reachable ONLY from the mega-menu (ul.hidden.submenu inside
+  # div.mainNavigation), alongside About Us and Privacy Policy — not from any
+  # /en/Legislation page's content. So no scope rooted at Legislation can reach
+  # them and each needs its own seed. max_pages: 1 because the prefix is the
+  # page itself; nothing else on the site sits under it.
+  #
+  # doc_path_sections: false so the trail is [LLOC, <this page>] rather than
+  # [LLOC, <this page>, Legislation, <this page>] — the site's breadcrumb on
+  # these pages reads "Legislation > <title>", which repeats the source system.
+  #
+  # exclude_documents BECAUSE THESE PAGES CARRY SITE FURNITURE, corrected
+  # 2026-08-25. These two pages were first written up here as having "0 file
+  # links". That count came from inside `div.bodycontent`, and both furniture
+  # links sit OUTSIDE it — while still being outside <header>/<footer>, so
+  # JS_LINKS does not mark them chrome and the crawl kept them. The first export
+  # produced THREE rows per page instead of one:
+  #
+  #   the page itself                                          <- wanted
+  #   /en/images/Quality.pdf                        "Quality Policy"
+  #   bahrainedb.com/.../Vision-2030-English.pdf    "External Link"
+  #
+  # Same shape as RERA's Vision2030 pdf appearing on all eight of its pages, and
+  # the same remedy. The off-site one is worth noticing twice over: it is not an
+  # LLOC document at all.
+  - name: "Legal Instruments In Bahraini Legislation"
+    mode: generic
+    seed_url: "https://www.lloc.gov.bh/en/page/Legal%20instruments%20in%20Bahraini%20legislation"
+    scope: prefix
+    source_system: "Legal Instruments In Bahraini Legislation"
+    category: "Reference"
+    exclude_documents:
+      - "bahrainedb.com"
+      - "/en/images/"
+    include_pages: always
+    doc_path_sections: false
+    max_pages: 1
+    max_depth: 1
+
+  - name: "Legislations Within The Reform Project Frame"
+    mode: generic
+    seed_url: "https://www.lloc.gov.bh/en/page/Legislations%20within%20the%20reform%20project%20frame"
+    scope: prefix
+    source_system: "Legislations Within The Reform Project Frame"
+    category: "Reference"
+    exclude_documents:
+      - "bahrainedb.com"
+      - "/en/images/"
+    include_pages: always
+    doc_path_sections: false
+    max_pages: 1
+    max_depth: 1
+
+  # ---- NOT ENABLED -------------------------------------------------------- #
+  # The English corpus, 2,784 records over 279 requests. Left commented rather
+  # than deleted so the next person sees that it was measured and costed, not
+  # overlooked. Uncomment only with a decision about the run length.
+  #
+  # - name: "Legislation Translated Into English"
+  #   mode: custom
+  #   crawler_class: "crawler.lloc_crawler.LLOCLatestCrawler"
+  #   init_kwargs:
+  #     source_system: "Legislation Translated Into English"
+  #     listing_path: "/Legislation/English"
+  #     request_delay: 2.5

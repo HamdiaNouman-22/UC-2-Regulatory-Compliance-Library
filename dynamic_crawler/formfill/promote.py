@@ -44,6 +44,7 @@ from pathlib import Path
 
 from dynamic_crawler.changesignal import find_existing
 from typing import Dict, Optional
+from utils.countries import country_for
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,21 @@ def promote(xlsx: Path, repo, dry_run: bool = False) -> dict:
         title = str(c.get("title") or "").strip()
         if not title:
             return None
+        # A node with no parent IN THE WORKBOOK is the regulator: workbooks are
+        # exported with the regulator at the root, because that is where
+        # doc_path starts. The DATABASE puts the regulator under its country, so
+        # resolving this against parent=None would not find the existing node
+        # and would INSERT A SECOND ONE at the root — two "Central Bank of
+        # Bahrain" folders, one holding the old documents and one the new.
+        #
+        # doc_path is untouched by any of this (it is an identity field); only
+        # where the tree hangs changes. See config/countries.yml.
+        if parent_db is None:
+            ctry = country_for(title)
+            if ctry:
+                parent_db = repo.get_folder_id(ctry, None)
+                if parent_db is None and not dry_run:
+                    parent_db = repo.insert_folder(ctry, None, cat_type="F")
         if dry_run:
             folder_map[cid] = -cid
             return folder_map[cid]

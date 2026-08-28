@@ -48,14 +48,14 @@ SOURCES: Dict[str, Dict] = {
             "https://cbben.thomsonreuters.com/rulebook/bahrain-anti-money-laundering-law-2001"
         ),
         "category":  "Bahrain Anti Money Laundering Law 2001",
-        "root_path": "AML Law",
+        "root_path": "",   # was "AML Law" -- invented, not on the site
     },
     "corpgov": {
         "index_url": (
             "https://cbben.thomsonreuters.com/rulebook/corporate-governance-code-kingdom-bahrain"
         ),
         "category":  "The Corporate Governance Code of the Kingdom of Bahrain",
-        "root_path": "Corporate Governance",
+        "root_path": "",   # was "Corporate Governance" -- invented, not on the site
     },
 }
 
@@ -175,6 +175,90 @@ def _extract_li_content(li_tag: Tag) -> tuple:
 
 
 # ─── Sibling-<ul> tree parser ─────────────────────────────────────────────────
+# ─── Title and path repair ────────────────────────────────────────────────────
+# MEASURED on the 2026-08-20 CBB export, 1,464 rows.
+
+#: How many leading tokens may form the repeated code. "Article 2" is two;
+#: nothing measured needs more than three, and a larger window starts matching
+#: titles that legitimately open with a repeated phrase.
+_MAX_CODE_TOKENS = 3
+
+
+def _clean_title(title: str) -> str:
+    """Drop the section code CBB's <h2> prints twice.
+
+    The heading holds the code in its own element AND again at the start of the
+    full title, so `get_text(strip=True)` concatenates them:
+
+        "OFS-A OFS-A Introduction"        ->  "OFS-A Introduction"
+        "Article 2 Article 2 Offence..."  ->  "Article 2 Offence..."
+
+    MEASURED on the 2026-08-20 export: 3,037 such segments across 1,014 of 1,464
+    rows.
+
+    Token-wise rather than by regex, because the repeated unit is not always one
+    token -- "Article 2" is two. Only an IMMEDIATE repeat of the leading tokens
+    is removed, so "Rights and Obligations of Rights Holders" is untouched: its
+    repetition is not adjacent.
+    """
+    toks = re.sub(r"\s+", " ", str(title or "")).strip().split(" ")
+    changed = True
+    while changed and toks:
+        changed = False
+        for k in range(min(_MAX_CODE_TOKENS, len(toks) // 2), 0, -1):
+            if toks[:k] == toks[k:2 * k]:
+                toks = toks[k:]
+                changed = True
+                break
+    return " ".join(toks)
+
+
+_CODE = re.compile(r"^([A-Z]{2,6}(?:[-.][A-Za-z0-9]+)*)")
+
+def _code_of(segment: str) -> str:
+    m = _CODE.match(str(segment or "").strip())
+    return m.group(1) if m else ""
+
+
+def _prune_path(path):
+    """Keep only genuine ANCESTORS, dropping peers the DOM nested wrongly.
+
+    CBB's `viewall` markup nests each following section INSIDE the previous
+    one's <ul> rather than beside it, so a faithful DOM walk stacks peers as
+    ancestors. MEASURED on the 2026-08-20 export: 31 rows came out 29-75
+    segments deep. Normal depth on the same export is 2-8.
+
+        ... | BDE-1.1 | BDE-2.1 | ... | BDE-14.1 | BDE-1.1.1 | ... | BDE.B.1.1
+
+    Every BDE-n.1 is a PEER of the others, not a parent of the leaf.
+
+    THE LEAF IS THE ANCHOR. A path runs root -> leaf, so a CODED segment belongs
+    only if its code is a prefix of the LEAF's code: BDE.B.1.1 sits under BDE.B.1
+    under BDE.B under BDE. An earlier version asked only whether a code prefixed
+    some LATER segment, which every stacked peer satisfies -- it cut 75 to 20 and
+    left the peers in.
+
+    Separators are normalised because CBB mixes them in its own codes
+    (BDE-A.1 and BDE.B.1.1 in one tree).
+
+    Segments with NO code are real folder names ("Part A", "Executive Summary")
+    and are always kept: this removes coded peers, nothing else.
+    """
+    parts = [p for p in (path or []) if str(p).strip()]
+    if len(parts) < 3:
+        return parts
+    leaf_code = _code_of(parts[-1]).replace("-", ".").upper()
+    keep = []
+    for seg in parts[:-1]:
+        code = _code_of(seg).replace("-", ".").upper()
+        if not code:
+            keep.append(seg)                      # a real folder name
+        elif leaf_code and (leaf_code == code or leaf_code.startswith(code + ".")):
+            keep.append(seg)                      # a genuine ancestor of the leaf
+    keep.append(parts[-1])
+    return keep
+
+
 def _parse_viewall_tree(
     container: Tag,
     path: List[str],
@@ -206,13 +290,16 @@ def _parse_viewall_tree(
         if item.name == "li":
             h2 = item.find("h2")
             title = h2.get_text(strip=True) if h2 else item.get_text(strip=True)
-            title = title.strip()
+            title = _clean_title(title)
 
             # Find the URL for this node
             a_tag = item.find("a", href=True)
             url = urljoin(BASE_URL, a_tag["href"]) if a_tag else ""
 
-            current_path = path + [title]
+            # _prune_path drops peers the DOM nested as ancestors; see its
+            # docstring. Applied at BUILD time so both folders and leaves
+            # carry the same repaired path.
+            current_path = _prune_path(path + [title])
 
             # Collect all sibling <ul>s immediately following this <li>
             child_uls = []
@@ -313,7 +400,7 @@ def crawl_rulebook(target: str = "aml") -> List[RulebookDocument]:
         results: List[RulebookDocument] = []
         if viewall:
             for ul in viewall.find_all("ul", recursive=False):
-                _parse_viewall_tree(ul, [root_path], target, category, results)
+                _parse_viewall_tree(ul, [root_path] if root_path else [], target, category, results)
         return results
 
     # Step 2: fetch the full tree via entiresection
@@ -334,7 +421,7 @@ def crawl_rulebook(target: str = "aml") -> List[RulebookDocument]:
 
     results: List[RulebookDocument] = []
     top_ul = viewall.find("ul", recursive=False) or viewall
-    _parse_viewall_tree(top_ul, [root_path], target, category, results)
+    _parse_viewall_tree(top_ul, [root_path] if root_path else [], target, category, results)
 
     folders = sum(1 for d in results if d.row_type == "F")
     leaves  = sum(1 for d in results if d.row_type == "R")

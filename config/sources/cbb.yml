@@ -1,0 +1,141 @@
+# CBB — Central Bank of Bahrain
+#
+# Migrated onto the source-config flow 2026-08-20. Before that CBB was the only
+# regulator built entirely outside it: ~1,500 lines across crawler/cbb_crawler.py,
+# crawler/cbb_monitoring_crawler.py, cbb_browser.py, cbb_test_crawlers/ and
+# site_runners/cbb_updates.py, plus its own `_process_cbb_doc` branch in the
+# orchestrator, its own API endpoint and the only `enabled: true` monitoring job.
+#
+# ---------------------------------------------------------------------------
+# 1. WHY THE MIGRATION WAS FREE
+# ---------------------------------------------------------------------------
+# MEASURED 2026-08-20 against this database:
+#
+#   regulations WHERE regulator LIKE '%Bahrain%'   ->  0 rows
+#   source_system LIKE 'CBB%'                      ->  0 rows
+#   run_history for CBB                            ->  0 rows
+#
+# The scheduled `cbb_monitoring` job has never landed a document here. (The
+# project deck reports "CBB, 9 documents analysed" -- that was a different
+# database, or before a reset.) So there was no identity to protect, no version
+# history to carry and no rename to pay for. That will not be true again once
+# this config has run, so the naming below is settled NOW rather than later.
+#
+# ---------------------------------------------------------------------------
+# 2. MODE 1 WAS WRITING UNDER MODE 5's NAME
+# ---------------------------------------------------------------------------
+# `_scrape_resolution` (crawler/cbb_crawler.py:196) stamps
+# `source_system = "CBB-Compliance"` on Thomson Reuters *Regulations and
+# Resolutions* -- the same value mode 5's Compliance pages use. It reads as a
+# copy-paste, and it is fatal here: the completeness gate and `disappeared` are
+# scoped on (regulator, source_system), so two sources sharing one name means
+# each one's gate sees the other's stored rows and reports them missing. That is
+# the failure change_signals.yml records MHRSD hitting.
+#
+# Corrected in crawler/cbb_source.py::SOURCE_SYSTEM_OVERRIDE rather than by
+# editing cbb_crawler.py, so the old `cbb_monitoring` job keeps its exact
+# behaviour while both paths coexist. See that file for how to revert it if this
+# repo is ever pointed at a database that holds mode-1 rows under the old name.
+#
+# ---------------------------------------------------------------------------
+# 3. WHY SEVEN SOURCES AND NOT ONE
+# ---------------------------------------------------------------------------
+# CBBCrawlerV2.fetch_documents(mode=None) runs all seven modes and returns one
+# flat list. Left that way CBB would be a single source: one baseline, one gate,
+# one change signal for the whole regulator, and a mode that silently returned
+# nothing would be absorbed into a bigger number.
+#
+# ONBOARDING's rule is the opposite -- several small sources, each with its own
+# baseline, so one section breaking is VISIBLE. cbe.yml is split the same way and
+# it is what caught Governance returning 5 documents where 17 exist.
+#
+# ---------------------------------------------------------------------------
+# 4. THE CHANGE SIGNAL IS A NATIVE REVISION FEED — SEE change_signals.yml
+# ---------------------------------------------------------------------------
+# CBB's rulebook is hosted on Thomson Reuters, which publishes
+# https://cbben.thomsonreuters.com/view-revision-updates -- the regulator's own
+# "what changed in this date range" page. That is the best class of signal in the
+# repo: no probing, no inferring, no stale-stamp risk.
+#
+# SAMA runs on the SAME platform with the same endpoint
+# (rulebook.sama.gov.sa/en/view-revision-updates, read by
+# dynamic_crawler/sama_feed_signal.py). Two regulators, one pattern.
+#
+# It CANNOT see deletions -- a withdrawn document simply stops appearing -- so
+# the sources below still need a periodic full crawl to notice absence. That is
+# what the `crawl` signal is for; the feed makes it cheap to run rarely, not
+# unnecessary.
+
+regulator: "Central Bank of Bahrain"
+owner: lead
+
+sources:
+  # ---- Thomson Reuters ----------------------------------------------------
+  # Mode 1. Renamed from CBB-Compliance -- see section 2 above.
+  - name: "Regulations and Resolutions"
+    mode: custom
+    crawler_class: "crawler.cbb_source.CBBSource"
+    init_kwargs:
+      mode: "1"
+      source_system: "CBB-Regulations-and-Resolutions"
+
+  # Mode 2c. The rulebook volumes, walked from the site's own sidebar
+  # (cbb_test_crawlers/cbb_rulebook_crawler.py). The largest of the seven.
+  # CAPPED WHILE THE FLOW IS BEING PROVEN. MEASURED 2026-08-20: the uncapped
+  # sidebar walk ran 80 minutes without finishing and the export was killed with
+  # nothing written, because `export` only writes the workbook at the very end.
+  # The sidebar has 30 top-level entries and every folder node costs its own
+  # request at REQUEST_DELAY=1.2s.
+  #
+  # REMOVE `max_volumes` FOR THE REAL RUN, and give it a long evening. A capped
+  # run is a proof, not an inventory: it under-reports by design, so it must
+  # never be promoted as if it were the whole rulebook.
+  - name: "Rulebook"
+    mode: custom
+    crawler_class: "crawler.cbb_source.CBBSource"
+    init_kwargs:
+      mode: "2c"
+      source_system: "CBB-Rulebook"
+      # UNCAPPED as of 2026-08-24. The cap existed to prove the flow; the proof
+      # is done (1,464 documents, 7/7 sources PASS). A full walk is thousands of
+      # sequential requests at REQUEST_DELAY=1.2s -- give it hours, and run it
+      # with `-u` so its progress is visible rather than buffered.
+      # max_volumes: 1
+
+  # ---- cbb.gov.bh ---------------------------------------------------------
+  # Modes 2a and 2b share a crawler (Aml_crawler_v2) but write under different
+  # names, which is exactly why they are two sources rather than one.
+  - name: "AML Law"
+    mode: custom
+    crawler_class: "crawler.cbb_source.CBBSource"
+    init_kwargs:
+      mode: "2a"
+      source_system: "CBB-AML-LAW"
+
+  - name: "Corporate Governance"
+    mode: custom
+    crawler_class: "crawler.cbb_source.CBBSource"
+    init_kwargs:
+      mode: "2b"
+      source_system: "CBB-CORPGOV"
+
+  - name: "Laws and Regulations"
+    mode: custom
+    crawler_class: "crawler.cbb_source.CBBSource"
+    init_kwargs:
+      mode: "3"
+      source_system: "CBB-Laws-Regulations"
+
+  - name: "Capital Market Regulations"
+    mode: custom
+    crawler_class: "crawler.cbb_source.CBBSource"
+    init_kwargs:
+      mode: "4"
+      source_system: "CBB-Capital-Market-Regulations"
+
+  - name: "Compliance"
+    mode: custom
+    crawler_class: "crawler.cbb_source.CBBSource"
+    init_kwargs:
+      mode: "5"
+      source_system: "CBB-Compliance"

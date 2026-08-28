@@ -222,6 +222,40 @@ def trigger_cbb_via_api():
     trigger_via_api("CBB")
 
 
+def trigger_monitor_via_api(job: str):
+    """Start a monitor_* job through the API and return once it has STARTED.
+
+    NOT once it has finished. `trigger_via_api` above posts with timeout=10 and
+    a monitoring run takes tens of minutes (CBE measured ~40), so an endpoint
+    that ran the job synchronously would hand this client a ReadTimeout on every
+    SUCCESSFUL run. /trigger/monitor/{job} answers 202 as soon as the thread is
+    up, so the only thing this call can report — and does report — is whether
+    the job started.
+
+    The outcome lives in `run_history` in the database, which is what the
+    completeness gate reads. Do not infer success from this returning cleanly.
+    """
+    api_base_url = os.getenv("PIPELINE_API_URL", "http://localhost:8000")
+    api_url = f"{api_base_url}/trigger/monitor/{job}"
+    logger.info(f"Starting monitoring job via API: {api_url}")
+    try:
+        response = requests.post(api_url, timeout=30)
+        if response.status_code not in (200, 202):
+            logger.error(f"Failed to start {job}. Status: "
+                         f"{response.status_code}, Response: {response.text}")
+            raise RuntimeError(f"API returned status {response.status_code}")
+        data = response.json()
+        # `already_running` is the exclusive lock doing its job, not a failure.
+        logger.info(f"{job}: {data.get('state')} "
+                    f"(started_at={data.get('started_at')})")
+    except requests.exceptions.ConnectionError:
+        logger.error(f"Cannot connect to API at {api_url}. Is the API running?")
+        raise
+    except Exception as e:
+        logger.error(f"Error starting {job}: {e}", exc_info=True)
+        raise
+
+
 
 # ==============================================================
 # CONFIGURATION LOADER
@@ -247,9 +281,11 @@ def load_scheduler_config():
 
 # The KSA monitoring jobs. Imported lazily inside the mapping build so a broken
 # import here cannot stop the existing SBP/SECP jobs from being scheduled.
-from jobs.monitor_jobs import (monitor_cheap_probes, monitor_cma,  # noqa: E402
-                               monitor_edb, monitor_lmra, monitor_mc,
-                               monitor_mlcu, monitor_mlsd, monitor_sama)
+from jobs.monitor_jobs import (monitor_bahrain_bourse, monitor_cbb,  # noqa: E402
+                               monitor_cbe, monitor_cheap_probes, monitor_cma,
+                               monitor_edb, monitor_lloc, monitor_lmra,
+                               monitor_mc, monitor_mlcu, monitor_mlsd,
+                               monitor_rera, monitor_sama, monitor_sio)
 
 DIRECT_JOB_MAPPING = {
     "sbp_pipeline": run_sbp_pipeline,
@@ -270,6 +306,24 @@ DIRECT_JOB_MAPPING = {
     "monitor_mc": monitor_mc,
     "monitor_cma": monitor_cma,
     "monitor_mlcu": monitor_mlcu,
+    "monitor_cbe": monitor_cbe,
+    "monitor_bahrain_bourse": monitor_bahrain_bourse,
+    # Replaces the retired `cbb_monitoring` above, which wrote straight to
+    # MSSQL with no workbook step. See config/scheduler.yml for why it is off.
+    "monitor_cbb": monitor_cbb,
+
+    # ---- Bahrain, onboarded by abeeraslam, merged 2026-08-26 ------------- #
+    # All three ship DISABLED in config/scheduler.yml: a new regulator goes to a
+    # workbook for a person to read first, and this path writes straight to
+    # MSSQL, so enabling one before the review makes the first scheduled run the
+    # ingest.
+    "monitor_rera": monitor_rera,
+    "monitor_sio": monitor_sio,
+    "monitor_lloc": monitor_lloc,
+
+    # ---- Bahrain, onboarded on feature/crawler-dev-fakih, merged 2026-08-28 ---- #
+    # Same rule as the three above: all three ship DISABLED in
+    # config/scheduler.yml until a person has read their workbook.
     "monitor_edb": monitor_edb,
     "monitor_mlsd": monitor_mlsd,
     "monitor_lmra": monitor_lmra,
@@ -281,6 +335,30 @@ API_JOB_MAPPING = {
     "sama_pipeline": trigger_sama_via_api,
     "cbb_monitoring": trigger_cbb_via_api,
     "full_pipeline": trigger_full_pipeline_via_api,
+
+    # ---- monitoring, reachable in API mode as of 2026-08-20 --------------- #
+    # Until now every monitor_* job existed ONLY in DIRECT_JOB_MAPPING while
+    # EXECUTION_MODE defaulted to "API", so `enabled: true` on any of them
+    # logged "No function mapped for job" and monitored nothing — for every
+    # regulator, silently. Both mappings now carry the same set, so the
+    # execution mode changes HOW a job is reached and never WHETHER it exists.
+    #
+    # Keep these two dicts in step. A job in one and not the other is invisible
+    # in exactly one mode, which is the failure this pair of lines fixes.
+    "monitor_cheap_probes": lambda: trigger_monitor_via_api("monitor_cheap_probes"),
+    "monitor_sama": lambda: trigger_monitor_via_api("monitor_sama"),
+    "monitor_mc": lambda: trigger_monitor_via_api("monitor_mc"),
+    "monitor_cma": lambda: trigger_monitor_via_api("monitor_cma"),
+    "monitor_mlcu": lambda: trigger_monitor_via_api("monitor_mlcu"),
+    "monitor_cbe": lambda: trigger_monitor_via_api("monitor_cbe"),
+    "monitor_cbb": lambda: trigger_monitor_via_api("monitor_cbb"),
+    "monitor_bahrain_bourse": lambda: trigger_monitor_via_api("monitor_bahrain_bourse"),
+    "monitor_rera": lambda: trigger_monitor_via_api("monitor_rera"),
+    "monitor_sio": lambda: trigger_monitor_via_api("monitor_sio"),
+    "monitor_lloc": lambda: trigger_monitor_via_api("monitor_lloc"),
+    "monitor_edb": lambda: trigger_monitor_via_api("monitor_edb"),
+    "monitor_mlsd": lambda: trigger_monitor_via_api("monitor_mlsd"),
+    "monitor_lmra": lambda: trigger_monitor_via_api("monitor_lmra"),
 }
 
 # Choose which mode to use (set via environment variable or hardcode)

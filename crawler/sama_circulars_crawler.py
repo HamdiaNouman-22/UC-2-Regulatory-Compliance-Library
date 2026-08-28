@@ -501,16 +501,29 @@ class SAMARulebookCrawler:
                         source_system="SAMA RULEBOOK",
                         category="SAMA Circulars",
                         title=row['title'],
-                        document_url=row['detail_url'],
+                        # THE PDF IS THE DOCUMENT. This used to be
+                        # `row['detail_url']` -- the node PAGE -- with the file
+                        # hidden in extra_meta['org_pdf_link'], so `document_url`
+                        # pointed at a web page for 4,957 rows. The node page
+                        # moves to source_page_url and the listing to
+                        # extra_meta['found_on'] (the key CMA already uses).
+                        # Changed together with scripts/sama_pdf_as_document_url.py,
+                        # which migrated the stored rows: document_url is an
+                        # identity field, so emitting one shape while the database
+                        # holds the other makes every document read as new.
+                        document_url=detail_data['org_pdf_link'] or row['detail_url'],
                         urdu_url=None,
                         published_date=published_date,
                         reference_no=row['circular_no'],
                         department=None,
                         year=year,
-                        source_page_url=self.BASE_URL,
+                        source_page_url=row['detail_url'],
                         file_type="PDF" if detail_data['org_pdf_link'] else None,
                         extra_meta={
-                            "org_pdf_link": detail_data['org_pdf_link'],
+                            # The LISTING this row was found on. `org_pdf_link` is
+                            # gone: it is document_url now, and a second copy only
+                            # gives the two something to disagree about.
+                            "found_on": self.BASE_URL,
                             "scope_of_application": row['scope_of_application'],
                             "status": row['status'],
                             "issue_date_hijri": row['issue_date_hijri']

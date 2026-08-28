@@ -5,7 +5,7 @@ import re
 import requests
 from typing import Dict, Any, List
 from dotenv import load_dotenv
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from processor.Text_Extractor import OCRProcessor
 import pytesseract
 from utils.lang_detector import detect_language
@@ -65,6 +65,72 @@ class LLMAnalyzer:
 
         return chunks
 
+    # ------------------------------------------------------------------ #
+    #  HTML -> text                                                       #
+    # ------------------------------------------------------------------ #
+    # Tags that end a line. BeautifulSoup.get_text() has no concept of block
+    # layout: it concatenates strings, so a heading runs straight into the
+    # paragraph under it and a list becomes one sentence. Marking the block
+    # boundaries before extracting is what keeps the document's shape.
+    _BLOCK_TAGS = (
+        "p", "div", "section", "article", "aside", "main", "br", "hr",
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "li", "ul", "ol", "dl", "dt", "dd",
+        "table", "thead", "tbody", "tfoot", "tr",
+        "blockquote", "pre", "figure", "figcaption", "form", "fieldset",
+    )
+
+    @staticmethod
+    def _tables_to_text(soup) -> int:
+        """Render every <table> as one line per row, cells joined by ' | '.
+
+        WHY: get_text() puts NO boundary between cells, so CBE's licensed-bank
+        table arrived as
+
+            # Bank Code Bank Name 1 AAIB Arab African International Bank 2 BDC
+            Banque Du Caire 3 BM Banque Misr ...
+
+        which is indistinguishable from prose. Nothing downstream can recover
+        which value sat in which column, and the model is left to guess whether
+        "1 AAIB" is a row or a phrase.
+
+        Innermost first (`reversed` puts a nested table before its container in
+        find_all's document order), so an outer table reads the inner one's
+        already-rendered text instead of re-flattening it.
+        """
+        n = 0
+        for table in reversed(soup.find_all("table")):
+            if table.parent is None:          # already consumed by an outer pass
+                continue
+            lines = []
+            for row in table.find_all("tr"):
+                cells = [" ".join(c.get_text(" ", strip=True).split())
+                         for c in row.find_all(["th", "td"])]
+                if any(cells):
+                    lines.append(" | ".join(cells))
+            if not lines:
+                continue
+            table.replace_with(NavigableString("\n" + "\n".join(lines) + "\n"))
+            n += 1
+        return n
+
+    @staticmethod
+    def _images_to_text(soup) -> int:
+        """Keep an image's alt text; drop the tag either way.
+
+        get_text() ignores attributes, so an illustrated obligation lost its
+        caption entirely. Where alt is empty the image carries information no
+        text pipeline can reach — CBE's POS statistics chart is one — and that
+        needs OCR, not this.
+        """
+        n = 0
+        for img in soup.find_all("img"):
+            alt = " ".join((img.get("alt") or "").split())
+            img.replace_with(NavigableString(f"\n[image: {alt}]\n" if alt else ""))
+            if alt:
+                n += 1
+        return n
+
     def normalize_input_text(self, content: str, content_type: str = "html") -> str:
         """
         Normalize text for LLM consumption.
@@ -89,8 +155,28 @@ class LLMAnalyzer:
             for tag in soup(['script', 'style', 'noscript', 'header', 'footer', 'svg']):
                 tag.decompose()
 
-            text = soup.get_text(separator='\n\n').strip()
-            text = re.sub(r'\s+', ' ', text)
+            n_tables = self._tables_to_text(soup)
+            n_alts = self._images_to_text(soup)
+
+            # Mark where the blocks end BEFORE extracting, so headings, list
+            # items and paragraphs stay on their own lines.
+            for tag in soup.find_all(self._BLOCK_TAGS):
+                tag.insert_before(NavigableString("\n"))
+                tag.insert_after(NavigableString("\n"))
+
+            text = soup.get_text(separator=' ').strip()
+            # Collapse RUNS OF SPACES, not all whitespace. The previous
+            # `re.sub(r'\s+', ' ', text)` flattened the whole document to a
+            # single line, which (a) destroyed every table and list boundary and
+            # (b) left split_text_into_chunks — which splits on '\n\n' — with
+            # exactly one paragraph to work with, so chunking never happened.
+            text = re.sub(r'[^\S\n]+', ' ', text)
+            text = re.sub(r' *\n *', '\n', text)
+            text = re.sub(r'\n{3,}', '\n\n', text).strip()
+
+            if n_tables or n_alts:
+                logger.info("HTML normalize: %d table(s) rendered as rows, "
+                            "%d image alt text(s) kept", n_tables, n_alts)
 
             if len(text) > self.min_text_length:
                 logger.info(f"Extracted {len(text)} chars from HTML")

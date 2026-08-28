@@ -17,7 +17,7 @@
 #     crawler strips explicitly. The generic engine may pull them in as content.
 #     If titles or text look polluted, that is why.
 
-regulator: "ZATCA"
+regulator: "Zakat, Tax and Customs Authority (ZATCA)"
 owner: lead
 
 sources:

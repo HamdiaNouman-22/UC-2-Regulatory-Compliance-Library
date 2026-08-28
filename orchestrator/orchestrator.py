@@ -16,6 +16,8 @@ from urllib3.util.retry import Retry
 from processor.staged_LLM_Analyzer import StagedLLMAnalyzer
 import json
 from datetime import date
+from utils.countries import tree_path as country_tree_path
+from utils.file_links import normalise_all as normalise_files
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -326,6 +328,51 @@ class BaseOrchestrator:
             linked_controls_by_req = self.repo.get_linked_controls_by_requirement()
             linked_kpis_by_req     = self.repo.get_linked_kpis_by_requirement()
 
+            # DECIDE ONCE, THEN KEEP THE ANSWER.
+            #
+            # Re-matching the same obligations against the same register gives a
+            # different answer on 2-3 of every 39 -- genuine ties between similar
+            # requirements, which temperature 0 and a fixed seed do not fix
+            # because the model is not being random, it is being asked an
+            # ambiguous question (docs/determinism.md). The only way the stored
+            # verdicts stay stable is not to re-ask.
+            #
+            # This path had no cache at all, so every re-processed document was
+            # re-matched from scratch. The hash covers the obligations AND the
+            # internal register, so adding a requirement still re-opens the
+            # verdicts it could change.
+            from processor import analysis_cache
+            reg_row = self.repo.get_regulation_by_id(regulation_id) or {}
+            extra_meta = reg_row.get("extra_meta")
+            corpus_hash = analysis_cache.corpus_fingerprint(
+                existing_requirements, existing_controls, existing_kpis)
+            obligation_texts = [r.get("requirement_text") or r.get("obligation_text") or ""
+                                for r in extracted_requirements]
+            existing_mappings = []
+            try:
+                existing_mappings = self.repo.get_requirement_mappings_by_regulation(
+                    regulation_id) or []
+            except Exception:
+                pass          # not on every repo; treat as "nothing stored yet"
+            should_match, match_hash, why = analysis_cache.decide_matching(
+                extra_meta=extra_meta,
+                obligation_texts=obligation_texts,
+                corpus_hash=corpus_hash,
+                model=getattr(self.requirement_matcher, "model", ""),
+                has_existing_rows=bool(existing_mappings),
+                force=bool(getattr(self, "_force_matching", False)),
+            )
+            if not should_match:
+                logger.info(f"Requirement matching SKIPPED for {regulation_id}: {why}")
+                self.log(regulation_id, "requirement_matching", "SKIPPED", why)
+                if not analysis_cache.as_dict(extra_meta).get(
+                        analysis_cache.MATCH_HASH_KEY):
+                    analysis_cache.record_matching(
+                        self.repo, regulation_id, extra_meta, match_hash,
+                        getattr(self.requirement_matcher, "model", ""))
+                return
+            logger.info(f"Requirement matching RUNNING for {regulation_id}: {why}")
+
             match_results = self.requirement_matcher.match_requirements(
                 regulation_id=regulation_id,
                 extracted_requirements=extracted_requirements,
@@ -432,10 +479,20 @@ class BaseOrchestrator:
             fully   = sum(1 for m in requirement_mappings if m["match_status"] == "fully_matched")
             partial = sum(1 for m in requirement_mappings if m["match_status"] == "partially_matched")
             new_r   = sum(1 for m in requirement_mappings if m["match_status"] == "new")
+            low_c   = sum(1 for m in requirement_mappings
+                          if m.get("match_confidence") == "low")
+
+            # Recorded only after the mappings are stored. A hash written against
+            # matching that failed to persist would suppress the retry -- the same
+            # rule the analysis cache follows.
+            analysis_cache.record_matching(
+                self.repo, regulation_id, extra_meta, match_hash,
+                getattr(self.requirement_matcher, "model", ""))
 
             self.log(
                 regulation_id, "requirement_matching", "SUCCESS",
                 f"Reqs: {fully} fully / {partial} partial / {new_r} new | "
+                f"{low_c} low-confidence | "
                 f"Ctrl links: {len(control_links)} | KPI links: {len(kpi_links)} | "
                 f"New controls: {len(new_controls_to_insert)} | New KPIs: {len(new_kpis_to_insert)}"
             )
@@ -551,6 +608,12 @@ class BaseOrchestrator:
     def run_for_regulator(self, regulator_name: str):
         logger.warning(f"=== RUNNING REGULATOR: {regulator_name} ===")
         docs = self.crawler.fetch_documents()
+        # THE FILE RULE, applied where EVERY document passes: one file ->
+        # document_url, several -> extra_meta.attachment_links, never both.
+        # Done here rather than per crawler because each crawler had
+        # invented its own spelling (org_pdf_link, arabic_pdf, pdf_link)
+        # and a frontend had to know all of them. See utils/file_links.py.
+        docs = normalise_files(docs)
         logger.warning(f"Scraped {len(docs)} documents from crawler")
 
         new_docs, existing_docs = self.filter_new_documents(docs)
@@ -665,6 +728,12 @@ class BaseOrchestrator:
         """
         logger.warning("=== RUNNING REGULATOR: SIMAH ===")
         docs = self.crawler.fetch_documents()
+        # THE FILE RULE, applied where EVERY document passes: one file ->
+        # document_url, several -> extra_meta.attachment_links, never both.
+        # Done here rather than per crawler because each crawler had
+        # invented its own spelling (org_pdf_link, arabic_pdf, pdf_link)
+        # and a frontend had to know all of them. See utils/file_links.py.
+        docs = normalise_files(docs)
         logger.warning(f"Fetched {len(docs)} documents from crawler")
 
         buckets = {"new": [], "modified": [], "unchanged": []}
@@ -715,8 +784,12 @@ class BaseOrchestrator:
 
         try:
             if hasattr(doc, "doc_path") and isinstance(doc.doc_path, list):
+                # tree_path prepends the COUNTRY. doc.doc_path itself is left
+                # alone: it is an identity field, and rewriting it would
+                # reclassify every stored document. See config/countries.yml.
                 doc.compliancecategory_id = self._get_or_create_compliance_category(
-                    doc.doc_path)
+                    country_tree_path(doc.doc_path,
+                                      getattr(doc, "regulator", "")))
             else:
                 doc.compliancecategory_id = None
         except Exception as e:
@@ -913,7 +986,9 @@ class BaseOrchestrator:
 
         try:
             if hasattr(doc, "doc_path") and isinstance(doc.doc_path, list):
-                doc.compliancecategory_id = self._get_or_create_compliance_category(doc.doc_path)
+                doc.compliancecategory_id = self._get_or_create_compliance_category(
+                    country_tree_path(doc.doc_path,
+                                      getattr(doc, "regulator", "")))
             else:
                 doc.compliancecategory_id = None
         except Exception as e:
