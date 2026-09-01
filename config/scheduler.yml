@@ -158,6 +158,139 @@ jobs:
       hour: 5
       minute: 0
 
+  # CBE is twelve sources: the circulars API (one request, and it DISCOVERS —
+  # a crawl of that pager reads 18 of 396) plus eleven browser crawls of the HTML
+  # sections. Weekly because of the eleven, not the one.
+  #
+  # SUNDAY 06:00, an hour after CMA and two after MC, so the three weekly browser
+  # crawls do not collide. That stagger is a convenience, not a guarantee — CMA
+  # has measured 2h49m — and the real protection is the shared crawl lock in
+  # jobs/monitor_jobs.py, which makes a colliding job SKIP rather than queue.
+  #
+  # cbe.org.eg runs bot protection: it refuses urllib outright and answers HEAD
+  # with 403. Both hosts in change_signals.yml `skip_hosts` were blocked by
+  # automated access from this address, and eleven prefix crawls is real
+  # iteration. Weekly is part of staying welcome, not just a cost decision.
+  #
+  # NOT ENABLED, and not only because of the file-wide default: CBE has no
+  # baseline in the library yet. Monitoring is a comparison, so until the
+  # workbook has been exported, read and promoted, this job would be comparing
+  # against nothing.
+  monitor_cbe:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 6
+      minute: 0
+
+  # RERA (Bahrain) is small — 15 pages, 123 documents, server-rendered, no pager
+  # and no WAF — so this is the cheapest of the weekly crawls. It is weekly rather
+  # than daily because nothing about RERA moves fast: two circulars in all of 2025.
+  #
+  # It is a CRAWL rather than a probe even though its probe would work (117 of 121
+  # stored urls carry a stable ETag). Circulars are partitioned by year, one page
+  # per year, and a new year is a NEW PAGE — Circulars-issued-in-2026 is a 404
+  # today. Only a crawl can find that.
+  #
+  # Sunday 07:00, after CBE, so the weekly browser crawls stay staggered. The
+  # shared lock in jobs/monitor_jobs.py is the real protection if one overruns.
+  #
+  # NOT ENABLED: RERA has no baseline in the library yet, so this would compare
+  # against nothing.
+  monitor_rera:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 7
+      minute: 0
+
+  # SIO (Bahrain) — ten small crawls of sio.gov.bh, ~5 minutes for 214 documents.
+  #
+  # THE CRAWL IS THE SIGNAL BECAUSE NOTHING ELSE ANSWERS, not because a probe is
+  # merely inconvenient: no ETag, no Last-Modified, no Content-Length on any page,
+  # and a sitemap whose 106 lastmod values are all its own build time. Measured
+  # 2026-08-25; the reasoning is in config/change_signals.yml.
+  #
+  # It is cheap because every law is a modal already in the page: a section's ~48
+  # laws come from ONE page load. Sunday 08:00, after RERA at 07:00, so the weekly
+  # browser crawls stay staggered — the shared lock in jobs/monitor_jobs.py is the
+  # real protection if one overruns.
+  #
+  # NOT ENABLED: SIO has no baseline in the library yet, so this would compare
+  # against nothing. Promote output/workbooks/sio.xlsx first (214 rows,
+  # `check` verdict OK), then turn this on.
+  monitor_sio:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 8
+      minute: 0
+
+  # PDPA (Bahrain) — the whole regulator is TWO page loads, because both its
+  # sources are max_pages: 1. Weekly rather than daily only because a data
+  # protection law and its ten executive decisions do not move often; the cost
+  # would not argue against daily.
+  #
+  # 08:30 and not 08:00 so it does not start inside monitor_sio's window. Neither
+  # touches the other's host, so this is tidiness, not a dependency.
+  #
+  # NOT ENABLED: PDPA has no baseline in the library yet, so this would compare
+  # against nothing and every one of the 82 rows would read as new. Promote
+  # output/workbooks/pdpa.xlsx first (82 rows, `check` verdict OK), then turn
+  # this on.
+  monitor_pdpa:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 8
+      minute: 30
+
+  # MOIC (Bahrain) — 11 page loads for 95 documents. Weekly rather than daily
+  # because commercial law and ministerial orders do not move often; the cost
+  # would not argue against daily.
+  #
+  # 09:00, after monitor_sio (08:00) and monitor_pdpa (08:30). Different hosts,
+  # so this is tidiness rather than a dependency.
+  #
+  # NOT ENABLED: MOIC has no baseline in the library yet, so this would compare
+  # against nothing and all 95 rows would read as new. Promote
+  # output/workbooks/moic.xlsx first (95 rows, `check` verdict OK), then turn
+  # this on.
+  monitor_moic:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 9
+      minute: 0
+
+  # LLOC (Bahrain) — the `Latest Legislation` window ONLY: 144 records, 15
+  # requests, about 40 seconds. monitor_lloc() narrows the config with
+  # only_sources; the 1,583-document classification section is coverage and is
+  # deliberately NOT on this path (it takes 47 minutes).
+  #
+  # DAILY is affordable at 15 requests, and Latest is a rolling window where new
+  # legislation appears first — a weekly cadence would let a week of it sit
+  # unseen.
+  #
+  # 04:30, alone. lloc.gov.bh answers a burst of requests with a 1,245-byte IIS
+  # 404 that parses as an empty page, so nothing else touching this host may run
+  # near it. If the classification refresh is ever scheduled, it must not overlap.
+  #
+  # NOT ENABLED: no baseline in the library yet, and output/workbooks/lloc.xlsx
+  # is still the pre-fix export that `check` rejects. Re-export, check, promote,
+  # then turn this on.
+  monitor_lloc:
+    enabled: false
+    trigger: cron
+    schedule:
+      hour: 4
+      minute: 30
+
   # ----------------------------------------------------------
   # NO JOB FOR Saudi Exchange OR SIMAH — deliberately.
   #
