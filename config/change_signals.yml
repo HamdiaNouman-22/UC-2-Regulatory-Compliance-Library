@@ -206,12 +206,12 @@ sources:
   # (regulator, source_system). The eight sections live in `category`; giving
   # them entries here would name source_systems that do not exist — the drift
   # that made every RERA document invisible to monitoring until 2026-08-20.
-  - regulator: "Social Insurance Organisation (SIO)"
+  - regulator: "Social Insurance Organization (SIO)"
     source_system: "Private Sectors"
     signal: crawl
     confirm: false
 
-  - regulator: "Social Insurance Organisation (SIO)"
+  - regulator: "Social Insurance Organization (SIO)"
     source_system: "Public Sectors"
     signal: crawl
     confirm: false
@@ -248,6 +248,133 @@ sources:
   # same choice CBE's eleven sections made above.
   - regulator: "Legislation and Legal Opinion Commission (LLOC)"
     source_system: "Latest Legislation"
+    signal: crawl
+    confirm: false
+  # PDPA (Bahrain), both sources. MEASURED 2026-08-31, and `crawl` here is not
+  # the fallback it usually is -- it is the CHEAPEST question available, because
+  # each source is ONE page load (both are max_pages: 1 in config/sources/pdpa.yml).
+  #
+  #   sitemap           NONE. /sitemap.xml, /sitemap_index.xml and /en/sitemap.xml
+  #                     all answer 403 in 111 bytes from `server: AmazonS3`, and so
+  #                     does a control path that cannot exist -- which is what S3
+  #                     returns for a missing key when listing is denied. So this
+  #                     is "no sitemap", proven, not a block: /en/regulations.html
+  #                     answers 200 in 163,302 bytes to a plain request with only
+  #                     a User-Agent.
+  #   stored-inventory  Every document DOES return an ETag, opaque but stable, so
+  #                     this is available -- and it is still the wrong signal for
+  #                     either source. See the two notes below.
+  #   snapshot-articles Right shape, wrong plumbing. See "The Law" below.
+  #   sama-feed         No "what changed" page on the site.
+  #
+  - regulator: "Personal Data Protection Authority (PDPA)"
+    source_system: "The Law"
+    signal: crawl
+    confirm: false
+    # 60 of this source's 62 rows are ANCHORS INTO ONE PAGE
+    # (regulations.html#faqOne ... #faqSixty), so they share a single HTTP
+    # object: `#faqOne` and `#faqTwo` return the identical ETag
+    # 35237d1023d5c414d38d47a2c379fbae. `stored-inventory` would therefore call
+    # all 60 articles modified on any edit to that page, including an edit to
+    # something else on it entirely -- which is the exact failure
+    # `snapshot-articles` was written to fix.
+    #
+    # And `snapshot-articles` IS the right shape here: the page parses into 60
+    # labelled articles with 60 distinct hashes. But only with Bootstrap 4 class
+    # names (`card-header` / `card-body`); the module's defaults are Bootstrap 5
+    # (`accordion-button` / `accordion-body`) and parse 0 items on this page, and
+    # `snapshot_sweep()` does not thread those names through. It also reads a
+    # snapshot from formfill's SnapshotStore with a grace period, because it was
+    # built for SIMAH -- a host we are BLOCKED from and cannot crawl.
+    #
+    # We are not blocked from this one. The crawl is a single GET and it already
+    # produces exactly what snapshot-articles would: 62 rows, 62 DISTINCT
+    # content_hash values, one per article, each over the article's extracted
+    # text. There is nothing cheaper to ask and nothing more precise to ask.
+  - regulator: "Personal Data Protection Authority (PDPA)"
+    source_system: "Executive Decisions/Orders"
+    signal: crawl
+    confirm: false
+    # 20 distinct pdfs, each with its own honest ETag, so `stored-inventory`
+    # genuinely works here -- and it CANNOT BE THE ONE SIGNAL, because
+    # InventorySweep sets covers_inventory = False
+    # (dynamic_crawler/inventory_sweep.py:102). It probes only the urls we
+    # already store, so a NEW executive decision appearing on the page is not
+    # something it can observe. New decisions are the main event on this source.
+    #
+    # KNOWN GAP, recorded rather than papered over: a pdf silently REPLACED at
+    # the same url with the same link text is invisible to `crawl`. For a
+    # discovered document the engine stamps
+    # content_hash = hash("<url>|<title>") (generic_crawler/crawler.py:3476) --
+    # the ETag-reading path, stamp_declared(), runs only for --documents entries,
+    # which this config does not use. So the crawl sees additions, removals and
+    # retitles, and not that. Closing it means either declaring these 20 urls or
+    # teaching the engine to stamp discovered documents from a HEAD, and the
+    # second changes every regulator; neither is done here.
+
+  # MOIC (BAHRAIN) — `crawl`, AND HERE THE PROBE IS THE EXPENSIVE OPTION.
+  # MEASURED 2026-09-01, all four alternatives tested rather than assumed:
+  #
+  #   sitemap            DOES NOT EXIST. /sitemap.xml, /sitemap_index.xml and
+  #                      /en/sitemap.xml all answer 404 with a 44 KB soft-404 HTML
+  #                      page -- and so does a control path that cannot exist, so
+  #                      the 404 is the site's catch-all, not a missing file.
+  #                      robots.txt is live (200, 2,027 bytes) and names NO sitemap.
+  #   sama-feed          NO REVISION PAGE. /en/news exists and is press releases:
+  #                      21,578 captured characters, ONE document link on the whole
+  #                      page, and no mention of a decree, resolution, ministerial
+  #                      order or law. It reports events, not document changes.
+  #   snapshot-articles  WRONG SHAPE. 0 items parsed with either Bootstrap 4 or 5
+  #                      accordion classes. MOIC's rows are FILES, not article
+  #                      text -- `with_text` is 0 of 95.
+  #   stored-inventory   GENUINELY AVAILABLE, and still not the right choice. See
+  #                      below; this is the RERA case, not the PDPA one.
+  #
+  # STORED-INVENTORY WOULD WORK. Unlike PDPA, where 60 articles are anchors into
+  # one page and share a single ETag, MOIC's tokens are honest and per-document:
+  # every sampled pdf returns an Apache size-mtime ETag, stable across two reads
+  # (52b2f2-5d1d79f0a9d00, 5dbf7-5d1d799f99dc0, ... 6/6 `etag-opaque`), and 90 of
+  # the 95 rows are distinct pdfs.
+  #
+  # IT LOSES ON COST AND ON DISCOVERY.
+  #   cost       a probe is one request per stored document: 90 requests. The
+  #              crawl is ELEVEN page loads -- Commerce 1, Industry 1, Forms 9.
+  #              The cheap signal is the expensive one here.
+  #   discovery  InventorySweep sets covers_inventory = False
+  #              (dynamic_crawler/inventory_sweep.py:102): it re-reads only urls
+  #              we already hold. A new regulation, a new form, or a NEW FORM
+  #              CATEGORY is invisible to it -- and catching a new category is
+  #              exactly what config/sources/moic.yml's discovering Forms source
+  #              was built for.
+  #
+  # RUN stored-inventory DELIBERATELY NOW AND THEN. It is the only thing that
+  # catches a pdf silently REPLACED at the same url with the same link text: a
+  # discovered document's content_hash is hash("<url>|<title>")
+  # (generic_crawler/crawler.py:3476), so the crawl sees additions, removals and
+  # retitles, and not that. Same standing note as RERA above.
+  #
+  # ONE WRINKLE IF YOU DO. Five Forms rows are placeholders for categories that
+  # publish nothing, and they point at a tag PAGE rather than a file. A tag page's
+  # ETag is `1788244496-gzip` -- a gzip ETag on a dynamic page, which moves when
+  # the rendered bytes move. Those five would report `modified` as noise under a
+  # probe. Under `crawl` they do not: their content_hash is stable by construction.
+  #
+  # THREE ENTRIES, because config/sources/moic.yml stores three source_systems and
+  # a sweep looks a source up by (regulator, source_system). Commerce and Industry
+  # are the site's own `?about[0]` filters; Forms is the one discovering source
+  # that walks the sidebar.
+  - regulator: "Ministry of Industry and Commerce (MOIC)"
+    source_system: "Commerce"
+    signal: crawl
+    confirm: false
+
+  - regulator: "Ministry of Industry and Commerce (MOIC)"
+    source_system: "Industry"
+    signal: crawl
+    confirm: false
+
+  - regulator: "Ministry of Industry and Commerce (MOIC)"
+    source_system: "Forms"
     signal: crawl
     confirm: false
 
