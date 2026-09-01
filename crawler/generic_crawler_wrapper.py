@@ -44,6 +44,7 @@ orchestrator handles that — filter_new_documents falls back to deduping on
 (document_url, category) when published_date is missing.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -220,6 +221,16 @@ class GenericSiteCrawler:
         wait_ms: Optional[int] = None,    # per-site JS settle time
         in_process: bool = False,
         timeout: int = 3600,
+        strategy: str = "auto",
+        exclude_documents: Optional[List[str]] = None,
+        doc_path_sections: bool = True,
+        min_page_text: Optional[int] = None,
+        doc_path_title: bool = False,
+        doc_path_category: bool = False,
+        placeholder_when_empty: Optional[str] = None,
+        drop_sections: Optional[List[str]] = None,
+        merge_files_at_same_path: bool = False,
+        uncategorised_parents: Optional[dict] = None,
     ):
         self.seed_url = seed_url
         self.regulator = regulator
@@ -238,6 +249,196 @@ class GenericSiteCrawler:
         self.wait_ms = wait_ms
         self.in_process = in_process
         self.timeout = timeout
+        # WHICH WALKER READS THIS LAYOUT. The engine has always accepted
+        # --strategy; nothing passed it, so every source ran with shape
+        # auto-detection and no config could override the answer. Same class of
+        # gap as wait_ms above, and it fails the same way: silently.
+        #
+        # rera.gov.bh/en/regulations/resolutions detects as `list`, so
+        # crawl_list() runs and returns 4 of its 33 documents while reporting a
+        # clean run. Seeding the section's PARENT instead gets `generic` and all
+        # 33 -- which is why the count changed when rera.yml split the sections.
+        # sio.gov.bh is worse: every one of its content pages detects as `list`
+        # and returns 0 pages with status `zero`.
+        #
+        # Default "auto" is exactly today's behaviour, and no existing config
+        # sets the key, so MISA, SECP, SBP, ZATCA, MC and CMA are unaffected.
+        self.strategy = strategy
+        # SITE-WIDE FURNITURE THE CHROME RULE CANNOT SEE. JS_LINKS marks a link
+        # `chrome` only when it sits inside <header>/<footer>, deliberately, so a
+        # real in-page sidebar is not discarded. A site that links the same
+        # corporate PDF from the BODY of every page therefore slips through.
+        #
+        # MEASURED on rera.gov.bh 2026-08-20: Vision2030Englishlowresolution.pdf
+        # and the Cloud First Policy pdf appear on all eight legislation pages, so
+        # the workbook held them 8 times each -- 16 of its 150 rows for two
+        # documents, neither of which is a real-estate regulation. `check` passes
+        # them because they differ by doc_path, which is exactly the "shape, not
+        # sense" gap ONBOARDING warns about.
+        #
+        # Substring match against the document url, per source. Empty by default,
+        # so no existing config changes.
+        self.exclude_documents = [str(x) for x in (exclude_documents or []) if str(x).strip()]
+        # WHETHER THE CRAWLER'S BREADCRUMB BECOMES FOLDERS BELOW source_system.
+        #
+        # It usually should. But a site whose breadcrumb names the PARENT of the
+        # section inverts the tree: rera.gov.bh detail pages carry
+        # "Home > Regulations", so every document landed at
+        #   RERA | RERA Law And Decrees | Regulations | <title>
+        # when the site's own hierarchy is Regulations -> Laws and Decrees. The
+        # library then shows a folder called Regulations INSIDE each section,
+        # which is the "a folder is upside down" case ONBOARDING says only a
+        # person can spot. Default True keeps every existing source unchanged.
+        self.doc_path_sections = bool(doc_path_sections)
+        # HOW MUCH TEXT MAKES A PAGE A DOCUMENT, per source.
+        #
+        # MIN_PAGE_TEXT is 200 and that is right for a site whose thin pages are
+        # navigation. It is wrong for one whose real records are deliberately
+        # short. MEASURED 2026-08-25 on sio.gov.bh, whose laws are Bootstrap
+        # modals captured as <page>#<id>:
+        #
+        #   private-sectors   94 modal records ->  69 pass 200 chars
+        #   public-sectors   108 modal records ->  69 pass 200 chars
+        #
+        # 64 of 202 dropped, because 56 and 66 of them read only "This content
+        # will be published soon". The ENGINE keeps those on purpose — the title
+        # is a real law, SIO listing one it has not published yet is a fact worth
+        # holding, and the day it publishes the text changes and the row reports
+        # `modified`. This layer then threw them away for being short, and said
+        # nothing. At 50 every modal survives (the shortest measured 62 chars).
+        #
+        # The leaf fallback below cannot rescue them: SIO reports `n_children` on
+        # 0 of 202 pages, so it never fires.
+        self.min_page_text = (int(min_page_text) if min_page_text is not None
+                              else MIN_PAGE_TEXT)
+        # WHETHER THE TITLE IS THE LAST CRUMB OF doc_path.
+        #
+        # It should be — ONBOARDING says doc_path is `[regulator, source_system,
+        # ...folders, title]` and "the last crumb is the document itself", and
+        # `_walk_folders` types that last segment as the regulation rather than a
+        # folder. Hand-written crawlers (MOH, CBE, LLOC) all append it. This
+        # class never has, so every document in a folder claimed the FOLDER as
+        # its leaf, and the leaf rule then gave each one its own same-named
+        # sibling: measured in a CBE workbook as 658 folder rows for 502 distinct
+        # paths, e.g. `Banking Laws` created ten times.
+        #
+        # Default False because doc_path is part of the DEFAULT IDENTITY
+        # (document_url, doc_path, title): turning it on for an existing source
+        # re-identifies every stored row, which reads as every document new and
+        # every old one disappeared. Safe to enable on a source that has never
+        # been promoted.
+        self.doc_path_title = bool(doc_path_title)
+        # THE CATEGORY AS A FOLDER, not just a column.
+        #
+        # `category` has always been a FIELD on RegulatoryDocument and nothing
+        # more: _doc_path() builds [regulator, source_system] + sections, and the
+        # orchestrator builds the folder tree from doc_path alone. So a source
+        # configured with `category: "SMEs"` put that label in a column no tree
+        # ever reads, and its documents landed beside every other source's.
+        #
+        # MEASURED on moic.gov.bh 2026-08-31: the eight `?tag=` sources exist
+        # only to attach the site's eight sidebar labels, and every one of their
+        # documents came back at doc_path [MOIC, Forms, <title>] — the same trail
+        # the unfiltered Forms source produces, which is why that config carried
+        # ten duplicate rows and no sidebar level at all.
+        #
+        # Opt-in, because turning it on for every source would insert a level
+        # into every regulator that sets `category` — and `_category_for` falls
+        # back to the last section crumb or the source_system when none is
+        # configured, so most sources would gain a folder that repeats their
+        # parent.
+        self.doc_path_category = bool(doc_path_category)
+        # SECTION CRUMBS THIS SOURCE MUST NOT TURN INTO A FOLDER.
+        #
+        # `_clean_trail` already drops a crumb that repeats one earlier in the
+        # trail, which is why a page whose <h1> matches its source_system never
+        # showed that <h1> as a level. Renaming a source breaks that by accident.
+        #
+        # MEASURED on moic.gov.bh/en/regulations?about[0]=19: the breadcrumb is
+        # EMPTY, and section_path still reads "Regulations > Commerce Law" --
+        # the first crumb is the page's own <h1>, which `group_headings` reads as
+        # the outermost heading. While source_system was "Regulations" the dedupe
+        # hid it; naming the source after the site's Commerce / Industry filter
+        # exposed it and the tree grew a "Regulations" level under Commerce.
+        #
+        # Matched case-insensitively on the whole crumb, so it cannot silently
+        # eat a longer name that merely contains the word.
+        # THE PARENT OF AN ORPHAN SUBCATEGORY, DECLARED BECAUSE THE SITE OMITS IT.
+        #
+        # `{subcategory: category}`. The engine marks a document it could discover
+        # no category for — see `link_title_is_section` in crawler.py: a page's
+        # category comes from the anchor that led to it, and the seed has no such
+        # anchor. This supplies the missing category for those rows only.
+        #
+        # MEASURED on moic.gov.bh/en/forms: one form sits under an <H2> "Consumer
+        # Protection" that no `?tag=` returns — swept tag=316..330, the 7 ids
+        # outside the rail return nothing and no tag in the range returns that
+        # form. The <H2> is the same markup as "Companies Control" and "Precious
+        # Metals Assay Centre", which ARE subcategories, so it is a subcategory
+        # whose parent went missing, not a ninth category.
+        #
+        # The library's manual tree files it under "Consumer Services" — which is
+        # in the rail, and which the site currently reports as empty. So the site
+        # is wrong and the declared mapping is the correction.
+        #
+        # WHY DECLARING IT IS SAFE HERE. It applies ONLY to rows the engine could
+        # not place, so the day MOIC tags that form the discovered category wins
+        # and this goes inert rather than conflicting. And it lives in the
+        # regulator's yml, so no subcategory name is baked into shared code.
+        #
+        # An unmapped orphan is left where it lands, which is visible rather than
+        # silent: it appears at category level and looks like a new category,
+        # which is the prompt to either map it or find out why the site dropped it.
+        self.uncategorised_parents = {
+            str(k).strip().lower(): str(v).strip()
+            for k, v in (uncategorised_parents or {}).items()
+            if str(k).strip() and str(v).strip()}
+        self.drop_sections = {str(x).strip().lower()
+                              for x in (drop_sections or []) if str(x).strip()}
+        # SEVERAL FILES AT ONE PLACE IN THE TREE ARE ONE DOCUMENT.
+        #
+        # The sanctioned multi-file shape, from docs/final_changes.md C19:
+        #     document_url                 ""     <- deliberately EMPTY
+        #     extra_meta.attachment_links  "<pdf> | <pdf>"
+        #     extra_meta.identity_fields   ["doc_path",
+        #                                   "extra_meta.attachment_links", "title"]
+        # `document_url` is half the default identity, and leaving it empty
+        # COLLAPSES that identity -- every row in one folder would key on
+        # ("", doc_path) -- so a merged row must declare its own. That is done
+        # here rather than left to config, because a row that leaves the url
+        # empty without declaring identity is broken, not configurable.
+        #
+        # MEASURED on pdp.gov.bh/en/executive-decisions.html: ten decisions, each
+        # an Arabic original plus an English translation. No two urls in a folder
+        # are identical, and after `heading_is_title` both files of a decision
+        # share a title AND a doc_path -- so the folder IS the group and nothing
+        # has to guess at languages.
+        #
+        # Opt-in, because on any other source two files at one path are two
+        # documents that happen to collide, not one document in two formats.
+        # lloc.gov.bh is the worked counter-example: docs/changes_2026-08-25.md
+        # CHANGE 29 deliberately keeps the pdf canonical there instead.
+        self.merge_files_at_same_path = bool(merge_files_at_same_path)
+        # A FOLDER FOR A CATEGORY THAT PUBLISHES NOTHING.
+        #
+        # Folders exist only as a side effect of a document's doc_path
+        # (_get_or_create_compliance_category in orchestrator.py), so a source
+        # that returns no documents contributes no folder and vanishes from the
+        # tree. For a filtered listing that is wrong in a specific way: it cannot
+        # be told apart from a category the site never had.
+        #
+        # MEASURED on moic.gov.bh 2026-08-31: six of the eight form categories
+        # publish NOTHING — tag=324 (SMEs) and tag=319 (eCommerce) return zero
+        # characters of captured content and zero links. The single "document"
+        # each one appeared to have was the site-wide Vision 2030 pdf, which
+        # `exclude_document_urls` now drops. So without this the tree would show
+        # two form categories where the ministry publishes eight.
+        #
+        # The value is the placeholder's TITLE, and setting it is what turns this
+        # on. Same precedent as SIO's "will be published soon" panels, which are
+        # kept for the same reason.
+        self.placeholder_when_empty = (str(placeholder_when_empty).strip()
+                                       if placeholder_when_empty else None)
         self.last_result = {}             # raw crawl output, for diagnostics
 
     # ------------------------------------------------------------------ #
@@ -253,13 +454,15 @@ class GenericSiteCrawler:
             from generic_crawler.crawler import crawl
             kw = {"wait_ms": self.wait_ms} if self.wait_ms else {}
             crawl(self.seed_url, str(out), max_pages=self.max_pages,
-                  max_depth=self.max_depth, scope=self.scope, **kw)
+                  max_depth=self.max_depth, scope=self.scope,
+                  strategy=self.strategy, **kw)
         else:
             cmd = [sys.executable, str(ENGINE),
                    "--url", self.seed_url, "--out", str(out),
                    "--scope", self.scope,
                    "--max-pages", str(self.max_pages),
-                   "--max-depth", str(self.max_depth)]
+                   "--max-depth", str(self.max_depth),
+                   "--strategy", self.strategy]
             if self.wait_ms:
                 cmd += ["--wait-ms", str(self.wait_ms)]
             proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -280,7 +483,54 @@ class GenericSiteCrawler:
     #  mapping                                                             #
     # ------------------------------------------------------------------ #
 
-    def _doc_path(self, section_path: str) -> List[str]:
+    def _merge_same_path(self, docs: List[RegulatoryDocument]) -> List[RegulatoryDocument]:
+        """Rows sharing (doc_path, title) become one C19 multi-attachment row.
+
+        THE FILE ORDER IS SORTED, NOT THE SITE'S. C19 exists because naming a row
+        by whichever file the site listed first makes identity depend on the
+        site's ordering; identity here is the SET of files, so the set is written
+        in a stable order and a re-ordered page cannot move it.
+
+        A group of one is left exactly as it was -- a single-file source keeps
+        `document_url`, which is the whole point of the rule being per-group.
+        """
+        groups: dict = {}
+        for d in docs:
+            groups.setdefault((tuple(d.doc_path or []), d.title), []).append(d)
+
+        merged: List[RegulatoryDocument] = []
+        for (_path, _title), members in groups.items():
+            if len(members) == 1:
+                merged.append(members[0])
+                continue
+            base = members[0]
+            urls = sorted({m.document_url for m in members if m.document_url})
+            links = " | ".join(urls)
+            meta = dict(base.extra_meta or {})
+            meta["attachment_links"] = links
+            # Declared, not defaulted: see the note in __init__.
+            meta["identity_fields"] = ["doc_path", "extra_meta.attachment_links",
+                                       "title"]
+            meta["record_kind"] = "multi-attachment"
+            base.extra_meta = meta
+            base.document_url = ""
+            # The row's hash has to describe the row, and the row is now a SET of
+            # files. Inheriting one member's hash would leave it unchanged when a
+            # different member was replaced.
+            base.content_hash = hashlib.md5(
+                ("|".join(_path) + "|" + links).encode("utf-8")).hexdigest()
+            types = {m.file_type for m in members if m.file_type}
+            base.file_type = types.pop() if len(types) == 1 else None
+            logger.info("  merged %d files into one row: %s",
+                        len(urls), " > ".join(_path))
+            merged.append(base)
+        if len(merged) != len(docs):
+            logger.info("  merge_files_at_same_path: %d rows -> %d",
+                        len(docs), len(merged))
+        return merged
+
+    def _doc_path(self, section_path: str, title: str = "",
+                  source_system: Optional[str] = None) -> List[str]:
         """Folder trail for the library.
 
         ALWAYS starts with the regulator. _get_or_create_compliance_category()
@@ -288,8 +538,24 @@ class GenericSiteCrawler:
         top-level folder called "Circulars" would otherwise merge into one node
         and tangle their documents together.
         """
-        parts = [self.regulator, self.source_system] + _split_section_path(section_path)
-        return _clean_trail([p for p in parts if p])
+        parts = [self.regulator, source_system or self.source_system]
+        # The category sits between the source system and the page's own
+        # sections, which is where the site puts it: a sidebar filter is a level
+        # ABOVE the headings on the filtered page. `_clean_trail` still drops it
+        # if it repeats the source system.
+        if self.doc_path_category and self.category:
+            parts.append(self.category)
+        if self.doc_path_sections:
+            parts += [p for p in _split_section_path(section_path)
+                      if p.strip().lower() not in self.drop_sections]
+        trail = _clean_trail([p for p in parts if p])
+        # Appended AFTER _clean_trail, and never de-duplicated against it: a law
+        # whose title repeats its folder name ("Ministerial Orders") is still a
+        # document that has to be its own leaf.
+        if self.doc_path_title and title:
+            trail.append(str(title).strip())
+        return trail
+
 
     def _category_for(self, section_path: str) -> str:
         if self.category:
@@ -297,29 +563,60 @@ class GenericSiteCrawler:
         parts = _split_section_path(section_path)
         return parts[-1] if parts else self.source_system
 
+    def _excluded(self, url: str) -> bool:
+        """True if this url is configured-out furniture. Logged, never silent:
+        a rule that removes documents has to be auditable."""
+        for pat in self.exclude_documents:
+            if pat in url:
+                logger.info("  excluded by exclude_documents (%r): %s", pat, url)
+                return True
+        return False
+
     def _doc_from_document_row(self, d: dict, shape: str) -> Optional[RegulatoryDocument]:
         url = (d.get("doc_url") or "").strip()
+        if url and self._excluded(url):
+            return None
         if not url:
             return None
         section_path = d.get("section_path") or ""
+        # Hoisted out of the constructor call: `doc_path` needs the same title,
+        # and computing it twice is how the two drift.
+        title = (d.get("title") or "").strip() or url.rsplit("/", 1)[-1]
+        # A row the site filed under nothing gets its declared parent, so it
+        # sits at subcategory depth like every other subcategory instead of
+        # level with the real categories. See `uncategorised_parents`.
+        sec = section_path
+        if d.get("uncategorised") and self.uncategorised_parents:
+            crumbs = _split_section_path(sec)
+            for i, c in enumerate(crumbs):
+                parent = self.uncategorised_parents.get(c.strip().lower())
+                if parent:
+                    logger.info("  uncategorised %r -> declared parent %r",
+                                c.strip(), parent)
+                    crumbs.insert(i, parent)
+                    break
+            sec = " > ".join(crumbs)
         return RegulatoryDocument(
             regulator=self.regulator,
             source_system=self.source_system,
             category=self._category_for(section_path),
-            title=(d.get("title") or "").strip() or url.rsplit("/", 1)[-1],
+            title=title,
             document_url=url,
             published_date=None,          # a link walk cannot read issue dates
             source_page_url=d.get("found_on") or self.seed_url,
             file_type=d.get("type") or None,
-            doc_path=self._doc_path(section_path),
+            doc_path=self._doc_path(sec, title),
             content_hash=d.get("content_hash"),
             extra_meta={
                 # `crawler`, `shape` and `seed_url` removed 2026-08-12: none had
                 # a reader, and this is the DOCUMENT-row path, which the earlier
                 # slimming of the page-row path missed — so every file row still
                 # carried them.
-                "section_path": section_path,
-                "record_kind": "document",
+                "section_path": sec,
+                # The engine's per-page placeholder, carried through so a reader
+                # (and the prune below) can tell it from a real document.
+                "record_kind": ("placeholder" if d.get("placeholder")
+                                else "document"),
             },
         )
 
@@ -362,7 +659,7 @@ class GenericSiteCrawler:
             # stored as file_type HTML with no text, which reads as a broken page
             # rather than a PDF nobody has fetched yet.
             file_type=_ext_type(url) if _is_doc(url) else "HTML",
-            doc_path=self._doc_path(section_path),
+            doc_path=self._doc_path(section_path, title),
             document_html=r.get("html") or None,
             content_hash=r.get("content_hash"),
             # extra_meta is stored on every regulation row and read by people, so
@@ -403,10 +700,9 @@ class GenericSiteCrawler:
             return False
         # "auto": include pages only when they carry real prose. On a table site
         # the single synthetic page row has no text and must not become a document.
-        return any((p.get("text_len") or 0) >= MIN_PAGE_TEXT for p in pages)
+        return any((p.get("text_len") or 0) >= self.min_page_text for p in pages)
 
-    @staticmethod
-    def _page_is_document(r: dict) -> bool:
+    def _page_is_document(self, r: dict) -> bool:
         """Is this page a document, or just a folder in the site's tree?
 
         Length alone cannot tell them apart — see MIN_LEAF_TEXT. When the walker
@@ -414,7 +710,7 @@ class GenericSiteCrawler:
         page with children is a folder whose content lives underneath it.
         """
         text_len = r.get("text_len") or 0
-        if text_len >= MIN_PAGE_TEXT:
+        if text_len >= self.min_page_text:
             return True
         n_children = r.get("n_children")
         if n_children is not None:
@@ -456,6 +752,72 @@ class GenericSiteCrawler:
                 if not self._page_is_document(r):
                     continue                      # folder/index page, not a document
                 _add(self._doc_from_page_row(r, shape))
+
+        if self.merge_files_at_same_path:
+            out = self._merge_same_path(out)
+
+        # NOTHING PUBLISHED HERE, AND THAT IS WORTH RECORDING. See
+        # `placeholder_when_empty` in __init__ for why an empty source would
+        # otherwise disappear from the tree entirely.
+        if not out and self.placeholder_when_empty:
+            trail = [self.regulator, self.source_system]
+            if self.category:
+                trail.append(self.category)
+            trail = _clean_trail([p for p in trail if p])
+            logger.info("  no documents: adding the placeholder row at %s",
+                        " > ".join(trail))
+            out.append(RegulatoryDocument(
+                regulator=self.regulator,
+                source_system=self.source_system,
+                category=self._category_for(""),
+                title=self.placeholder_when_empty,
+                # The category's own page. Honest, and distinct per category, so
+                # the (document_url, doc_path, title) identity separates the
+                # placeholders instead of collapsing them into one row.
+                document_url=self.seed_url,
+                published_date=None,
+                source_page_url=self.seed_url,
+                file_type=None,
+                doc_path=trail,
+                # STABLE, and it has to be. `check` refuses a row with no
+                # content_hash: it classifies `modified` on every run and writes
+                # a version row each time, so six standing-still folders would
+                # have grown a version history. Nothing here has text or bytes to
+                # hash, so hash what identifies the row -- the same fallback the
+                # engine uses for a document it has not downloaded
+                # (generic_crawler/crawler.py, `<url>|<title>`).
+                content_hash=hashlib.md5(
+                    re.sub(r"\s+", " ",
+                           "%s|%s" % (self.seed_url, self.placeholder_when_empty))
+                    .strip().lower().encode("utf-8")).hexdigest(),
+                extra_meta={"section_path": "",
+                            # So a reader can tell this from a real document
+                            # without matching on the title text.
+                            "record_kind": "placeholder"},
+            ))
+
+        # A PLACEHOLDER THAT TURNED OUT TO BE WRONG. `empty_page_placeholder`
+        # fires per page, before anything knows about `uncategorised_parents`, so
+        # a category the site reports as empty can still end up holding a real
+        # document once the declared parent is applied — and then the folder both
+        # holds a form and says it publishes none. Keep a placeholder only while
+        # nothing real lives at or below its folder.
+        marks = [d for d in out
+                 if (getattr(d, "extra_meta", None) or {}).get("record_kind")
+                 == "placeholder"]
+        if marks:
+            real = [tuple(d.doc_path or []) for d in out if d not in marks]
+            drop = []
+            for m in marks:
+                folder = tuple((m.doc_path or [])[:-1]) if self.doc_path_title \
+                    else tuple(m.doc_path or [])
+                if folder and any(r[:len(folder)] == folder for r in real):
+                    drop.append(m)
+            if drop:
+                for m in drop:
+                    logger.info("  placeholder dropped, folder is not empty: %s",
+                                " > ".join(m.doc_path or []))
+                out = [d for d in out if d not in drop]
 
         logger.info(
             "GenericSiteCrawler[%s/%s] shape=%s -> %d documents "
@@ -570,16 +932,40 @@ def build_source(cfg: dict):
         max_depth=int(cfg.get("max_depth", 8)),
         out_dir=cfg.get("out_dir"),
         include_pages=cfg.get("include_pages", "auto"),
+        strategy=cfg.get("strategy", "auto"),
+        exclude_documents=cfg.get("exclude_documents"),
+        doc_path_sections=bool(cfg.get("doc_path_sections", True)),
+        min_page_text=cfg.get("min_page_text"),
+        doc_path_title=bool(cfg.get("doc_path_title", False)),
+        doc_path_category=bool(cfg.get("doc_path_category", False)),
+        placeholder_when_empty=cfg.get("placeholder_when_empty"),
+        drop_sections=cfg.get("drop_sections"),
+        uncategorised_parents=cfg.get("uncategorised_parents"),
+        merge_files_at_same_path=bool(cfg.get("merge_files_at_same_path", False)),
         wait_ms=(int(cfg["wait_ms"]) if cfg.get("wait_ms") else None),
     )
 
 
-def build_regulator_crawler(config: dict):
+def build_regulator_crawler(config: dict, only_sources=None):
     """Build the crawler for a whole regulator from its loaded YAML.
 
     A regulator is a LIST of sources, each independently generic or custom, so
     one regulator can mix both — e.g. SAMA's rulebook sectors on the generic
     engine while its circulars keep a tuned runner.
+
+    `only_sources` NARROWS THE BUILD BY SOURCE `name`, and exists because
+    monitoring and coverage are not the same question. LLOC is the case: its
+    Latest window is 144 records in 15 requests and is where new legislation
+    appears first, while its classification section is 1,583 documents over 47
+    minutes. One is a nightly signal, the other a periodic coverage refresh, and
+    they are the same regulator in the same file.
+
+    The alternative was a second config holding only the monitored source, and
+    `build_crawler`'s docstring is the argument against it: a second copy drifts,
+    and then the workbook you approved is not what the monitor watches.
+
+    A name that matches nothing RAISES. Silently monitoring zero sources is the
+    failure this whole file keeps guarding against.
     """
     regulator = config.get("regulator")
     if not regulator:
@@ -594,11 +980,30 @@ def build_regulator_crawler(config: dict):
     if not sources:
         raise ValueError(f"{regulator}: config lists no sources. If that is "
                          f"deliberate, say so in `disabled:`")
+    if only_sources:
+        wanted = {str(x).strip().lower() for x in only_sources}
+        kept = [s for s in sources
+                if str(s.get("name") or "").strip().lower() in wanted]
+        missing = wanted - {str(s.get("name") or "").strip().lower()
+                            for s in sources}
+        if missing:
+            raise ValueError(
+                f"{regulator}: only_sources named {sorted(missing)}, which this "
+                f"config does not define. It has "
+                f"{[s.get('name') for s in sources]}. Refusing to run a narrowed "
+                f"crawl that silently covers less than asked.")
+        sources = kept
 
     built, options = [], []
     for src in sources:
         merged = dict(src)
         merged.setdefault("regulator", regulator)
+        # A site-wide exclusion belongs to the REGULATOR, not to one section, so
+        # the top-level list is the default for every source that names none.
+        if config.get("exclude_documents") is not None:
+            merged.setdefault("exclude_documents", config["exclude_documents"])
+        if config.get("doc_path_sections") is not None:
+            merged.setdefault("doc_path_sections", config["doc_path_sections"])
         built.append(build_source(merged))
         options.append(_source_options(src, config))
     return CompositeCrawler(built, options)
