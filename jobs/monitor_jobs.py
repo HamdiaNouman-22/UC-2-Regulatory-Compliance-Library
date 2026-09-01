@@ -209,12 +209,26 @@ CRAWL_AS_SIGNAL = {
     # single lastmod (its own build time) across all 106 urls. The crawl is ~10
     # page loads and about five minutes for all 214 documents, because a section's
     # ~48 laws are modals in the DOM of one page. See config/change_signals.yml.
-    "Social Insurance Organisation (SIO)": ("sio", False),
+    "Social Insurance Organization (SIO)": ("sio", False),
     # LLOC joined 2026-08-25, NARROWED. The tuple names the config; the job below
     # passes only_sources so the nightly run is the 15-request Latest window and
     # not the 47-minute classification crawl. Anything reading this dict to run a
     # whole regulator would get both — monitor_lloc() is the entry point.
     "Legislation and Legal Opinion Commission (LLOC)": ("lloc", False),
+    # PDPA joined 2026-08-31. The cheapest entry on this list by some distance:
+    # both its sources are max_pages: 1, so the whole regulator is TWO page
+    # loads. Its 60 articles are one page's accordion panels and its 20 executive
+    # decisions are one page's links. See config/change_signals.yml for why
+    # neither stored-inventory nor snapshot-articles is right despite both being
+    # technically available.
+    "Personal Data Protection Authority (PDPA)": ("pdpa", False),
+    # MOIC joined 2026-09-01, and unusually the probe is the EXPENSIVE option: a
+    # stored-inventory sweep is 90 requests against 11 page loads for the whole
+    # regulator, and it cannot see a new form category, which is the thing
+    # moic.yml's discovering Forms source exists to catch. See
+    # config/change_signals.yml for the four alternatives and why each was ruled
+    # out.
+    "Ministry of Industry and Commerce (MOIC)": ("moic", False),
 }
 
 
@@ -399,7 +413,7 @@ def _monitor_cheap_probes_impl() -> dict:
 
 
 def monitor_sio() -> dict:
-    """WEEKLY. Bahrain's Social Insurance Organisation, both sectors.
+    """WEEKLY. Bahrain's Social Insurance Organization, both sectors.
 
     THE CRAWL IS THE SIGNAL BECAUSE NOTHING ELSE ANSWERS. Measured 2026-08-25:
     no ETag, no Last-Modified, not even a Content-Length on any sio.gov.bh page,
@@ -420,8 +434,8 @@ def monitor_sio() -> dict:
     between that and a withdrawal proposal. Hence no `only_sources` here.
     """
     rep = _crawl_into_db("sio", False)
-    logger.info("Social Insurance Organisation (SIO): %s", rep)
-    return {"Social Insurance Organisation (SIO)": rep}
+    logger.info("Social Insurance Organization (SIO): %s", rep)
+    return {"Social Insurance Organization (SIO)": rep}
 
 
 def monitor_lloc() -> dict:
@@ -454,6 +468,88 @@ def monitor_lloc() -> dict:
     rep = _crawl_into_db("lloc", False, only_sources=["Latest Legislation"])
     logger.info("LLOC (Latest Legislation): %s", rep)
     return {"Legislation and Legal Opinion Commission (LLOC)": rep}
+
+
+def monitor_pdpa() -> dict:
+    """WEEKLY. Bahrain's PDPA, both sources — TWO page loads for the whole thing.
+
+    THE CRAWL IS THE SIGNAL, and unusually for this list it is also the cheapest
+    question available rather than the only one left. Both sources are
+    `max_pages: 1`: 60 articles are one page's accordion panels and 20 executive
+    decisions are one page's links, so a full re-crawl costs two GETs. Nothing a
+    probe loop could ask is cheaper than that, and the crawl already returns 82
+    rows with 82 distinct content_hash values.
+
+    WHAT WAS RULED OUT, measured 2026-08-31:
+
+      sitemap           does not exist. /sitemap.xml, /sitemap_index.xml and
+                        /en/sitemap.xml all 403 in 111 bytes from AmazonS3, and so
+                        does a control path that cannot exist — S3's answer for a
+                        missing key. Not a block: the page itself answers 200 in
+                        163,302 bytes to a plain request.
+      stored-inventory  available but wrong twice over. On "The Law", 60 of 62
+                        rows are anchors into ONE page and share one ETag, so it
+                        would report all 60 articles modified on any edit to that
+                        page. On "Executive Decisions/Orders" the 20 pdfs each
+                        have their own honest ETag, but InventorySweep is
+                        covers_inventory = False — it re-reads only urls we
+                        already store and can never see a NEW decision, which is
+                        the main event on that source.
+      snapshot-articles right shape, wrong plumbing. The page does parse into 60
+                        labelled articles with 60 distinct hashes — but only with
+                        Bootstrap 4 class names, which snapshot_sweep() does not
+                        thread through, and it reads a snapshot from formfill's
+                        store because it exists for SIMAH, a host we cannot crawl
+                        at all. We can crawl this one, in one request.
+
+    BOTH SOURCES RUN TOGETHER, and here that is free rather than a constraint:
+    pdpa.yml stores one source_system per source, so each has its own
+    `disappeared` bucket and neither can strand the other.
+
+    KNOWN GAP: a pdf silently replaced at the same url with the same link text is
+    invisible. A discovered document's content_hash is hash("<url>|<title>")
+    (generic_crawler/crawler.py:3476); the ETag-reading stamp_declared() path runs
+    only for --documents entries. See config/change_signals.yml.
+    """
+    rep = _crawl_into_db("pdpa", False)
+    logger.info("Personal Data Protection Authority (PDPA): %s", rep)
+    return {"Personal Data Protection Authority (PDPA)": rep}
+
+
+def monitor_moic() -> dict:
+    """WEEKLY. Bahrain's Ministry of Industry and Commerce, all three sources.
+
+    THE CRAWL IS THE SIGNAL, and here it is also the cheap one. Eleven page loads
+    for 95 documents: Commerce and Industry are one filtered listing each
+    (`?about[0]=19` / `=20`, a clean 74 + 4 partition of the unfiltered 78), and
+    Forms is the index plus the eight sidebar categories it discovers by walking.
+
+    WHY NOT stored-inventory, WHICH GENUINELY WORKS HERE. MOIC's tokens are
+    honest, unlike PDPA's: every sampled pdf returns a stable Apache size-mtime
+    ETag and 90 of 95 rows are distinct pdfs. It loses twice over — a probe is one
+    request per document, so 90 against 11; and InventorySweep is
+    covers_inventory = False, so it re-reads only what we already hold and cannot
+    see a new regulation, a new form, or a new form CATEGORY.
+
+    RULED OUT, measured 2026-09-01: no sitemap (all three paths 404 with the
+    site's 44 KB catch-all, as does a control, and robots.txt names none); no
+    revision feed (/en/news is press releases — one document link on the page and
+    no mention of a decree, resolution or order); snapshot-articles parses 0 items
+    because these rows are files, not article text.
+
+    ALL THREE SOURCES RUN TOGETHER. `disappeared` is scoped by
+    (regulator, source_system) and moic.yml stores three, so each has its own
+    bucket and none can strand another. No `only_sources` here.
+
+    KNOWN GAP: a pdf silently replaced at the same url with the same link text is
+    invisible — a discovered document's content_hash is hash("<url>|<title>").
+    A deliberate `--signal stored-inventory` run is the thing that catches it, and
+    it is worth doing occasionally. Expect 5 false `modified` on the Forms
+    placeholders if you do: they point at tag pages whose gzip ETag moves.
+    """
+    rep = _crawl_into_db("moic", False)
+    logger.info("Ministry of Industry and Commerce (MOIC): %s", rep)
+    return {"Ministry of Industry and Commerce (MOIC)": rep}
 
 
 def monitor_sama() -> dict:
