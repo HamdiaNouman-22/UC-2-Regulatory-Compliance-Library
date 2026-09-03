@@ -121,263 +121,6 @@ sources:
   #    User-Agent gets the real file.
 
 
-  # RERA (BAHRAIN) — A PROBE WOULD WORK AND STILL ANSWER THE WRONG QUESTION.
-  # MEASURED 2026-08-19.
-  #
-  # THE TOKENS ARE THE BEST WE HAVE SEEN. Over all 121 stored CloudFront urls:
-  #   117  HTTP 200, and ALL 117 return BOTH an ETag and a Last-Modified
-  #     4  HTTP 403 AccessDenied — dead objects (a library problem; the sweep
-  #        reports them and stops, the same call MHRSD's 63rd document got)
-  # and eight urls fetched twice 0.4s apart came back 8/8 IDENTICAL. Real
-  # per-object tokens, not a clock — which is what earns `confirm: false` here,
-  # unlike ZATCA and CMA where the token moves on every request.
-  #
-  # BUT DISCOVERY IS THE WHOLE POINT FOR THIS REGULATOR, and a probe cannot do it.
-  # A probe re-reads urls we already store, so it reports only that an existing
-  # PDF was silently replaced. What actually happens at RERA is that a new
-  # circular appears at a NEW url — and circulars are partitioned BY YEAR, so a
-  # new year is a new PAGE:
-  #
-  #     /en/regulations/circulars/circulars-issued-in-2020    25 documents
-  #     /en/regulations/circulars/Circulars-issued-in-2025     2
-  #     /en/regulations/circulars/Circulars-issued-in-2026     404, not yet created
-  #
-  # RERA published two circulars in 2025, so the modification case a probe covers
-  # is nearly hypothetical while the discovery case it cannot cover is everything.
-  # Hence `signal: crawl`. config/sources/rera.yml seeds the circulars source at
-  # the PARENT so prefix scope picks up the 2026 page the first time it exists.
-  #
-  # A DELIBERATE stored-inventory run is still worth doing occasionally — it is
-  # the only thing that would catch a silent replacement. Same reasoning as the
-  # note on SAMA's feed, for the opposite half of the problem.
-  #
-  # www.rera.gov.bh SERVES AN INCOMPLETE CERTIFICATE CHAIN — it omits the
-  # intermediate CA, which browsers tolerate and python does not:
-  #   requests.get(...)               -> SSLError CERTIFICATE_VERIFY_FAILED,
-  #                                      "unable to get local issuer certificate"
-  #   requests.get(..., verify=False) -> 200, 206 KB
-  # The crawl is unaffected (Playwright runs with ignore_https_errors). Only 2 of
-  # 123 documents are hosted there — the other 121 are on CloudFront, whose chain
-  # is fine — so those two will read `unknown` on any probe. That is explained,
-  # not degradation. Do NOT disable verification globally to "fix" it.
-  #
-  # IDENTITY STAYS THE DEFAULT because RERA exposes no publisher id: no GUID, no
-  # per-document reference number. The cost is stated so it is not rediscovered:
-  # the CDN filename is a content hash, so a re-upload arrives at a NEW url and
-  # reads as one `new` plus one `disappeared` rather than `modified`. Worse for
-  # the rows whose TITLE is also that hash (best_doc_title falls through to the
-  # slug when anchor text is generic), where two of the three identity fields
-  # carry no meaning. Fixing the titles is crawler-side work.
-  # RECONCILED 2026-08-20: this said source_system "Circulars" while
-  # config/sources/rera.yml now stores RERA's own page title. A sweep looks a
-  # source up by (regulator, source_system), so while the two disagreed this
-  # entry matched nothing and every RERA document was invisible to monitoring --
-  # the same failure CMA hit when its stored regulator became the full name.
-  - regulator: "Real Estate Regulatory Authority (RERA)"
-    source_system: "RERA Circulars and Instructions"
-    signal: crawl
-    confirm: false
-
-  # SOCIAL INSURANCE ORGANISATION (BAHRAIN) — THE CRAWL IS THE ONLY SIGNAL.
-  # MEASURED 2026-08-25, all three cheaper options ruled out rather than assumed:
-  #
-  #   stored-inventory  IMPOSSIBLE. sio.gov.bh returns NO version token at all —
-  #                     no ETag, no Last-Modified, not even a Content-Length, on
-  #                     any page tested. There is nothing for a probe to read.
-  #   sitemap           REFUSED BY ITS OWN GATE. /sitemap.xml exists and carries
-  #                     a <lastmod> on all 106 urls, but ONE distinct value:
-  #                     2025-06-17T09:14:37+00:00, the sitemap's build time.
-  #                     Distinct ratio 0.005 against MIN_DISTINCT_RATIO 0.2. It
-  #                     fails MIN_OVERLAP too (0.047): SIO's documents are
-  #                     `<page>#<modal-id>` urls and `normalise()` keeps
-  #                     fragments, so only the 10 page rows match at all.
-  #   snapshot-articles WRONG TOOL. It re-hashes pages already saved on disk with
-  #                     no request, for hosts we are BLOCKED from. SIO is
-  #                     reachable, and an offline re-hash cannot see new content.
-  #
-  # AND THE CRAWL IS CHEAP, which is what makes this fine rather than a
-  # compromise: ~10 page loads and about five minutes for all 214 documents,
-  # because a section's ~48 laws are Bootstrap modals in the DOM of ONE page.
-  # Same reasoning MOH and CBE joined CRAWL_AS_SIGNAL on — a probe step here
-  # would be pure overhead.
-  #
-  # TWO ENTRIES, ONE PER SECTOR, because that is what config/sources/sio.yml
-  # stores as source_system and a sweep looks a source up by
-  # (regulator, source_system). The eight sections live in `category`; giving
-  # them entries here would name source_systems that do not exist — the drift
-  # that made every RERA document invisible to monitoring until 2026-08-20.
-  - regulator: "Social Insurance Organization (SIO)"
-    source_system: "Private Sectors"
-    signal: crawl
-    confirm: false
-
-  - regulator: "Social Insurance Organization (SIO)"
-    source_system: "Public Sectors"
-    signal: crawl
-    confirm: false
-
-  # LLOC (BAHRAIN) — MONITORED THROUGH `Latest Legislation` ONLY.
-  # MEASURED 2026-08-25:
-  #
-  #   sitemap           DOES NOT EXIST. /sitemap.xml, /robots.txt and
-  #                     /en/sitemap.xml all answer 404. That needed proving:
-  #                     this host's throttle serves a 1,245-byte IIS 404 for
-  #                     paths that DO exist, so the first check was worthless.
-  #                     Re-run with a known-good control page in the same
-  #                     session (/en/Legislation/Category, 200, 31,991 bytes)
-  #                     both are genuinely absent.
-  #   stored-inventory  POSSIBLE AND NOT WORTH IT. The files answer honestly —
-  #                     PDF/L1293.pdf returns ETag 0c32ff5f263c41:0,
-  #                     Last-Modified Wed, 07 Jul 2004, Content-Length 79050 —
-  #                     but a probe is one request per stored document, and the
-  #                     classification section holds 1,583. At the mandatory
-  #                     2.5s spacing that is ~66 minutes, SLOWER than the 47
-  #                     minute crawl, on the host that answers bursts with a 404.
-  #
-  # So the signal is the Latest window: 144 records in 15 requests, and
-  # config/sources/lloc.yml already argues it is where new Bahraini legislation
-  # appears first, with its Official Gazette number.
-  #
-  # THE CLASSIFICATION SECTION IS DELIBERATELY NOT MONITORED. It is coverage, not
-  # a signal: 1,583 documents, 2,838 seconds measured. jobs/monitor_jobs.py
-  # narrows the nightly run with `only_sources=["Latest Legislation"]` rather
-  # than a second config file, so the monitored source and the exported source
-  # cannot drift apart. Run the classifications as a periodic refresh by hand.
-  #
-  # No entry for the 24 classification source_systems: the defaults apply, the
-  # same choice CBE's eleven sections made above.
-  - regulator: "Legislation and Legal Opinion Commission (LLOC)"
-    source_system: "Latest Legislation"
-    signal: crawl
-    confirm: false
-  # PDPA (Bahrain), both sources. MEASURED 2026-08-31, and `crawl` here is not
-  # the fallback it usually is -- it is the CHEAPEST question available, because
-  # each source is ONE page load (both are max_pages: 1 in config/sources/pdpa.yml).
-  #
-  #   sitemap           NONE. /sitemap.xml, /sitemap_index.xml and /en/sitemap.xml
-  #                     all answer 403 in 111 bytes from `server: AmazonS3`, and so
-  #                     does a control path that cannot exist -- which is what S3
-  #                     returns for a missing key when listing is denied. So this
-  #                     is "no sitemap", proven, not a block: /en/regulations.html
-  #                     answers 200 in 163,302 bytes to a plain request with only
-  #                     a User-Agent.
-  #   stored-inventory  Every document DOES return an ETag, opaque but stable, so
-  #                     this is available -- and it is still the wrong signal for
-  #                     either source. See the two notes below.
-  #   snapshot-articles Right shape, wrong plumbing. See "The Law" below.
-  #   sama-feed         No "what changed" page on the site.
-  #
-  - regulator: "Personal Data Protection Authority (PDPA)"
-    source_system: "The Law"
-    signal: crawl
-    confirm: false
-    # 60 of this source's 62 rows are ANCHORS INTO ONE PAGE
-    # (regulations.html#faqOne ... #faqSixty), so they share a single HTTP
-    # object: `#faqOne` and `#faqTwo` return the identical ETag
-    # 35237d1023d5c414d38d47a2c379fbae. `stored-inventory` would therefore call
-    # all 60 articles modified on any edit to that page, including an edit to
-    # something else on it entirely -- which is the exact failure
-    # `snapshot-articles` was written to fix.
-    #
-    # And `snapshot-articles` IS the right shape here: the page parses into 60
-    # labelled articles with 60 distinct hashes. But only with Bootstrap 4 class
-    # names (`card-header` / `card-body`); the module's defaults are Bootstrap 5
-    # (`accordion-button` / `accordion-body`) and parse 0 items on this page, and
-    # `snapshot_sweep()` does not thread those names through. It also reads a
-    # snapshot from formfill's SnapshotStore with a grace period, because it was
-    # built for SIMAH -- a host we are BLOCKED from and cannot crawl.
-    #
-    # We are not blocked from this one. The crawl is a single GET and it already
-    # produces exactly what snapshot-articles would: 62 rows, 62 DISTINCT
-    # content_hash values, one per article, each over the article's extracted
-    # text. There is nothing cheaper to ask and nothing more precise to ask.
-  - regulator: "Personal Data Protection Authority (PDPA)"
-    source_system: "Executive Decisions/Orders"
-    signal: crawl
-    confirm: false
-    # 20 distinct pdfs, each with its own honest ETag, so `stored-inventory`
-    # genuinely works here -- and it CANNOT BE THE ONE SIGNAL, because
-    # InventorySweep sets covers_inventory = False
-    # (dynamic_crawler/inventory_sweep.py:102). It probes only the urls we
-    # already store, so a NEW executive decision appearing on the page is not
-    # something it can observe. New decisions are the main event on this source.
-    #
-    # KNOWN GAP, recorded rather than papered over: a pdf silently REPLACED at
-    # the same url with the same link text is invisible to `crawl`. For a
-    # discovered document the engine stamps
-    # content_hash = hash("<url>|<title>") (generic_crawler/crawler.py:3476) --
-    # the ETag-reading path, stamp_declared(), runs only for --documents entries,
-    # which this config does not use. So the crawl sees additions, removals and
-    # retitles, and not that. Closing it means either declaring these 20 urls or
-    # teaching the engine to stamp discovered documents from a HEAD, and the
-    # second changes every regulator; neither is done here.
-
-  # MOIC (BAHRAIN) — `crawl`, AND HERE THE PROBE IS THE EXPENSIVE OPTION.
-  # MEASURED 2026-09-01, all four alternatives tested rather than assumed:
-  #
-  #   sitemap            DOES NOT EXIST. /sitemap.xml, /sitemap_index.xml and
-  #                      /en/sitemap.xml all answer 404 with a 44 KB soft-404 HTML
-  #                      page -- and so does a control path that cannot exist, so
-  #                      the 404 is the site's catch-all, not a missing file.
-  #                      robots.txt is live (200, 2,027 bytes) and names NO sitemap.
-  #   sama-feed          NO REVISION PAGE. /en/news exists and is press releases:
-  #                      21,578 captured characters, ONE document link on the whole
-  #                      page, and no mention of a decree, resolution, ministerial
-  #                      order or law. It reports events, not document changes.
-  #   snapshot-articles  WRONG SHAPE. 0 items parsed with either Bootstrap 4 or 5
-  #                      accordion classes. MOIC's rows are FILES, not article
-  #                      text -- `with_text` is 0 of 95.
-  #   stored-inventory   GENUINELY AVAILABLE, and still not the right choice. See
-  #                      below; this is the RERA case, not the PDPA one.
-  #
-  # STORED-INVENTORY WOULD WORK. Unlike PDPA, where 60 articles are anchors into
-  # one page and share a single ETag, MOIC's tokens are honest and per-document:
-  # every sampled pdf returns an Apache size-mtime ETag, stable across two reads
-  # (52b2f2-5d1d79f0a9d00, 5dbf7-5d1d799f99dc0, ... 6/6 `etag-opaque`), and 90 of
-  # the 95 rows are distinct pdfs.
-  #
-  # IT LOSES ON COST AND ON DISCOVERY.
-  #   cost       a probe is one request per stored document: 90 requests. The
-  #              crawl is ELEVEN page loads -- Commerce 1, Industry 1, Forms 9.
-  #              The cheap signal is the expensive one here.
-  #   discovery  InventorySweep sets covers_inventory = False
-  #              (dynamic_crawler/inventory_sweep.py:102): it re-reads only urls
-  #              we already hold. A new regulation, a new form, or a NEW FORM
-  #              CATEGORY is invisible to it -- and catching a new category is
-  #              exactly what config/sources/moic.yml's discovering Forms source
-  #              was built for.
-  #
-  # RUN stored-inventory DELIBERATELY NOW AND THEN. It is the only thing that
-  # catches a pdf silently REPLACED at the same url with the same link text: a
-  # discovered document's content_hash is hash("<url>|<title>")
-  # (generic_crawler/crawler.py:3476), so the crawl sees additions, removals and
-  # retitles, and not that. Same standing note as RERA above.
-  #
-  # ONE WRINKLE IF YOU DO. Five Forms rows are placeholders for categories that
-  # publish nothing, and they point at a tag PAGE rather than a file. A tag page's
-  # ETag is `1788244496-gzip` -- a gzip ETag on a dynamic page, which moves when
-  # the rendered bytes move. Those five would report `modified` as noise under a
-  # probe. Under `crawl` they do not: their content_hash is stable by construction.
-  #
-  # THREE ENTRIES, because config/sources/moic.yml stores three source_systems and
-  # a sweep looks a source up by (regulator, source_system). Commerce and Industry
-  # are the site's own `?about[0]` filters; Forms is the one discovering source
-  # that walks the sidebar.
-  - regulator: "Ministry of Industry and Commerce (MOIC)"
-    source_system: "Commerce"
-    signal: crawl
-    confirm: false
-
-  - regulator: "Ministry of Industry and Commerce (MOIC)"
-    source_system: "Industry"
-    signal: crawl
-    confirm: false
-
-  - regulator: "Ministry of Industry and Commerce (MOIC)"
-    source_system: "Forms"
-    signal: crawl
-    confirm: false
-
   # RECONCILED 2026-08-14 with the form, which now stores the full name and the
   # acronym. Both halves of the pair name the source.
   - regulator: "Saudi Data and AI Authority (SDAIA)"
@@ -480,7 +223,7 @@ sources:
   # The 34 rows are a mix, so this cannot be settled by url: the PDFs would pass
   # on their token alone, and confirming them costs a fetch we would otherwise
   # skip. That is the price of one setting for the source.
-  - regulator: "ZATCA"
+  - regulator: "Zakat, Tax and Customs Authority (ZATCA)"
     source_system: "Rules and Regulations"
     confirm: true
 
@@ -660,6 +403,530 @@ sources:
     # wrapper call whose short return looks like a clean run.
     signal: crawl
     confirm: true
+
+  # MLCU (EGYPT) — `crawl` IS A MEASURED CONCLUSION HERE, NOT A DEFAULT.
+  #
+  # Every cheaper candidate was tested and ruled out. MEASURED 2026-08-17:
+  #
+  #   ETag / Last-Modified   ABSENT on every response — section pages and PDFs
+  #                          alike. So `stored-inventory` has no token to read.
+  #   sitemap.xml            190 urls and NO <lastmod> on any of them, so
+  #                          `signal: sitemap` cannot work either.
+  #   3145 اخبار as a feed   RULED OUT, and this is the one worth recording
+  #                          because it looks promising until you fetch it. The
+  #                          page carries 0 links to documents, 0 date-shaped
+  #                          strings, 0 four-digit years, no pagination and no
+  #                          ordering by id. Its 15 news items are ALL titled
+  #                          "اقرا المزيد" ("read more"); nearly every other
+  #                          link on it is the site navigation menu. A feed
+  #                          signal needs dates or instrument links to be worth
+  #                          anything, and it has neither — so it could only
+  #                          ever say "a news post appeared", which over-fires
+  #                          on events and FATF notices and stays SILENT when a
+  #                          PDF is replaced in place. Silence is the direction
+  #                          that loses a regulation.
+  #   raw body sha256        MOVES ON EVERY FETCH — three different hashes in
+  #                          three seconds. Cause found: ASP.NET __VIEWSTATE,
+  #                          regenerated per render.
+  #   visible text sha256    STABLE across those same three fetches
+  #                          (ff2617829798322d).
+  #
+  # The crawl is also small enough that a probe would save almost nothing: five
+  # section pages plus 24 PDFs.
+  #
+  # `confirm: true` is recorded rather than exercised. No probe runs under
+  # `signal: crawl`. But if anyone ever runs a deliberate `--signal
+  # stored-inventory --limit N` against a slice here, the two measurements above
+  # say it MUST hash visible text — the raw body would report every document as
+  # changed on every run, which is exactly the CMA pathology that produced 1,134
+  # false changes.
+  #
+  # IDENTITY IS NOT THE DEFAULT, and it has to match the crawl's.
+  # config/sources/mlcu.yml sets `identity: [doc_path, title]` because 3144
+  # already holds a `_v2` filename and a `_v3` re-upload moves document_url. If
+  # monitoring keyed on the default the sweep and the orchestrator would build
+  # different keys, and no withdrawal could ever accumulate — silently, which is
+  # how that fault behaved for a whole day on 2026-08-16.
+  - regulator: "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
+    source_system: "Legislative and Supervisory Framework"
+    signal: crawl
+    confirm: true
+    identity: [doc_path, title]
+
+  # BAHRAIN BOURSE (BHB) — MEASURED 2026-08-20. The Legal Framework accordion
+  # (Laws, Rules & Regulations, Resolutions, Guidelines, Circulars, CBB Rules &
+  # Regulations, Consultation) is entirely client-rendered — a plain fetch of
+  # the page contains none of it — but the page's own JS calls one API,
+  # GetFaq, which returns all seven sections in a single ~20 KB request. No
+  # probe can improve on that, so the crawl is the signal, same reasoning as
+  # CBE's circulars and MOH. Every document carries its own real per-file PDF
+  # url, so the default identity applies unmodified — see
+  # crawler/bahrain_bourse_crawler.py: doc_path puts the section name in the
+  # folder tree (Laws, Circulars, ... as their own folders under Legal
+  # Framework), so an item migrating between sections, e.g. a Consultation
+  # becoming a Guideline, DOES read as one document disappearing and a new one
+  # appearing — accepted deliberately, to match the site's own accordion
+  # structure.
+  - regulator: "Bahrain Bourse (BHB)"
+    source_system: "Legal Framework"
+    signal: crawl
+    confirm: false
+
+  # CENTRAL BANK OF BAHRAIN — migrated onto the config flow 2026-08-20 from a
+  # bespoke pipeline (~1,500 lines, its own orchestrator branch, its own API
+  # endpoint, and the only `enabled: true` monitoring job in the repo).
+  #
+  # 1. IT HAS A NATIVE REVISION FEED, AND IT IS THE BEST SIGNAL HERE.
+  #    CBB's rulebook is hosted on Thomson Reuters, which publishes
+  #      https://cbben.thomsonreuters.com/view-revision-updates
+  #    — the regulator's own "what changed in this date range" page, server-
+  #    rendered Drupal, already read by site_runners/cbb_updates.py. No probe, no
+  #    inference, no stamp that can go stale without saying so.
+  #
+  #    SAMA runs on the SAME platform with the same endpoint
+  #    (rulebook.sama.gov.sa/en/view-revision-updates, dynamic_crawler/
+  #    sama_feed_signal.py). Two regulators, one pattern. Check for it on any new
+  #    Thomson Reuters-hosted regulator BEFORE building probe adapters.
+  #
+  #    IT CANNOT SEE DELETIONS — a withdrawn document simply stops appearing. So
+  #    the feed makes the full crawl RARE, not unnecessary; `disappeared` still
+  #    comes from the crawl, which is why `signal: crawl` below and not a feed
+  #    signal. Wiring the feed as a shortlist producer is the next step.
+  #
+  # 2. THE RULEBOOK SOURCES CARRY NO document_url, AND THAT IS HONEST.
+  #    MEASURED 2026-08-20: mode 2a returned 43 documents, 43 of them with an
+  #    EMPTY document_url and an empty source_page_url; mode 4 returned 1,095
+  #    with 783 empty. These are rulebook SECTIONS ("2.4", "Article 1
+  #    Definitions"), not files — they have no url of their own to carry.
+  #
+  #    The default identity is (document_url, doc_path, title) and blank fields
+  #    are dropped, so those rows are identified by doc_path + title alone. That
+  #    works — doc_path holds the full section hierarchy, which is what makes a
+  #    bare "2.4" unique — but it means a RESTRUCTURE of the rulebook reads as
+  #    documents disappearing. Declared explicitly rather than left to the blank-
+  #    dropping rule, so the intent is visible and `_check_identities` still
+  #    refuses a run where both are empty.
+  #
+  #    The gap worth closing later: give those sections a real url. Thomson
+  #    Reuters serves them at /entiresection/<id>, which the sub-crawler already
+  #    fetches — it just does not keep the per-leaf address.
+  #
+  # 3. MODE 1 WAS WRITING UNDER MODE 5's NAME. `_scrape_resolution` stamped
+  #    "CBB-Compliance" on Thomson Reuters Regulations and Resolutions. Two
+  #    sources under one source_system means each one's completeness gate scopes
+  #    onto the other's rows — the MHRSD failure. Corrected in
+  #    crawler/cbb_source.py::SOURCE_SYSTEM_OVERRIDE while the database held 0
+  #    CBB rows, so the rename cost nothing.
+  - regulator: "Central Bank of Bahrain"
+    source_system: "CBB-Rulebook"
+    signal: crawl
+    identity: [doc_path, title]
+    confirm: false
+
+  - regulator: "Central Bank of Bahrain"
+    source_system: "CBB-AML-LAW"
+    signal: crawl
+    identity: [doc_path, title]
+    confirm: false
+
+  - regulator: "Central Bank of Bahrain"
+    source_system: "CBB-CORPGOV"
+    signal: crawl
+    identity: [doc_path, title]
+    confirm: false
+
+  # 783 of 1,095 have no document_url; the rest are real files. doc_path + title
+  # covers both, and adding document_url would ONLY narrow the match for the 312
+  # that have one, since identity fields are ANDed.
+  - regulator: "Central Bank of Bahrain"
+    source_system: "CBB-Capital-Market-Regulations"
+    signal: crawl
+    identity: [doc_path, title]
+    confirm: false
+
+  # These three DO carry a per-file url on every row (measured: mode 3 -> 10/10,
+  # mode 5 -> 76/76), so the default identity applies unmodified.
+  - regulator: "Central Bank of Bahrain"
+    source_system: "CBB-Regulations-and-Resolutions"
+    signal: crawl
+    confirm: false
+
+  - regulator: "Central Bank of Bahrain"
+    source_system: "CBB-Laws-Regulations"
+    signal: crawl
+    confirm: false
+
+  - regulator: "Central Bank of Bahrain"
+    source_system: "CBB-Compliance"
+    signal: crawl
+    confirm: false
+
+  # ---------------------------------------------------------------------
+  # BAHRAIN, added by abeeraslam 2026-08-25 (branch abeeraslam-compliance)
+  # ---------------------------------------------------------------------
+  # Her ZATCA entry from the same branch is deliberately NOT taken: it
+  # names the regulator "ZATCA", and this file already carries the renamed
+  # "Zakat, Tax and Customs Authority (ZATCA)". Two entries for one
+  # regulator under different names would give the sweep two memories of
+  # the same documents -- the MHRSD failure this file records elsewhere.
+  # 2. THE HTML SECTIONS: their stored rows are mostly /-/media/ PDFs, and those
+  #    answer a probe HONESTLY — procurement.pdf returns
+  #    ETag ffc4891297f348f3be3d044356700fdb and
+  #    Last-Modified Thu, 16 Jun 2022 07:14:19 GMT. Real values, not a clock, so
+  #    `confirm: false` and the default stored-inventory sweep works for them.
+  #
+  #    EXPECT SOME `unknown`, AND IT IS NOT DEGRADATION. A row whose
+  #    document_url is an HTML page has no token at all to read: no
+  #    Last-Modified and no ETag on any of the five pages tested. `unknown` is
+  #    the honest answer there and pulls no crawl; those rows are covered by
+  #    re-crawling the section, not by probing it.
+  #
+  #    AND DO NOT WIRE THE ON-PAGE STAMP. Every page carries
+  #      <span class="newsupdateddata"> Last Updated: 23 Mar 2023 </span>
+  #    and it reads 23 Mar 2023 on /en/laws-regulations, /en/governance,
+  #    /en/aml-cft and /en/laws-regulations/laws/banking-laws alike — unrelated
+  #    pages, one build-time constant, three years stale (robots.txt carries
+  #    Last-Modified: 25 Mar 2023, the same deployment).
+  #
+  #    This is the CMA lesson INVERTED. CMA's Last-Modified returned the current
+  #    time and reported 1,134 FALSE changes — loud, and someone fixed it. This
+  #    one would report ZERO changes forever, silently. A signal that never fires
+  #    is indistinguishable from a site that never changes.
+  #
+  #    One entry per section would be eleven near-identical blocks, so the
+  #    defaults are deliberately left to apply and only the exceptions are
+  #    listed. Add a section here when it needs a setting the defaults do not
+  #    give it.
+  #
+  # 3. NOTE FOR WHOEVER RUNS THE SWEEP: cbe.org.eg refuses HEAD with 403 and
+  #    answers GET with 200. inventory_sweep already uses
+  #    requests.get(stream=True), so it reads the headers and closes without
+  #    pulling the body — no change needed, but do not "optimise" it to a HEAD.
+  #    Separately, the host rejects urllib's header signature with a 269-byte
+  #    "Request Rejected" page served as HTTP 200; requests with the same
+  #    User-Agent gets the real file.
+
+
+  # RERA (BAHRAIN) — A PROBE WOULD WORK AND STILL ANSWER THE WRONG QUESTION.
+  # MEASURED 2026-08-19.
+  #
+  # THE TOKENS ARE THE BEST WE HAVE SEEN. Over all 121 stored CloudFront urls:
+  #   117  HTTP 200, and ALL 117 return BOTH an ETag and a Last-Modified
+  #     4  HTTP 403 AccessDenied — dead objects (a library problem; the sweep
+  #        reports them and stops, the same call MHRSD's 63rd document got)
+  # and eight urls fetched twice 0.4s apart came back 8/8 IDENTICAL. Real
+  # per-object tokens, not a clock — which is what earns `confirm: false` here,
+  # unlike ZATCA and CMA where the token moves on every request.
+  #
+  # BUT DISCOVERY IS THE WHOLE POINT FOR THIS REGULATOR, and a probe cannot do it.
+  # A probe re-reads urls we already store, so it reports only that an existing
+  # PDF was silently replaced. What actually happens at RERA is that a new
+  # circular appears at a NEW url — and circulars are partitioned BY YEAR, so a
+  # new year is a new PAGE:
+  #
+  #     /en/regulations/circulars/circulars-issued-in-2020    25 documents
+  #     /en/regulations/circulars/Circulars-issued-in-2025     2
+  #     /en/regulations/circulars/Circulars-issued-in-2026     404, not yet created
+  #
+  # RERA published two circulars in 2025, so the modification case a probe covers
+  # is nearly hypothetical while the discovery case it cannot cover is everything.
+  # Hence `signal: crawl`. config/sources/rera.yml seeds the circulars source at
+  # the PARENT so prefix scope picks up the 2026 page the first time it exists.
+  #
+  # A DELIBERATE stored-inventory run is still worth doing occasionally — it is
+  # the only thing that would catch a silent replacement. Same reasoning as the
+  # note on SAMA's feed, for the opposite half of the problem.
+  #
+  # www.rera.gov.bh SERVES AN INCOMPLETE CERTIFICATE CHAIN — it omits the
+  # intermediate CA, which browsers tolerate and python does not:
+  #   requests.get(...)               -> SSLError CERTIFICATE_VERIFY_FAILED,
+  #                                      "unable to get local issuer certificate"
+  #   requests.get(..., verify=False) -> 200, 206 KB
+  # The crawl is unaffected (Playwright runs with ignore_https_errors). Only 2 of
+  # 123 documents are hosted there — the other 121 are on CloudFront, whose chain
+  # is fine — so those two will read `unknown` on any probe. That is explained,
+  # not degradation. Do NOT disable verification globally to "fix" it.
+  #
+  # IDENTITY STAYS THE DEFAULT because RERA exposes no publisher id: no GUID, no
+  # per-document reference number. The cost is stated so it is not rediscovered:
+  # the CDN filename is a content hash, so a re-upload arrives at a NEW url and
+  # reads as one `new` plus one `disappeared` rather than `modified`. Worse for
+  # the rows whose TITLE is also that hash (best_doc_title falls through to the
+  # slug when anchor text is generic), where two of the three identity fields
+  # carry no meaning. Fixing the titles is crawler-side work.
+  # RECONCILED 2026-08-20: this said source_system "Circulars" while
+  # config/sources/rera.yml now stores RERA's own page title. A sweep looks a
+  # source up by (regulator, source_system), so while the two disagreed this
+  # entry matched nothing and every RERA document was invisible to monitoring --
+  # the same failure CMA hit when its stored regulator became the full name.
+  - regulator: "Real Estate Regulatory Authority (RERA)"
+    source_system: "RERA Circulars and Instructions"
+    signal: crawl
+    confirm: false
+
+  # SOCIAL INSURANCE ORGANISATION (BAHRAIN) — THE CRAWL IS THE ONLY SIGNAL.
+  # MEASURED 2026-08-25, all three cheaper options ruled out rather than assumed:
+  #
+  #   stored-inventory  IMPOSSIBLE. sio.gov.bh returns NO version token at all —
+  #                     no ETag, no Last-Modified, not even a Content-Length, on
+  #                     any page tested. There is nothing for a probe to read.
+  #   sitemap           REFUSED BY ITS OWN GATE. /sitemap.xml exists and carries
+  #                     a <lastmod> on all 106 urls, but ONE distinct value:
+  #                     2025-06-17T09:14:37+00:00, the sitemap's build time.
+  #                     Distinct ratio 0.005 against MIN_DISTINCT_RATIO 0.2. It
+  #                     fails MIN_OVERLAP too (0.047): SIO's documents are
+  #                     `<page>#<modal-id>` urls and `normalise()` keeps
+  #                     fragments, so only the 10 page rows match at all.
+  #   snapshot-articles WRONG TOOL. It re-hashes pages already saved on disk with
+  #                     no request, for hosts we are BLOCKED from. SIO is
+  #                     reachable, and an offline re-hash cannot see new content.
+  #
+  # AND THE CRAWL IS CHEAP, which is what makes this fine rather than a
+  # compromise: ~10 page loads and about five minutes for all 214 documents,
+  # because a section's ~48 laws are Bootstrap modals in the DOM of ONE page.
+  # Same reasoning MOH and CBE joined CRAWL_AS_SIGNAL on — a probe step here
+  # would be pure overhead.
+  #
+  # TWO ENTRIES, ONE PER SECTOR, because that is what config/sources/sio.yml
+  # stores as source_system and a sweep looks a source up by
+  # (regulator, source_system). The eight sections live in `category`; giving
+  # them entries here would name source_systems that do not exist — the drift
+  # that made every RERA document invisible to monitoring until 2026-08-20.
+
+  # SOCIAL INSURANCE ORGANISATION (BAHRAIN) — THE CRAWL IS THE ONLY SIGNAL.
+  # MEASURED 2026-08-25, all three cheaper options ruled out rather than assumed:
+  #
+  #   stored-inventory  IMPOSSIBLE. sio.gov.bh returns NO version token at all —
+  #                     no ETag, no Last-Modified, not even a Content-Length, on
+  #                     any page tested. There is nothing for a probe to read.
+  #   sitemap           REFUSED BY ITS OWN GATE. /sitemap.xml exists and carries
+  #                     a <lastmod> on all 106 urls, but ONE distinct value:
+  #                     2025-06-17T09:14:37+00:00, the sitemap's build time.
+  #                     Distinct ratio 0.005 against MIN_DISTINCT_RATIO 0.2. It
+  #                     fails MIN_OVERLAP too (0.047): SIO's documents are
+  #                     `<page>#<modal-id>` urls and `normalise()` keeps
+  #                     fragments, so only the 10 page rows match at all.
+  #   snapshot-articles WRONG TOOL. It re-hashes pages already saved on disk with
+  #                     no request, for hosts we are BLOCKED from. SIO is
+  #                     reachable, and an offline re-hash cannot see new content.
+  #
+  # AND THE CRAWL IS CHEAP, which is what makes this fine rather than a
+  # compromise: ~10 page loads and about five minutes for all 214 documents,
+  # because a section's ~48 laws are Bootstrap modals in the DOM of ONE page.
+  # Same reasoning MOH and CBE joined CRAWL_AS_SIGNAL on — a probe step here
+  # would be pure overhead.
+  #
+  # TWO ENTRIES, ONE PER SECTOR, because that is what config/sources/sio.yml
+  # stores as source_system and a sweep looks a source up by
+  # (regulator, source_system). The eight sections live in `category`; giving
+  # them entries here would name source_systems that do not exist — the drift
+  # that made every RERA document invisible to monitoring until 2026-08-20.
+  - regulator: "Social Insurance Organisation (SIO)"
+    source_system: "Private Sectors"
+    signal: crawl
+    confirm: false
+
+  - regulator: "Social Insurance Organisation (SIO)"
+    source_system: "Public Sectors"
+    signal: crawl
+    confirm: false
+
+  # LLOC (BAHRAIN) — MONITORED THROUGH `Latest Legislation` ONLY.
+  # MEASURED 2026-08-25:
+  #
+  #   sitemap           DOES NOT EXIST. /sitemap.xml, /robots.txt and
+  #                     /en/sitemap.xml all answer 404. That needed proving:
+  #                     this host's throttle serves a 1,245-byte IIS 404 for
+  #                     paths that DO exist, so the first check was worthless.
+  #                     Re-run with a known-good control page in the same
+  #                     session (/en/Legislation/Category, 200, 31,991 bytes)
+  #                     both are genuinely absent.
+  #   stored-inventory  POSSIBLE AND NOT WORTH IT. The files answer honestly —
+  #                     PDF/L1293.pdf returns ETag 0c32ff5f263c41:0,
+  #                     Last-Modified Wed, 07 Jul 2004, Content-Length 79050 —
+  #                     but a probe is one request per stored document, and the
+  #                     classification section holds 1,583. At the mandatory
+  #                     2.5s spacing that is ~66 minutes, SLOWER than the 47
+  #                     minute crawl, on the host that answers bursts with a 404.
+  #
+  # So the signal is the Latest window: 144 records in 15 requests, and
+  # config/sources/lloc.yml already argues it is where new Bahraini legislation
+  # appears first, with its Official Gazette number.
+  #
+  # THE CLASSIFICATION SECTION IS DELIBERATELY NOT MONITORED. It is coverage, not
+  # a signal: 1,583 documents, 2,838 seconds measured. jobs/monitor_jobs.py
+  # narrows the nightly run with `only_sources=["Latest Legislation"]` rather
+  # than a second config file, so the monitored source and the exported source
+  # cannot drift apart. Run the classifications as a periodic refresh by hand.
+  #
+  # No entry for the 24 classification source_systems: the defaults apply, the
+  # same choice CBE's eleven sections made above.
+
+  # LLOC (BAHRAIN) — MONITORED THROUGH `Latest Legislation` ONLY.
+  # MEASURED 2026-08-25:
+  #
+  #   sitemap           DOES NOT EXIST. /sitemap.xml, /robots.txt and
+  #                     /en/sitemap.xml all answer 404. That needed proving:
+  #                     this host's throttle serves a 1,245-byte IIS 404 for
+  #                     paths that DO exist, so the first check was worthless.
+  #                     Re-run with a known-good control page in the same
+  #                     session (/en/Legislation/Category, 200, 31,991 bytes)
+  #                     both are genuinely absent.
+  #   stored-inventory  POSSIBLE AND NOT WORTH IT. The files answer honestly —
+  #                     PDF/L1293.pdf returns ETag 0c32ff5f263c41:0,
+  #                     Last-Modified Wed, 07 Jul 2004, Content-Length 79050 —
+  #                     but a probe is one request per stored document, and the
+  #                     classification section holds 1,583. At the mandatory
+  #                     2.5s spacing that is ~66 minutes, SLOWER than the 47
+  #                     minute crawl, on the host that answers bursts with a 404.
+  #
+  # So the signal is the Latest window: 144 records in 15 requests, and
+  # config/sources/lloc.yml already argues it is where new Bahraini legislation
+  # appears first, with its Official Gazette number.
+  #
+  # THE CLASSIFICATION SECTION IS DELIBERATELY NOT MONITORED. It is coverage, not
+  # a signal: 1,583 documents, 2,838 seconds measured. jobs/monitor_jobs.py
+  # narrows the nightly run with `only_sources=["Latest Legislation"]` rather
+  # than a second config file, so the monitored source and the exported source
+  # cannot drift apart. Run the classifications as a periodic refresh by hand.
+  #
+  # No entry for the 24 classification source_systems: the defaults apply, the
+  # same choice CBE's eleven sections made above.
+  - regulator: "Legislation and Legal Opinion Commission (LLOC)"
+    source_system: "Latest Legislation"
+    signal: crawl
+    confirm: false
+
+  # RECONCILED 2026-08-14 with the form, which now stores the full name and the
+  # acronym. Both halves of the pair name the source.
+
+  # PDPA (Bahrain), both sources. MEASURED 2026-08-31, and `crawl` here is not
+  # the fallback it usually is -- it is the CHEAPEST question available, because
+  # each source is ONE page load (both are max_pages: 1 in config/sources/pdpa.yml).
+  #
+  #   sitemap           NONE. /sitemap.xml, /sitemap_index.xml and /en/sitemap.xml
+  #                     all answer 403 in 111 bytes from `server: AmazonS3`, and so
+  #                     does a control path that cannot exist -- which is what S3
+  #                     returns for a missing key when listing is denied. So this
+  #                     is "no sitemap", proven, not a block: /en/regulations.html
+  #                     answers 200 in 163,302 bytes to a plain request with only
+  #                     a User-Agent.
+  #   stored-inventory  Every document DOES return an ETag, opaque but stable, so
+  #                     this is available -- and it is still the wrong signal for
+  #                     either source. See the two notes below.
+  #   snapshot-articles Right shape, wrong plumbing. See "The Law" below.
+  #   sama-feed         No "what changed" page on the site.
+  #
+  - regulator: "Personal Data Protection Authority (PDPA)"
+    source_system: "The Law"
+    signal: crawl
+    confirm: false
+    # 60 of this source's 62 rows are ANCHORS INTO ONE PAGE
+    # (regulations.html#faqOne ... #faqSixty), so they share a single HTTP
+    # object: `#faqOne` and `#faqTwo` return the identical ETag
+    # 35237d1023d5c414d38d47a2c379fbae. `stored-inventory` would therefore call
+    # all 60 articles modified on any edit to that page, including an edit to
+    # something else on it entirely -- which is the exact failure
+    # `snapshot-articles` was written to fix.
+    #
+    # And `snapshot-articles` IS the right shape here: the page parses into 60
+    # labelled articles with 60 distinct hashes. But only with Bootstrap 4 class
+    # names (`card-header` / `card-body`); the module's defaults are Bootstrap 5
+    # (`accordion-button` / `accordion-body`) and parse 0 items on this page, and
+    # `snapshot_sweep()` does not thread those names through. It also reads a
+    # snapshot from formfill's SnapshotStore with a grace period, because it was
+    # built for SIMAH -- a host we are BLOCKED from and cannot crawl.
+    #
+    # We are not blocked from this one. The crawl is a single GET and it already
+    # produces exactly what snapshot-articles would: 62 rows, 62 DISTINCT
+    # content_hash values, one per article, each over the article's extracted
+    # text. There is nothing cheaper to ask and nothing more precise to ask.
+  - regulator: "Personal Data Protection Authority (PDPA)"
+    source_system: "Executive Decisions/Orders"
+    signal: crawl
+    confirm: false
+    # 20 distinct pdfs, each with its own honest ETag, so `stored-inventory`
+    # genuinely works here -- and it CANNOT BE THE ONE SIGNAL, because
+    # InventorySweep sets covers_inventory = False
+    # (dynamic_crawler/inventory_sweep.py:102). It probes only the urls we
+    # already store, so a NEW executive decision appearing on the page is not
+    # something it can observe. New decisions are the main event on this source.
+    #
+    # KNOWN GAP, recorded rather than papered over: a pdf silently REPLACED at
+    # the same url with the same link text is invisible to `crawl`. For a
+    # discovered document the engine stamps
+    # content_hash = hash("<url>|<title>") (generic_crawler/crawler.py:3476) --
+    # the ETag-reading path, stamp_declared(), runs only for --documents entries,
+    # which this config does not use. So the crawl sees additions, removals and
+    # retitles, and not that. Closing it means either declaring these 20 urls or
+    # teaching the engine to stamp discovered documents from a HEAD, and the
+    # second changes every regulator; neither is done here.
+
+  # MOIC (BAHRAIN) — `crawl`, AND HERE THE PROBE IS THE EXPENSIVE OPTION.
+  # MEASURED 2026-09-01, all four alternatives tested rather than assumed:
+  #
+  #   sitemap            DOES NOT EXIST. /sitemap.xml, /sitemap_index.xml and
+  #                      /en/sitemap.xml all answer 404 with a 44 KB soft-404 HTML
+  #                      page -- and so does a control path that cannot exist, so
+  #                      the 404 is the site's catch-all, not a missing file.
+  #                      robots.txt is live (200, 2,027 bytes) and names NO sitemap.
+  #   sama-feed          NO REVISION PAGE. /en/news exists and is press releases:
+  #                      21,578 captured characters, ONE document link on the whole
+  #                      page, and no mention of a decree, resolution, ministerial
+  #                      order or law. It reports events, not document changes.
+  #   snapshot-articles  WRONG SHAPE. 0 items parsed with either Bootstrap 4 or 5
+  #                      accordion classes. MOIC's rows are FILES, not article
+  #                      text -- `with_text` is 0 of 95.
+  #   stored-inventory   GENUINELY AVAILABLE, and still not the right choice. See
+  #                      below; this is the RERA case, not the PDPA one.
+  #
+  # STORED-INVENTORY WOULD WORK. Unlike PDPA, where 60 articles are anchors into
+  # one page and share a single ETag, MOIC's tokens are honest and per-document:
+  # every sampled pdf returns an Apache size-mtime ETag, stable across two reads
+  # (52b2f2-5d1d79f0a9d00, 5dbf7-5d1d799f99dc0, ... 6/6 `etag-opaque`), and 90 of
+  # the 95 rows are distinct pdfs.
+  #
+  # IT LOSES ON COST AND ON DISCOVERY.
+  #   cost       a probe is one request per stored document: 90 requests. The
+  #              crawl is ELEVEN page loads -- Commerce 1, Industry 1, Forms 9.
+  #              The cheap signal is the expensive one here.
+  #   discovery  InventorySweep sets covers_inventory = False
+  #              (dynamic_crawler/inventory_sweep.py:102): it re-reads only urls
+  #              we already hold. A new regulation, a new form, or a NEW FORM
+  #              CATEGORY is invisible to it -- and catching a new category is
+  #              exactly what config/sources/moic.yml's discovering Forms source
+  #              was built for.
+  #
+  # RUN stored-inventory DELIBERATELY NOW AND THEN. It is the only thing that
+  # catches a pdf silently REPLACED at the same url with the same link text: a
+  # discovered document's content_hash is hash("<url>|<title>")
+  # (generic_crawler/crawler.py:3476), so the crawl sees additions, removals and
+  # retitles, and not that. Same standing note as RERA above.
+  #
+  # ONE WRINKLE IF YOU DO. Five Forms rows are placeholders for categories that
+  # publish nothing, and they point at a tag PAGE rather than a file. A tag page's
+  # ETag is `1788244496-gzip` -- a gzip ETag on a dynamic page, which moves when
+  # the rendered bytes move. Those five would report `modified` as noise under a
+  # probe. Under `crawl` they do not: their content_hash is stable by construction.
+  #
+  # THREE ENTRIES, because config/sources/moic.yml stores three source_systems and
+  # a sweep looks a source up by (regulator, source_system). Commerce and Industry
+  # are the site's own `?about[0]` filters; Forms is the one discovering source
+  # that walks the sidebar.
+  - regulator: "Ministry of Industry and Commerce (MOIC)"
+    source_system: "Commerce"
+    signal: crawl
+    confirm: false
+
+  - regulator: "Ministry of Industry and Commerce (MOIC)"
+    source_system: "Industry"
+    signal: crawl
+    confirm: false
+
+  - regulator: "Ministry of Industry and Commerce (MOIC)"
+    source_system: "Forms"
+    signal: crawl
+    confirm: false
 
 # Not listed, deliberately:
 #   MOH x2  same shape as MOE; both forms are still approved=false.

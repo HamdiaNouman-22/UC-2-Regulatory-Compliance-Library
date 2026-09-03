@@ -290,15 +290,39 @@ def _rulebook_doc_to_regulatory(doc: RulebookDoc) -> RegulatoryDocument:
     )
 
 
-def _crawl_rulebook() -> List[RegulatoryDocument]:
-    log.info("Mode 2c — CBB Rulebook Volumes (sidebar crawler)")
+def _crawl_rulebook(max_volumes: Optional[int] = None) -> List[RegulatoryDocument]:
+    """The whole rulebook sidebar, or the first `max_volumes` volumes.
+
+    MEASURED 2026-08-20: uncapped, this ran 80 minutes without finishing and
+    with no visible progress, so the export it belonged to had to be killed.
+    The sidebar holds 30 top-level entries and every folder node is expanded by
+    fetching its own page at REQUEST_DELAY=1.2s, so a full walk is thousands of
+    sequential requests.
+
+    The cap is not a throughput knob -- the delay stays. It exists so the flow
+    can be PROVEN on one volume in minutes before committing to the long run,
+    and so a first export produces a workbook instead of nothing.
+    """
+    log.info("Mode 2c — CBB Rulebook Volumes (sidebar crawler)%s",
+             f", first {max_volumes} volume(s)" if max_volumes else "")
     raw_docs = crawl_rulebook_sidebar(
         seed_url      = SIDEBAR_SEED,
         request_delay = REQUEST_DELAY,
-        max_volumes   = None,
+        max_volumes   = max_volumes,
     )
-    # Return ALL docs (including folders) so caller can handle folder insertion
-    return [_rulebook_doc_to_regulatory(d) for d in raw_docs]
+    # LEAVES ONLY. The comment here used to read "Return ALL docs (including
+    # folders) so caller can handle folder insertion" -- no caller ever did, so
+    # 56 of the 153 rulebook rows in the 2026-08-20 export were folders stored as
+    # documents, each carrying nothing but
+    #     <div class='folder'><h2>Environmental, Social and Governance
+    #     Requirements</h2></div>
+    # A folder is a position in the tree, and doc_path already records that;
+    # storing it as a regulation gives a person an entry to open with no
+    # instrument behind it. Mode 4 already filtered on row_type for this reason.
+    leaves = [d for d in raw_docs if getattr(d, "row_type", "R") == "R"]
+    log.info("Mode 2c — %d leaf document(s) from %d node(s)",
+             len(leaves), len(raw_docs))
+    return [_rulebook_doc_to_regulatory(d) for d in leaves]
 
 
 # ─── Mode 3: Laws & Regulations (cbb.gov.bh accordion) ──────────────────────
@@ -310,6 +334,101 @@ def _scrape_laws_and_regulations() -> List[RegulatoryDocument]:
 
     docs = []
     category = "Laws and Regulations"
+
+    # THE PAGE WAS REDESIGNED. MEASURED 2026-08-20: cbb.gov.bh/laws-regulations/
+    # returns 200 and 269 KB, and contains ZERO elements matching
+    # `accordion-item|accordion__item` — the markup this function was written for.
+    # It carries 11 real PDF links in an Ultimate-Addons expandable list instead:
+    #
+    #   div.ult_exp_section_layer
+    #     div.ult_exp_section   <- the section title, "CBB Law of 2006"
+    #     div.ult_exp_content   <- the links, whose own text is only "English"
+    #                              / "Arabic", so the TITLE MUST COME FROM THE
+    #                              SECTION, not the anchor
+    #
+    # The old selector matched nothing and this function returned [] — silently.
+    # `crawler/cbb_source.py` now raises on an empty mode rather than letting a
+    # dead source report success, which is how this was found at all.
+    #
+    # Both shapes are tried, newest first, so the function still works if CBB
+    # reverts or if another page on the site kept the old markup.
+    accordion_items = soup.select("div.ult_exp_section_layer")
+    if accordion_items:
+        for item in accordion_items:
+            head = item.select_one("div.ult_exp_section")
+            section_title = (head.get_text(" ", strip=True) if head else "").strip()
+            section_title = re.sub(r"\s+", " ", section_title) or "Unknown Section"
+            body = item.select_one("div.ult_exp_content") or item
+            for a in body.find_all("a", href=True):
+                href = a["href"]
+                if not href.lower().endswith(".pdf") and "/files/" not in href.lower():
+                    continue
+                full_url = urljoin(CBB_GOV_BASE, href)
+                # "English" / "Arabic" alone is not a document name. Qualify it
+                # with the section, which is where the real title lives.
+                link_text = a.get_text(" ", strip=True)
+                title = (f"{section_title} ({link_text})"
+                         if link_text and len(link_text) <= 24 else
+                         (link_text or section_title))
+                html = str(a.parent) if a.parent else f'<a href="{full_url}">{title}</a>'
+                hash_val = hashlib.md5(title.encode("utf-8")).hexdigest()
+                docs.append(RegulatoryDocument(
+                    regulator       = REGULATOR,
+                    source_system   = "CBB-Laws-Regulations",
+                    category        = category,
+                    title           = title,
+                    document_url    = full_url,
+                    source_page_url = LAWS_REGULATIONS_URL,
+                    document_html   = html,
+                    doc_path        = [REGULATOR, category, section_title, title],
+                    extra_meta      = {
+                        "section":      section_title,
+                        "content_text": title,
+                        "content_hash": hash_val,
+                    },
+                    content_hash    = hash_val,
+                ))
+        # NOT EVERY LAW IS INSIDE AN EXPANDABLE SECTION. MEASURED 2026-08-20: the
+        # page holds 11 PDF links, 7 of them in the sections above and 4 loose in
+        # the body — Protected Cells Companies Law, Trust Law, Law - Investment
+        # Limited Partnerships, and a Vision 2030 brochure. Three of those four
+        # are real laws, so a pass that only read the sections would silently drop
+        # them. Here the anchor DOES carry its own name, so no section is needed.
+        in_section = {id(a) for it in accordion_items for a in it.find_all("a", href=True)}
+        for a in soup.find_all("a", href=True):
+            if id(a) in in_section:
+                continue
+            href = a["href"]
+            if not href.lower().endswith(".pdf") and "/files/" not in href.lower():
+                continue
+            title = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
+            # A link with no text cannot be titled from the page, and guessing one
+            # from the filename produces junk. The Vision 2030 brochure is the
+            # only such link and it is not a law.
+            if len(title) < 4:
+                log.info("Mode 3 — skipping untitled loose link: %s", href[-60:])
+                continue
+            full_url = urljoin(CBB_GOV_BASE, href)
+            hash_val = hashlib.md5(title.encode("utf-8")).hexdigest()
+            docs.append(RegulatoryDocument(
+                regulator       = REGULATOR,
+                source_system   = "CBB-Laws-Regulations",
+                category        = category,
+                title           = title,
+                document_url    = full_url,
+                source_page_url = LAWS_REGULATIONS_URL,
+                document_html   = str(a.parent) if a.parent else "",
+                doc_path        = [REGULATOR, category, title],
+                extra_meta      = {
+                    "section":      "",
+                    "content_text": title,
+                    "content_hash": hash_val,
+                },
+                content_hash    = hash_val,
+            ))
+
+        log.info(f"Mode 3 — Found {len(docs)} documents (expandable-list layout)")
+        return docs
 
     accordion_items = soup.find_all("div", class_=re.compile(r"accordion-item|accordion__item"))
     for item in accordion_items:
@@ -515,7 +634,8 @@ class CBBCrawlerV2(BaseCrawler):
 
     REGULATOR = REGULATOR
 
-    def fetch_documents(self, mode: Optional[str] = None) -> List[RegulatoryDocument]:
+    def fetch_documents(self, mode: Optional[str] = None,
+                        max_volumes: Optional[int] = None) -> List[RegulatoryDocument]:
         """
         Fetch documents from all CBB sources (or a specific mode).
 
@@ -549,7 +669,7 @@ class CBBCrawlerV2(BaseCrawler):
 
         if run_all or mode == "2c":
             log.info("=== Mode 2c: Rulebook Volumes ===")
-            docs = _crawl_rulebook()
+            docs = _crawl_rulebook(max_volumes)
             log.info(f"Mode 2c: {len(docs)} documents")
             all_docs.extend(docs)
 

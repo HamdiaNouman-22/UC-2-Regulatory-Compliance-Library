@@ -301,6 +301,21 @@ class MSSQLRepository(DocumentRepository):
         doc_status = getattr(document, "status", None)
         doc_status = "active" if doc_status is None else doc_status
 
+        # `content_hash` IS in this list, and has to be.
+        #
+        # It was missing until 2026-08-16, so a brand-new row was stored with a
+        # NULL hash however carefully its crawler had computed one — the value
+        # went onto the regulation_VERSION row and nowhere else. The next run
+        # then read NULL from `regulations`, could not match it against anything,
+        # and classified the document `modified`: two more version rows, a full
+        # re-extraction and re-OCR, and only then was the hash written (by
+        # `update_regulation` on the modified path). Every document cost one
+        # phantom revision on its second sighting, and every ONBOARDING of a new
+        # regulator paid it once per document.
+        #
+        # ExcelRepo never had the bug — it copies the whole document — so the
+        # workbook showed a fingerprint the database did not have, and the two
+        # repos disagreed about the same crawl.
         sql = """
             INSERT INTO regulations (
                 regulator, source_system, category,
@@ -309,10 +324,10 @@ class MSSQLRepository(DocumentRepository):
                 department, year,
                 source_page_url, extra_meta,
                 compliancecategory_id, document_html,
-                type, status
+                type, status, content_hash
             )
             OUTPUT INSERTED.id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         try:
             with self._get_conn() as conn:
@@ -340,6 +355,7 @@ class MSSQLRepository(DocumentRepository):
                     document_html,
                     doc_type,
                     doc_status,
+                    getattr(document, "content_hash", None) or None,
                 ))
                 reg_id = cursor.fetchone()[0]
                 conn.commit()
@@ -519,6 +535,12 @@ class MSSQLRepository(DocumentRepository):
         the column is JSON text and the caller passes an arrow-joined string, so
         the comparison cannot be done in the WHERE clause without depending on
         both sides having been written by the same code.
+
+        `source_page_url` is selected for the SAMA feed. Since 2026-08-24
+        SAMA's document_url holds the PDF and the node url moved here, and
+        the feed matches on the node url -- without this column every feed
+        entry reads as a document the library does not hold, and
+        monitor_sama answers that by running a discovery ingest.
         """
         if not document_url:
             return None
@@ -624,7 +646,7 @@ class MSSQLRepository(DocumentRepository):
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, title, document_url, doc_path, content_hash, "
+                    "SELECT id, title, document_url, source_page_url, doc_path, content_hash, "
                     "reference_no, regulator, source_system, category, status, "
                     "CAST(extra_meta AS NVARCHAR(MAX)) as extra_meta "
                     "FROM regulations "
@@ -1509,33 +1531,68 @@ class MSSQLRepository(DocumentRepository):
         if not mappings:
             return
 
-        insert_sql = """
-            INSERT INTO sama_requirement_mapping (
-                regulation_id, extracted_requirement_text,
-                matched_requirement_id, match_status, match_explanation,
-                version_id
-            ) VALUES (?, ?, ?, ?, ?, ?)
-        """
+        # `match_confidence` is written only when the column exists, so this
+        # works both before and after the migration that adds it. The matcher
+        # flags a verdict `low` when two internal requirements were similarly
+        # plausible -- those are genuine ties, not model noise, and a person
+        # should see them rather than have one silently chosen. Detected once
+        # per call rather than per row.
+        has_conf = self._mapping_has_confidence()
+        # `version_id` is probed for the SAME reason as match_confidence: not
+        # every database has it. The production instance
+        # (regulatory_monitoring) carries the 7-column original --
+        # id, regulation_id, extracted_requirement_text, matched_requirement_id,
+        # match_status, match_explanation, created_at -- and both inserts above
+        # named version_id unconditionally, so matching died there with
+        #     [42S22] Invalid column name 'version_id'
+        # AFTER the analysis had already been done and stored. The expensive
+        # half succeeded and the cheap half threw.
+        #
+        # Degrading is right here rather than demanding a migration first: a
+        # database without the column simply has no per-version mappings, which
+        # is what it had before the column existed.
+        has_version = self._mapping_has_version_id()
+        cols = ["regulation_id", "extracted_requirement_text",
+                "matched_requirement_id", "match_status", "match_explanation"]
+        if has_version:
+            cols.append("version_id")
+        if has_conf:
+            cols.append("match_confidence")
+        insert_sql = (
+            "INSERT INTO sama_requirement_mapping (" + ", ".join(cols) + ") "
+            "VALUES (" + ", ".join("?" for _ in cols) + ")"
+        )
         reg_ids = sorted({m["regulation_id"] for m in mappings})
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 replaced = 0
                 for rid in reg_ids:
-                    if version_id is None:
+                    if not has_version:
+                        # No version column: every row for this regulation is
+                        # the one set there can be, so clear them all. Scoping
+                        # on a column that does not exist is what threw.
+                        cursor.execute(
+                            "DELETE FROM sama_requirement_mapping "
+                            "WHERE regulation_id = ?", (rid,))
+                    elif version_id is None:
                         cursor.execute(self._CLEAR_MAPPINGS_NULL_VERSION_SQL, (rid,))
                     else:
                         cursor.execute(self._CLEAR_MAPPINGS_SQL, (rid, version_id))
                     replaced += max(cursor.rowcount, 0)
                 for m in mappings:
-                    cursor.execute(insert_sql, (
+                    values = [
                         m["regulation_id"],
                         m["extracted_requirement_text"],
                         m.get("matched_requirement_id"),
                         m["match_status"],
                         m.get("match_explanation"),
-                        version_id,
-                    ))
+                    ]
+                    if has_version:
+                        values.append(version_id)
+                    if has_conf:
+                        values.append(m.get("match_confidence") or "high")
+                    cursor.execute(insert_sql, tuple(values))
                 conn.commit()
                 logger.info(
                     f"Stored {len(mappings)} requirement mappings "
@@ -1544,6 +1601,60 @@ class MSSQLRepository(DocumentRepository):
         except Exception as e:
             logger.error(f"Failed to store requirement mappings: {e}")
             raise
+
+    _HAS_VERSION_ID: Optional[bool] = None
+
+    def _mapping_has_version_id(self) -> bool:
+        """Whether sama_requirement_mapping carries `version_id`.
+
+        Same shape and same caching as `_mapping_has_confidence` below, and the
+        same safe direction on error: False falls back to the insert that works
+        everywhere. Restart the API after adding the column -- the answer is
+        cached for the life of the process.
+        """
+        if MSSQLRepository._HAS_VERSION_ID is None:
+            try:
+                with self._get_conn() as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'sama_requirement_mapping' "
+                        "AND COLUMN_NAME = 'version_id'")
+                    MSSQLRepository._HAS_VERSION_ID = cur.fetchone() is not None
+            except Exception as e:
+                logger.warning("could not check for version_id: %s", e)
+                MSSQLRepository._HAS_VERSION_ID = False
+        return bool(MSSQLRepository._HAS_VERSION_ID)
+
+    _HAS_MATCH_CONFIDENCE: Optional[bool] = None
+
+    def _mapping_has_confidence(self) -> bool:
+        """Whether sama_requirement_mapping carries `match_confidence` yet.
+
+        Cached on the class after the first check: this is asked once per
+        store_requirement_mappings call, the API builds several repo instances,
+        and the schema does not change while the process runs. Returning False on
+        any error is the safe direction -- it falls back to the six-column
+        insert, which always works.
+
+        OPERATIONAL NOTE: because the answer is cached for the life of the
+        process, applying the migration that adds the column needs an API
+        RESTART before confidence starts being written. Rows inserted in between
+        simply have no confidence recorded; nothing fails.
+        """
+        if MSSQLRepository._HAS_MATCH_CONFIDENCE is None:
+            try:
+                with self._get_conn() as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'sama_requirement_mapping' "
+                        "AND COLUMN_NAME = 'match_confidence'")
+                    MSSQLRepository._HAS_MATCH_CONFIDENCE = bool(cur.fetchone()[0])
+            except Exception as e:
+                logger.warning(f"Could not check for match_confidence column: {e}")
+                MSSQLRepository._HAS_MATCH_CONFIDENCE = False
+        return MSSQLRepository._HAS_MATCH_CONFIDENCE
 
     def flag_partially_matched_requirements(self, matched_requirement_ids: list):
         if not matched_requirement_ids:

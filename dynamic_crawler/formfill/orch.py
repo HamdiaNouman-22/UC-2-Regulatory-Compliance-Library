@@ -57,6 +57,8 @@ from dynamic_crawler.changesignal import (clean_fields, fields_of,
                                           identity_for as _shared_identity_for,
                                           identity_key)
 from dynamic_crawler.formfill.textinput import decide_for_document
+from utils.countries import tree_path as country_tree_path
+from utils.file_links import normalise_all as normalise_files
 
 logger = logging.getLogger(__name__)
 
@@ -807,8 +809,12 @@ class NewOrchestrator(BaseOrchestrator):
                 # The stored row for THIS document, so the leaf rule can tell
                 # "my own folder" from "someone else's".
                 existing = self._find_existing(doc) or {}
+                # COUNTRY goes in the tree only — never into doc_path, which
+                # is an identity field. See config/countries.yml.
                 doc.compliancecategory_id = self._get_or_create_compliance_category(
-                    doc.doc_path, for_regulation_id=existing.get("id"))
+                    country_tree_path(doc.doc_path,
+                                      getattr(doc, "regulator", "")),
+                    for_regulation_id=existing.get("id"))
             else:
                 doc.compliancecategory_id = None
         except Exception as e:
@@ -827,22 +833,40 @@ class NewOrchestrator(BaseOrchestrator):
         new_hash = getattr(doc, "content_hash", "") or ""
 
         if status == "modified" and existing_id:
-            # Archive what is there, then snapshot the new content. Same steps as
-            # the parent's CBB path, minus the hand-written SQL.
-            self.repo.mark_all_versions_inactive(existing_id)
+            # RETIRE the current version, do not COPY it.
+            #
+            # This used to insert an "archived" row holding the old content and
+            # then insert the new one — two rows per change. But the old content
+            # already HAS a row: the one that is active right now. Copying it
+            # produced a duplicate every single time a document changed, which is
+            # where the 554 identical pairs cleaned up on 2026-08-16 came from.
+            # Deduping them was treating the symptom; this is the cause.
+            #
+            # `mark_all_versions_inactive` was already being called on the line
+            # below, so the retire half was always there. Only the redundant copy
+            # is removed.
             old = self.repo.get_regulation_by_id(existing_id) or {}
-            # Keep this id. The analysis being archived describes the OLD
-            # content, so it must be stamped with the old version, not the one
-            # replacing it. Parent does this at orchestrator/orchestrator.py:803.
-            old_version_id = self.repo.insert_regulation_version(
-                regulation_id=existing_id,
-                regulator=getattr(doc, "regulator", "") or "",
-                content_text=(old.get("extra_meta") or {}).get("content_text", "")
-                             if isinstance(old.get("extra_meta"), dict) else "",
-                content_html=old.get("document_html") or "",
-                content_hash=old.get("content_hash") or "",
-                updated_date=date.today(), status="inactive",
-                change_summary=f"archived {date.today().isoformat()}")
+            # Read BEFORE retiring — afterwards nothing is active to find. The
+            # analysis being archived describes the OLD content, so it has to be
+            # stamped with the version that held it, not the one replacing it.
+            prev = self.repo.get_active_regulation_version(existing_id) or {}
+            old_version_id = prev.get("version_id")
+            self.repo.mark_all_versions_inactive(existing_id)
+            if old_version_id is None:
+                # No active row to retire: a regulation stored before versioning
+                # existed, so its old content has never been snapshotted. Write
+                # the archive row in that case only — otherwise the previous
+                # content would be lost rather than merely uncopied, and
+                # `archive_current_analysis` would have no version to point at.
+                old_version_id = self.repo.insert_regulation_version(
+                    regulation_id=existing_id,
+                    regulator=getattr(doc, "regulator", "") or "",
+                    content_text=(old.get("extra_meta") or {}).get("content_text", "")
+                                 if isinstance(old.get("extra_meta"), dict) else "",
+                    content_html=old.get("document_html") or "",
+                    content_hash=old.get("content_hash") or "",
+                    updated_date=date.today(), status="inactive",
+                    change_summary=f"archived {date.today().isoformat()}")
             version_id = self.repo.insert_regulation_version(
                 regulation_id=existing_id,
                 regulator=getattr(doc, "regulator", "") or "",
@@ -963,6 +987,12 @@ class NewOrchestrator(BaseOrchestrator):
 
     def run_for_regulator(self, regulator_name: str) -> Dict:
         docs = self.crawler.fetch_documents()
+        # THE FILE RULE, applied where EVERY document passes: one file ->
+        # document_url, several -> extra_meta.attachment_links, never both.
+        # Done here rather than per crawler because each crawler had
+        # invented its own spelling (org_pdf_link, arabic_pdf, pdf_link)
+        # and a frontend had to know all of them. See utils/file_links.py.
+        docs = normalise_files(docs)
         logger.warning("crawler returned %d documents", len(docs))
 
         trustworthy, problems = self.check_run_trustworthy(docs)

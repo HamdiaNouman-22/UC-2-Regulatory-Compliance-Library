@@ -20,16 +20,24 @@ and how expensively it can be checked.
     monitor_cma            weekly   CMA's token is the current time and a
                                     confirm costs a full page fetch, so the
                                     crawl is the signal here too.
+    monitor_mlcu           weekly   Egypt. No ETag, no Last-Modified, no sitemap
+                                    lastmod, and its news page carries neither
+                                    dates nor document links — every cheaper
+                                    signal was measured and ruled out. SHIPPED
+                                    DISABLED: the workbook has not been read yet.
     monitor_cbe            weekly   Twelve sources: the circulars API (one
                                     request, and it DISCOVERS) plus eleven
                                     browser crawls of the HTML sections. Weekly
                                     because of the eleven, not the one.
-    monitor_rera           weekly   Eight small section crawls. Its probe WOULD
-                                    work — 117/121 urls carry a stable ETag —
-                                    but circulars are partitioned by year and a
-                                    new year is a new PAGE, which no probe can
-                                    discover. The crawl is the signal because
-                                    DISCOVERY is, not because a probe fails.
+    monitor_bahrain_bourse weekly   Bahrain. One request (the site's own
+                                    GetFaq API) returns all seven Legal
+                                    Framework sections, ~90 documents. SHIPPED
+                                    DISABLED: the workbook has not been read
+                                    yet. Bahrain Bourse is an exchange, like
+                                    the now-permanently-blocked
+                                    saudiexchange.sa — see
+                                    docs/HANDOFF_bahrain_bourse.md before
+                                    touching this host.
 
 WHERE THE ROWS GO
 
@@ -154,7 +162,7 @@ CHEAP_PROBE_SOURCES = [
     ("Anti-Money Laundering Permanent Committee (AML)", "Rules and Regulations"),
     ("Ministry of Human Resource and Social Development (MHRSD)",
      "Regulations and procedural guidelines"),
-    ("ZATCA", "Rules and Regulations"),
+    ("Zakat, Tax and Customs Authority (ZATCA)", "Rules and Regulations"),
 ]
 
 #: Regulator -> (crawler name, is_form) for the sources whose crawl IS the
@@ -173,6 +181,16 @@ CHEAP_PROBE_SOURCES = [
 #: overhead — the crawl IS the signal here, same as MC and CMA, just fast
 #: enough to run daily instead of weekly.
 #:
+#: MLCU joined 2026-08-17, and unlike the others it is here because every
+#: cheaper option was measured and failed rather than because the host fights
+#: us: no ETag, no Last-Modified, no sitemap lastmod, and its news page carries
+#: neither dates nor document links. The measurements are the comment on its
+#: config/change_signals.yml entry.
+#:
+#: ITS SCHEDULER SLOT IS `enabled: false` AND MUST STAY THAT WAY until a person
+#: has read the workbook. This dict feeds `_crawl_into_db`, which writes
+#: STRAIGHT TO MSSQL — turning MLCU on before the workbook is approved would
+#: make the first scheduled run be the ingest, with nobody having read anything.
 #: CBE joined 2026-08-18, and for the same reason MOH did: its circulars page is
 #: a "Load more" pager that a crawl reads 4.5% of (18 of 396, reported `ok`),
 #: while the page's own JavaScript calls /api/listing/circulars and returns all
@@ -185,7 +203,8 @@ CHEAP_PROBE_SOURCES = [
 #: none — which is why CBE is weekly like MC and CMA rather than daily like MOH.
 #: If daily circulars are ever wanted, the upgrade is to split cbe.yml in two,
 #: not to run eleven browser crawls every night.
-#:
+
+
 #: RERA joined 2026-08-19, and it is here for a DIFFERENT reason from the others.
 #: MC and CMA are here because a probe cannot work; RERA's probe works better than
 #: almost any source we hold — 117 of 121 stored urls return both an ETag and a
@@ -197,23 +216,34 @@ CHEAP_PROBE_SOURCES = [
 #: store, so it can report a silent replacement but can never see a new circular
 #: or a new year page. RERA published two circulars in 2025, so the case a probe
 #: covers is nearly hypothetical and the case it cannot cover is the whole point.
+
+#: Bahrain Bourse joined 2026-08-20, for the same reason MOH and CBE's
+#: circulars did: the Legal Framework accordion is entirely client-rendered
+#: (a plain fetch of the page contains none of it) but the page's own JS calls
+#: one API, GetFaq, which returns all seven sections — Laws, Rules &
+#: Regulations, Resolutions, Guidelines, Circulars, CBB Rules & Regulations,
+#: Consultation — in a single ~20 KB request. No probe can improve on that.
+#: See crawler/bahrain_bourse_crawler.py for the double-encoding this API
+#: requires; doc_path puts the section name in the folder tree, matching the
+#: site's own accordion.
+#:
+#: ITS SCHEDULER SLOT IS `enabled: false` AND MUST STAY THAT WAY until a
+#: person has read the workbook, same as MLCU and CBE were shipped.
 CRAWL_AS_SIGNAL = {
     "Ministry of Commerce": ("mc", False),
     "Capital Market Authority (CMA)": ("cma", False),
     "Ministry of Health": ("moh", False),
+    "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)":
+        ("mlcu", False),
     "Central Bank of Egypt (CBE)": ("cbe", False),
+    "Bahrain Bourse (BHB)": ("bahrain_bourse", False),
+    # Migrated off the bespoke cbb_monitoring job 2026-08-20. The Thomson Reuters
+    # revision feed is the cheaper signal and should front this — see monitor_cbb.
+    "Central Bank of Bahrain": ("cbb", False),
+
+    # ---- Bahrain, added by abeeraslam 2026-08-25 ----------------------- #
     "Real Estate Regulatory Authority (RERA)": ("rera", False),
-    # SIO joined 2026-08-25. Not because a probe fails to be worth it, but
-    # because there is NOTHING TO PROBE: sio.gov.bh returns no ETag, no
-    # Last-Modified and no Content-Length on any page, and its sitemap carries one
-    # single lastmod (its own build time) across all 106 urls. The crawl is ~10
-    # page loads and about five minutes for all 214 documents, because a section's
-    # ~48 laws are modals in the DOM of one page. See config/change_signals.yml.
-    "Social Insurance Organization (SIO)": ("sio", False),
-    # LLOC joined 2026-08-25, NARROWED. The tuple names the config; the job below
-    # passes only_sources so the nightly run is the 15-request Latest window and
-    # not the 47-minute classification crawl. Anything reading this dict to run a
-    # whole regulator would get both — monitor_lloc() is the entry point.
+    "Social Insurance Organisation (SIO)": ("sio", False),
     "Legislation and Legal Opinion Commission (LLOC)": ("lloc", False),
     # PDPA joined 2026-08-31. The cheapest entry on this list by some distance:
     # both its sources are max_pages: 1, so the whole regulator is TWO page
@@ -294,7 +324,8 @@ def _signal_for(regulator: str, source: str) -> str:
     return "stored-inventory"
 
 
-def build_crawler(name: str, is_form: bool, only_urls=None, only_sources=None):
+def build_crawler(name: str, is_form: bool, only_urls=None,
+                  only_sources=None):
     """(crawler, regulator) for a form name or a source-config name.
 
     PUBLIC because `tools/workbook.py` needs the identical crawler in order to
@@ -319,6 +350,11 @@ def build_crawler(name: str, is_form: bool, only_urls=None, only_sources=None):
     cfg = yaml.safe_load(
         (REPO_ROOT / "config" / "sources" / f"{name}.yml").read_text(
             encoding="utf-8")) or {}
+    # only_sources runs SOME of a regulator's sources -- LLOC's nightly job
+    # wants its 40-second "Latest Legislation" window, not the 2,838-second
+    # classification walk. See build_regulator_crawler for when narrowing is
+    # safe: never where the narrowed sources share a source_system with the
+    # ones left out.
     return (build_regulator_crawler(cfg, only_sources=only_sources),
             cfg.get("regulator", name.upper()))
 
@@ -412,8 +448,251 @@ def _monitor_cheap_probes_impl() -> dict:
     return out
 
 
+def monitor_sama() -> dict:
+    """DAILY. SAMA's own revision page: one request instead of 6,101 probes.
+
+    Also the only signal here that DISCOVERS — an entry matching nothing we hold
+    is a document missing from the library, which a stored-inventory probe can
+    never report because it only re-reads rows we already have.
+    """
+    return _run_exclusive("monitor_sama", _monitor_sama_impl)
+
+
+def _monitor_sama_impl() -> dict:
+    state = REPO_ROOT / "output" / "monitor_targets"
+    state.mkdir(parents=True, exist_ok=True)
+    tf = state / "SAMA.txt"
+    rep = _sweep("Saudi Arabian Monetary Authority (SAMA)", "SAMA RULEBOOK", tf)
+    out = {"counts": rep.get("counts", {}), "feed": rep.get("feed", {}),
+           "seconds": rep.get("_seconds")}
+    # Documents the feed named that the library does not hold.
+    if (rep.get("feed") or {}).get("not_in_library"):
+        p, dt = _run([sys.executable, "-B", "benchmarks/sama_feed_ingest.py"], 3600)
+        out["discovery"] = {"rc": p.returncode, "seconds": round(dt, 1)}
+    logger.info("SAMA: %s", out)
+    return out
+
+
+def monitor_mc() -> dict:
+    """WEEKLY. The crawl is the signal — mc.gov.sa refuses plain HTTP clients.
+
+    Measured 2026-08-15: requests.get is reset on every url, while a headless
+    Chromium gets 200 on the same ones. So a probe can only ever answer
+    `unknown` here, and re-crawling is the only way to see a change.
+    """
+    return _run_exclusive("monitor_mc", _monitor_mc_impl)
+
+
+def _monitor_mc_impl() -> dict:
+    res = _crawl_into_db("mc", False, timeout=5400)
+    logger.info("Ministry of Commerce: %s", res)
+    return res
+
+
+def monitor_mlcu() -> dict:
+    """WEEKLY, AND OFF. The crawl is the signal because nothing cheaper exists.
+
+    Measured 2026-08-17: no ETag, no Last-Modified, no sitemap lastmod, and the
+    `3145 اخبار` news page carries no dates and no document links, so it cannot
+    say which instrument moved. Full measurements on the change_signals.yml entry.
+
+    LEAVE THE SCHEDULER SLOT DISABLED until a person has read the workbook — this
+    path writes straight to MSSQL, and MLCU has never been reviewed.
+    """
+    return _run_exclusive("monitor_mlcu", _monitor_mlcu_impl)
+
+
+def _monitor_mlcu_impl() -> dict:
+    # Five section pages plus 24 PDFs, serial. Small enough that a probe would
+    # have saved almost nothing even if one had been possible.
+    res = _crawl_into_db("mlcu", False, timeout=5400)
+    logger.info("MLCU: %s", res)
+    return res
+
+
+def monitor_cma() -> dict:
+    """WEEKLY. The crawl is the signal, and it must NOT walk the whole history.
+
+    CMA cannot be probed (its Last-Modified is the current time) and cannot be
+    confirmed at scale (a confirm is a full page fetch and the host throttles
+    after ~60 of 1,979).
+
+    THE ANNOUNCEMENTS TAB IS THE TRAP. It is 3,299 items over 550 pages, and a
+    full walk measured 2h49m on 2026-08-16 and still came back with 300 of the
+    1,053 announcements we already hold — reported as a clean run. A short crawl
+    is worse than none here: the 753 it missed would be ruled `disappeared` and
+    become withdrawal proposals.
+
+    Announcements are ordered NEWEST FIRST, so monitoring does not need the
+    history at all — only back as far as the newest one already stored. That is
+    what `since_days` on the announcements tab is for
+    (site_runners/cma_laws.py); it is currently None for the one-off backfill and
+    MUST be a small window here. Set CMA_SINCE_DAYS to control it.
+    """
+    return _run_exclusive("monitor_cma", _monitor_cma_impl)
+
+
+def _monitor_cma_impl() -> dict:
+    days = os.getenv("CMA_SINCE_DAYS", "30")
+    os.environ["CMA_SINCE_DAYS"] = days      # read by the CMA runner
+    res = _crawl_into_db("cma", False, timeout=14400)
+    res["announcements_window_days"] = days
+    logger.info("CMA: %s", res)
+    return res
+
+
+def monitor_cbe() -> dict:
+    """WEEKLY. Twelve sources: the circulars API, plus eleven section crawls.
+
+    THE CIRCULARS HALF IS THE CHEAP, HONEST SIGNAL and it also DISCOVERS.
+    `crawler/cbe_crawler.py` reads /api/listing/circulars in one request and gets
+    all 396 with a publication date and a Sitecore GUID each, so the orchestrator's
+    new/modified/unchanged classification against the DB already does everything a
+    probe step would. It refuses to return a partial inventory rather than let a
+    short list read downstream as documents having disappeared.
+
+    THE OTHER ELEVEN ARE BROWSER CRAWLS, which is what makes this weekly. Measured
+    2026-08-18 over the nine sections then configured: 100 pages, 152 documents.
+    `Regulations Book` is the big one at 143 sitemap urls and is capped at 250.
+
+    WHY THE PACING MATTERS HERE MORE THAN USUAL. cbe.org.eg runs bot protection —
+    it already refuses `urllib` outright and answers HEAD with 403. Both hosts in
+    `skip_hosts` were blocked by automated access from this address, and SIMAH's
+    note records that it was "triggered by repeated iteration, not volume".
+    Eleven prefix crawls is real iteration. Weekly, and never in a retry loop.
+
+    A SHORT CRAWL IS THE DANGER, not a slow one — the CMA lesson. A section that
+    hits its page cap or times out returns fewer documents than are stored, and
+    absent documents are ruled `disappeared`. The orchestrator's completeness gate
+    is what stands between that and a withdrawal proposal, and it is keyed per
+    source, which is exactly why cbe.yml splits the sections rather than crawling
+    /en/laws-regulations as one. Give this job room rather than a tight timeout.
+    """
+    return _run_exclusive("monitor_cbe", _monitor_cbe_impl)
+
+
+def _monitor_cbe_impl() -> dict:
+    # 10800s = 3 hours. Deliberately generous: CMA's job was killed at 5400s
+    # after real work and produced nothing, and a killed run is worse than a slow
+    # one because it looks like a source that returned nothing.
+    res = _crawl_into_db("cbe", False, timeout=10800)
+    logger.info("Central Bank of Egypt: %s", res)
+    return res
+
+
+def monitor_bahrain_bourse() -> dict:
+    """WEEKLY, AND OFF. The crawl is the signal, and it is cheap.
+
+    crawler/bahrain_bourse_crawler.py reads the site's own GetFaq API in one
+    ~20 KB request and gets all seven Legal Framework sections — Laws, Rules &
+    Regulations, Resolutions, Guidelines, Circulars, CBB Rules & Regulations,
+    Consultation — so the orchestrator's new/modified/unchanged classification
+    against the DB already does everything a probe step would. It refuses to
+    return a partial inventory (fewer than MIN_EXPECTED_DOCS, or fewer
+    sections than MIN_EXPECTED_SECTIONS) rather than let a short read appear
+    downstream as documents having disappeared.
+
+    LEAVE THE SCHEDULER SLOT DISABLED until a person has read the workbook —
+    this path writes straight to MSSQL, and Bahrain Bourse has never been
+    reviewed. Also: Bahrain Bourse is an exchange, and the last exchange this
+    project crawled (saudiexchange.sa) was permanently blocked within two
+    hours of ordinary automated access. See docs/HANDOFF_bahrain_bourse.md
+    before turning this on or re-measuring anything by hand.
+    """
+    return _run_exclusive("monitor_bahrain_bourse", _monitor_bahrain_bourse_impl)
+
+
+def _monitor_bahrain_bourse_impl() -> dict:
+    # 5400s = 1.5h, matching MLCU's slot: a similarly small document count (86
+    # vs MLCU's 24 PDFs + 5 pages) with OCR on any new/changed PDF.
+    res = _crawl_into_db("bahrain_bourse", False, timeout=5400)
+    logger.info("Bahrain Bourse: %s", res)
+    return res
+
+
+def monitor_cbb() -> dict:
+    """WEEKLY, AND OFF. Seven sources, migrated onto the config flow 2026-08-20.
+
+    THIS REPLACES `cbb_monitoring`, which is retired. That job ran the bespoke
+    crawler/cbb_monitoring_crawler.py straight into MSSQL with no workbook step
+    and no completeness gate, and it was the only monitoring job in the repo left
+    `enabled: true`. MEASURED 2026-08-20 before the migration: 0 CBB rows in the
+    database, 0 `CBB-*` source_systems, 0 CBB entries in run_history. A job that
+    has been enabled and has never produced a row is not monitoring anything, and
+    nothing about its output said so.
+
+    THE REAL SIGNAL IS A NATIVE REVISION FEED, and it should be wired here rather
+    than re-crawling seven sections blind:
+
+        https://cbben.thomsonreuters.com/view-revision-updates
+
+    the regulator's own "what changed in this date range" page, already read by
+    site_runners/cbb_updates.py. SAMA runs on the SAME Thomson Reuters platform
+    with the same endpoint (dynamic_crawler/sama_feed_signal.py) — two regulators,
+    one pattern, and the best class of signal in the repo: no probing, no stale
+    stamp to be fooled by.
+
+    IT CANNOT SEE DELETIONS. A withdrawn document stops appearing rather than
+    saying it went; absence is only visible to a full crawl. So the feed makes the
+    crawl RARE, not unnecessary, and `disappeared` still comes from the crawl.
+
+    WHY IT STAYS OFF: two reasons, and the second outlives the first.
+      1. Nobody has read a CBB workbook. This path writes straight to MSSQL.
+      2. Every monitor job lives in DIRECT_JOB_MAPPING, and the scheduler defaults
+         to EXECUTION_MODE=API, which reads API_JOB_MAPPING — where no monitor job
+         exists and no endpoint backs one. Enabling this today logs
+         "No function mapped for job" and does nothing. Unresolved repo-wide.
+    """
+    return _run_exclusive("monitor_cbb", _monitor_cbb_impl)
+
+
+def _monitor_cbb_impl() -> dict:
+    # 10800s = 3 hours, matching CBE. Mode 2c walks the whole rulebook sidebar and
+    # mode 1 fetches Thomson Reuters resolution pages one at a time; neither is
+    # quick, and a killed run reads downstream as a source that returned nothing.
+    res = _crawl_into_db("cbb", False, timeout=10800)
+    logger.info("Central Bank of Bahrain: %s", res)
+    return res
+
+
+def monitor_rera() -> dict:
+    """WEEKLY. Eight small section crawls of rera.gov.bh.
+
+    THE CRAWL IS THE SIGNAL BECAUSE DISCOVERY IS, not because a probe fails. RERA
+    answers a probe better than almost anything we hold: 117 of 121 stored urls
+    return both an ETag and a Last-Modified, and they are stable (8/8 identical
+    when fetched twice 0.4s apart). But circulars are partitioned by year, one
+    page per year, and a new year is a NEW PAGE — Circulars-issued-in-2026 is a
+    404 today. A probe re-reads what we already store, so it can never see that.
+
+    WHY IT IS CHEAP ANYWAY. RERA is small: 15 pages and 123 documents in the
+    measured crawl, all server-rendered, no pager, no JS data source, no WAF. This
+    is nothing like the CMA walk that takes 2h49m.
+
+    THE 2026 PAGE IS THE THING TO WATCH. `config/sources/rera.yml` seeds the
+    circulars source at the PARENT so prefix scope picks up a new year page the
+    first time it exists, with no config change. If you ever hand-check it, try
+    BOTH spellings: RERA writes `circulars-issued-in-2020` lower case and
+    `Circulars-issued-in-2024` capitalised.
+
+    EXPECT A FEW `unknown` AND DO NOT CHASE THEM. Four stored CloudFront urls are
+    dead (403 in a browser too — a library problem, not a sweep one), and the two
+    documents hosted on rera.gov.bh itself cannot be fetched by a plain HTTP
+    client at all: the host omits its intermediate CA, so requests raises
+    CERTIFICATE_VERIFY_FAILED where a browser is fine. The crawl is unaffected —
+    Playwright runs with ignore_https_errors.
+    """
+    return _run_exclusive("monitor_rera", _monitor_rera_impl)
+
+
+def _monitor_rera_impl() -> dict:
+    res = _crawl_into_db("rera", False, timeout=5400)
+    logger.info("Real Estate Regulatory Authority: %s", res)
+    return res
+
+
 def monitor_sio() -> dict:
-    """WEEKLY. Bahrain's Social Insurance Organization, both sectors.
+    """WEEKLY. Bahrain's Social Insurance Organisation, both sectors.
 
     THE CRAWL IS THE SIGNAL BECAUSE NOTHING ELSE ANSWERS. Measured 2026-08-25:
     no ETag, no Last-Modified, not even a Content-Length on any sio.gov.bh page,
@@ -434,8 +713,8 @@ def monitor_sio() -> dict:
     between that and a withdrawal proposal. Hence no `only_sources` here.
     """
     rep = _crawl_into_db("sio", False)
-    logger.info("Social Insurance Organization (SIO): %s", rep)
-    return {"Social Insurance Organization (SIO)": rep}
+    logger.info("Social Insurance Organisation (SIO): %s", rep)
+    return {"Social Insurance Organisation (SIO)": rep}
 
 
 def monitor_lloc() -> dict:
@@ -552,152 +831,6 @@ def monitor_moic() -> dict:
     return {"Ministry of Industry and Commerce (MOIC)": rep}
 
 
-def monitor_sama() -> dict:
-    """DAILY. SAMA's own revision page: one request instead of 6,101 probes.
-
-    Also the only signal here that DISCOVERS — an entry matching nothing we hold
-    is a document missing from the library, which a stored-inventory probe can
-    never report because it only re-reads rows we already have.
-    """
-    return _run_exclusive("monitor_sama", _monitor_sama_impl)
-
-
-def _monitor_sama_impl() -> dict:
-    state = REPO_ROOT / "output" / "monitor_targets"
-    state.mkdir(parents=True, exist_ok=True)
-    tf = state / "SAMA.txt"
-    rep = _sweep("Saudi Arabian Monetary Authority (SAMA)", "SAMA RULEBOOK", tf)
-    out = {"counts": rep.get("counts", {}), "feed": rep.get("feed", {}),
-           "seconds": rep.get("_seconds")}
-    # Documents the feed named that the library does not hold.
-    if (rep.get("feed") or {}).get("not_in_library"):
-        p, dt = _run([sys.executable, "-B", "benchmarks/sama_feed_ingest.py"], 3600)
-        out["discovery"] = {"rc": p.returncode, "seconds": round(dt, 1)}
-    logger.info("SAMA: %s", out)
-    return out
-
-
-def monitor_mc() -> dict:
-    """WEEKLY. The crawl is the signal — mc.gov.sa refuses plain HTTP clients.
-
-    Measured 2026-08-15: requests.get is reset on every url, while a headless
-    Chromium gets 200 on the same ones. So a probe can only ever answer
-    `unknown` here, and re-crawling is the only way to see a change.
-    """
-    return _run_exclusive("monitor_mc", _monitor_mc_impl)
-
-
-def _monitor_mc_impl() -> dict:
-    res = _crawl_into_db("mc", False, timeout=5400)
-    logger.info("Ministry of Commerce: %s", res)
-    return res
-
-
-def monitor_cma() -> dict:
-    """WEEKLY. The crawl is the signal, and it must NOT walk the whole history.
-
-    CMA cannot be probed (its Last-Modified is the current time) and cannot be
-    confirmed at scale (a confirm is a full page fetch and the host throttles
-    after ~60 of 1,979).
-
-    THE ANNOUNCEMENTS TAB IS THE TRAP. It is 3,299 items over 550 pages, and a
-    full walk measured 2h49m on 2026-08-16 and still came back with 300 of the
-    1,053 announcements we already hold — reported as a clean run. A short crawl
-    is worse than none here: the 753 it missed would be ruled `disappeared` and
-    become withdrawal proposals.
-
-    Announcements are ordered NEWEST FIRST, so monitoring does not need the
-    history at all — only back as far as the newest one already stored. That is
-    what `since_days` on the announcements tab is for
-    (site_runners/cma_laws.py); it is currently None for the one-off backfill and
-    MUST be a small window here. Set CMA_SINCE_DAYS to control it.
-    """
-    return _run_exclusive("monitor_cma", _monitor_cma_impl)
-
-
-def _monitor_cma_impl() -> dict:
-    days = os.getenv("CMA_SINCE_DAYS", "30")
-    os.environ["CMA_SINCE_DAYS"] = days      # read by the CMA runner
-    res = _crawl_into_db("cma", False, timeout=14400)
-    res["announcements_window_days"] = days
-    logger.info("CMA: %s", res)
-    return res
-
-
-def monitor_cbe() -> dict:
-    """WEEKLY. Twelve sources: the circulars API, plus eleven section crawls.
-
-    THE CIRCULARS HALF IS THE CHEAP, HONEST SIGNAL and it also DISCOVERS.
-    `crawler/cbe_crawler.py` reads /api/listing/circulars in one request and gets
-    all 396 with a publication date and a Sitecore GUID each, so the orchestrator's
-    new/modified/unchanged classification against the DB already does everything a
-    probe step would. It refuses to return a partial inventory rather than let a
-    short list read downstream as documents having disappeared.
-
-    THE OTHER ELEVEN ARE BROWSER CRAWLS, which is what makes this weekly. Measured
-    2026-08-18 over the nine sections then configured: 100 pages, 152 documents.
-    `Regulations Book` is the big one at 143 sitemap urls and is capped at 250.
-
-    WHY THE PACING MATTERS HERE MORE THAN USUAL. cbe.org.eg runs bot protection —
-    it already refuses `urllib` outright and answers HEAD with 403. Both hosts in
-    `skip_hosts` were blocked by automated access from this address, and SIMAH's
-    note records that it was "triggered by repeated iteration, not volume".
-    Eleven prefix crawls is real iteration. Weekly, and never in a retry loop.
-
-    A SHORT CRAWL IS THE DANGER, not a slow one — the CMA lesson. A section that
-    hits its page cap or times out returns fewer documents than are stored, and
-    absent documents are ruled `disappeared`. The orchestrator's completeness gate
-    is what stands between that and a withdrawal proposal, and it is keyed per
-    source, which is exactly why cbe.yml splits the sections rather than crawling
-    /en/laws-regulations as one. Give this job room rather than a tight timeout.
-    """
-    return _run_exclusive("monitor_cbe", _monitor_cbe_impl)
-
-
-def _monitor_cbe_impl() -> dict:
-    # 10800s = 3 hours. Deliberately generous: CMA's job was killed at 5400s
-    # after real work and produced nothing, and a killed run is worse than a slow
-    # one because it looks like a source that returned nothing.
-    res = _crawl_into_db("cbe", False, timeout=10800)
-    logger.info("Central Bank of Egypt: %s", res)
-    return res
-
-
-def monitor_rera() -> dict:
-    """WEEKLY. Eight small section crawls of rera.gov.bh.
-
-    THE CRAWL IS THE SIGNAL BECAUSE DISCOVERY IS, not because a probe fails. RERA
-    answers a probe better than almost anything we hold: 117 of 121 stored urls
-    return both an ETag and a Last-Modified, and they are stable (8/8 identical
-    when fetched twice 0.4s apart). But circulars are partitioned by year, one
-    page per year, and a new year is a NEW PAGE — Circulars-issued-in-2026 is a
-    404 today. A probe re-reads what we already store, so it can never see that.
-
-    WHY IT IS CHEAP ANYWAY. RERA is small: 15 pages and 123 documents in the
-    measured crawl, all server-rendered, no pager, no JS data source, no WAF. This
-    is nothing like the CMA walk that takes 2h49m.
-
-    THE 2026 PAGE IS THE THING TO WATCH. `config/sources/rera.yml` seeds the
-    circulars source at the PARENT so prefix scope picks up a new year page the
-    first time it exists, with no config change. If you ever hand-check it, try
-    BOTH spellings: RERA writes `circulars-issued-in-2020` lower case and
-    `Circulars-issued-in-2024` capitalised.
-
-    EXPECT A FEW `unknown` AND DO NOT CHASE THEM. Four stored CloudFront urls are
-    dead (403 in a browser too — a library problem, not a sweep one), and the two
-    documents hosted on rera.gov.bh itself cannot be fetched by a plain HTTP
-    client at all: the host omits its intermediate CA, so requests raises
-    CERTIFICATE_VERIFY_FAILED where a browser is fine. The crawl is unaffected —
-    Playwright runs with ignore_https_errors.
-    """
-    return _run_exclusive("monitor_rera", _monitor_rera_impl)
-
-
-def _monitor_rera_impl() -> dict:
-    res = _crawl_into_db("rera", False, timeout=5400)
-    logger.info("Real Estate Regulatory Authority: %s", res)
-    return res
-
 
 def _forms_for(regulator: str) -> list:
     """Every hints form that crawls this regulator, sorted for determinism.
@@ -724,4 +857,4 @@ def _forms_for(regulator: str) -> list:
 
 
 __all__ = ["monitor_cheap_probes", "monitor_sama", "monitor_mc", "monitor_cma",
-           "monitor_cbe", "monitor_rera"]
+           "monitor_cbe", "monitor_bahrain_bourse"]

@@ -46,13 +46,33 @@ jobs:
       minute: 46
 
   # --------------------------------------------------------
-  # CBB Monitoring
+  # CBB Monitoring — RETIRED 2026-08-20, superseded by monitor_cbb
   # --------------------------------------------------------
+  # This ran crawler/cbb_monitoring_crawler.py straight into MSSQL: no workbook
+  # step, no human review, no completeness gate. It was the only monitoring job
+  # in the repo left `enabled: true`.
+  #
+  # MEASURED 2026-08-20, the day it was turned off:
+  #     regulations WHERE regulator LIKE '%Bahrain%'   ->  0 rows
+  #     source_system LIKE 'CBB%'                      ->  0 rows
+  #     run_history for CBB                            ->  0 rows
+  #
+  # A daily job, enabled, that has never produced a row — and nothing about its
+  # output said so. That is the same failure shape as a change signal that never
+  # fires: indistinguishable from a regulator with nothing to report.
+  #
+  # CBB now goes through config/sources/cbb.yml like every other regulator, so it
+  # gets the workbook gate and a per-source completeness gate. See monitor_cbb in
+  # jobs/monitor_jobs.py.
+  #
+  # DO NOT re-enable this to "have something running". Turning monitor_cbb on is
+  # the supported path, and it needs the EXECUTION_MODE question settled first —
+  # every monitor job lives in DIRECT_JOB_MAPPING while the scheduler defaults to
+  # API_JOB_MAPPING, where none of them exist.
   cbb_monitoring:
-    enabled: true
+    enabled: false
     trigger: cron
     schedule:
-      # Run every day at 5:00 AM (Karachi time)
       hour: 5
       minute: 0
 
@@ -158,25 +178,22 @@ jobs:
       hour: 5
       minute: 0
 
-  # CBE is twelve sources: the circulars API (one request, and it DISCOVERS —
-  # a crawl of that pager reads 18 of 396) plus eleven browser crawls of the HTML
-  # sections. Weekly because of the eleven, not the one.
+  # MLCU (Egypt). No ETag, no Last-Modified, no sitemap lastmod, and its news
+  # page carries neither dates nor document links — every cheaper signal was
+  # measured and ruled out, so the crawl is the signal. Small: five section
+  # pages plus 24 PDFs.
   #
-  # SUNDAY 06:00, an hour after CMA and two after MC, so the three weekly browser
-  # crawls do not collide. That stagger is a convenience, not a guarantee — CMA
-  # has measured 2h49m — and the real protection is the shared crawl lock in
-  # jobs/monitor_jobs.py, which makes a colliding job SKIP rather than queue.
+  # DISABLED, AND FOR A SECOND REASON BEYOND THE ONE ABOVE. The other four are
+  # off because turning them on is a server decision. This one is off because
+  # MLCU IS NEW AND NOBODY HAS READ ITS WORKBOOK YET. A new regulator goes to a
+  # workbook first; this path writes straight to MSSQL, so enabling it before
+  # the review would make the first scheduled run be the ingest. Turn it on
+  # after the workbook is approved and promoted, not before.
   #
-  # cbe.org.eg runs bot protection: it refuses urllib outright and answers HEAD
-  # with 403. Both hosts in change_signals.yml `skip_hosts` were blocked by
-  # automated access from this address, and eleven prefix crawls is real
-  # iteration. Weekly is part of staying welcome, not just a cost decision.
-  #
-  # NOT ENABLED, and not only because of the file-wide default: CBE has no
-  # baseline in the library yet. Monitoring is a comparison, so until the
-  # workbook has been exported, read and promoted, this job would be comparing
-  # against nothing.
-  monitor_cbe:
+  # Sunday 06:00 keeps it clear of monitor_mc (04:00) and monitor_cma (05:00) —
+  # all three take the same `_run_exclusive` lock, and an overlap is a SKIP, so
+  # a colliding slot would silently starve a job rather than fail.
+  monitor_mlcu:
     enabled: false
     trigger: cron
     schedule:
@@ -184,21 +201,14 @@ jobs:
       hour: 6
       minute: 0
 
-  # RERA (Bahrain) is small — 15 pages, 123 documents, server-rendered, no pager
-  # and no WAF — so this is the cheapest of the weekly crawls. It is weekly rather
-  # than daily because nothing about RERA moves fast: two circulars in all of 2025.
+ # CBE, same rule as MLCU: workbook first, schedule second.
   #
-  # It is a CRAWL rather than a probe even though its probe would work (117 of 121
-  # stored urls carry a stable ETag). Circulars are partitioned by year, one page
-  # per year, and a new year is a NEW PAGE — Circulars-issued-in-2026 is a 404
-  # today. Only a crawl can find that.
-  #
-  # Sunday 07:00, after CBE, so the weekly browser crawls stay staggered. The
-  # shared lock in jobs/monitor_jobs.py is the real protection if one overruns.
-  #
-  # NOT ENABLED: RERA has no baseline in the library yet, so this would compare
-  # against nothing.
-  monitor_rera:
+  # Sunday 07:00 — one hour after monitor_mlcu. All monitor jobs take the same
+  # `_run_exclusive` lock and an overlap is a SKIP, not a failure, so a
+  # colliding slot silently starves a job instead of erroring. CBE is the
+  # longest of them (twelve sources; the workbook export ran ~40 min), so give
+  # it the last slot of the morning.
+  monitor_cbe:
     enabled: false
     trigger: cron
     schedule:
@@ -206,22 +216,22 @@ jobs:
       hour: 7
       minute: 0
 
-  # SIO (Bahrain) — ten small crawls of sio.gov.bh, ~5 minutes for 214 documents.
+  # BAHRAIN BOURSE (BHB), same rule as MLCU and CBE: workbook first, schedule
+  # second. The Legal Framework accordion is entirely client-rendered, but the
+  # page's own JS calls one API (GetFaq) that returns all seven sections in a
+  # single ~20 KB request — cheap, and the crawl already IS the signal. See
+  # crawler/bahrain_bourse_crawler.py and docs/HANDOFF_bahrain_bourse.md.
   #
-  # THE CRAWL IS THE SIGNAL BECAUSE NOTHING ELSE ANSWERS, not because a probe is
-  # merely inconvenient: no ETag, no Last-Modified, no Content-Length on any page,
-  # and a sitemap whose 106 lastmod values are all its own build time. Measured
-  # 2026-08-25; the reasoning is in config/change_signals.yml.
+  # Bahrain Bourse is an EXCHANGE, and the last exchange this project crawled
+  # (saudiexchange.sa) was permanently blocked within two hours of ordinary
+  # automated access. Read docs/HANDOFF_bahrain_bourse.md §0 before turning
+  # this on or re-measuring the site by hand.
   #
-  # It is cheap because every law is a modal already in the page: a section's ~48
-  # laws come from ONE page load. Sunday 08:00, after RERA at 07:00, so the weekly
-  # browser crawls stay staggered — the shared lock in jobs/monitor_jobs.py is the
-  # real protection if one overruns.
-  #
-  # NOT ENABLED: SIO has no baseline in the library yet, so this would compare
-  # against nothing. Promote output/workbooks/sio.xlsx first (214 rows,
-  # `check` verdict OK), then turn this on.
-  monitor_sio:
+  # Sunday 08:00 — one hour after monitor_cbe. All monitor jobs take the same
+  # `_run_exclusive` lock and an overlap is a SKIP, not a failure, so a
+  # colliding slot silently starves a job instead of erroring. This was the
+  # only free hour on the Sunday morning schedule as of 2026-08-20.
+  monitor_bahrain_bourse:
     enabled: false
     trigger: cron
     schedule:
@@ -229,38 +239,21 @@ jobs:
       hour: 8
       minute: 0
 
-  # PDPA (Bahrain) — the whole regulator is TWO page loads, because both its
-  # sources are max_pages: 1. Weekly rather than daily only because a data
-  # protection law and its ten executive decisions do not move often; the cost
-  # would not argue against daily.
+  # CBB on the config flow — REPLACES the retired `cbb_monitoring` above.
   #
-  # 08:30 and not 08:00 so it does not start inside monitor_sio's window. Neither
-  # touches the other's host, so this is tidiness, not a dependency.
+  # Sunday 09:00, the last free slot of the morning. Every monitor job takes the
+  # same `_run_exclusive` lock and an overlap is a SKIP, not a failure, so a
+  # colliding slot silently starves a job rather than erroring. Taken: mc 04:00,
+  # cma 05:00, mlcu 06:00, cbe 07:00, bahrain_bourse 08:00.
   #
-  # NOT ENABLED: PDPA has no baseline in the library yet, so this would compare
-  # against nothing and every one of the 82 rows would read as new. Promote
-  # output/workbooks/pdpa.xlsx first (82 rows, `check` verdict OK), then turn
-  # this on.
-  monitor_pdpa:
-    enabled: false
-    trigger: cron
-    schedule:
-      day_of_week: 'sun'
-      hour: 8
-      minute: 30
-
-  # MOIC (Bahrain) — 11 page loads for 95 documents. Weekly rather than daily
-  # because commercial law and ministerial orders do not move often; the cost
-  # would not argue against daily.
+  # CBB is the heaviest of them — mode 2c walks the whole rulebook sidebar and
+  # mode 4 measured 1,095 documents — so it gets the end of the queue where a
+  # long run cannot starve anything behind it.
   #
-  # 09:00, after monitor_sio (08:00) and monitor_pdpa (08:30). Different hosts,
-  # so this is tidiness rather than a dependency.
-  #
-  # NOT ENABLED: MOIC has no baseline in the library yet, so this would compare
-  # against nothing and all 95 rows would read as new. Promote
-  # output/workbooks/moic.xlsx first (95 rows, `check` verdict OK), then turn
-  # this on.
-  monitor_moic:
+  # STAYS OFF until (a) a person has read a CBB workbook, and (b) the
+  # EXECUTION_MODE / two-job-mapping question is settled. Enabling it today logs
+  # "No function mapped for job: monitor_cbb" and does nothing.
+  monitor_cbb:
     enabled: false
     trigger: cron
     schedule:
@@ -268,28 +261,43 @@ jobs:
       hour: 9
       minute: 0
 
-  # LLOC (Bahrain) — the `Latest Legislation` window ONLY: 144 records, 15
-  # requests, about 40 seconds. monitor_lloc() narrows the config with
-  # only_sources; the 1,583-document classification section is coverage and is
-  # deliberately NOT on this path (it takes 47 minutes).
+  # ---- Bahrain, onboarded by abeeraslam, merged 2026-08-26 ----------------
+  # Sunday 10:00 / 11:00 / 12:00, continuing the one-hour stagger. Every
+  # monitor_* job takes the same `_run_exclusive` lock and an overlap is a SKIP,
+  # not a failure -- a colliding slot silently starves a job rather than
+  # erroring. Taken before these: mc 04:00, cma 05:00, mlcu 06:00, cbe 07:00,
+  # bahrain_bourse 08:00, cbb 09:00.
   #
-  # DAILY is affordable at 15 requests, and Latest is a rolling window where new
-  # legislation appears first — a weekly cadence would let a week of it sit
-  # unseen.
+  # LLOC is the cheap one -- monitor_lloc narrows to the "Latest Legislation"
+  # window, 144 records in ~40 seconds, rather than the 2,838-second
+  # classification walk. It could run daily once reviewed; weekly here so the
+  # first scheduled runs stay beside the others.
   #
-  # 04:30, alone. lloc.gov.bh answers a burst of requests with a 1,245-byte IIS
-  # 404 that parses as an empty page, so nothing else touching this host may run
-  # near it. If the classification refresh is ever scheduled, it must not overlap.
-  #
-  # NOT ENABLED: no baseline in the library yet, and output/workbooks/lloc.xlsx
-  # is still the pre-fix export that `check` rejects. Re-export, check, promote,
-  # then turn this on.
+  # ALL THREE DISABLED. Nobody has read their workbooks, and this path writes
+  # straight to MSSQL.
+  monitor_rera:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 10
+      minute: 0
+
+  monitor_sio:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 11
+      minute: 0
+
   monitor_lloc:
     enabled: false
     trigger: cron
     schedule:
-      hour: 4
-      minute: 30
+      day_of_week: 'sun'
+      hour: 12
+      minute: 0
 
   # ----------------------------------------------------------
   # NO JOB FOR Saudi Exchange OR SIMAH — deliberately.

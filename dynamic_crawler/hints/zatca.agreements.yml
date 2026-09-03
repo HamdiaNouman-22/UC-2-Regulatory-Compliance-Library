@@ -213,7 +213,7 @@ section_path:
   levels: []
 
 library:
-  regulator: "ZATCA"
+  regulator: "Zakat, Tax and Customs Authority (ZATCA)"
   source_system: "Rules and Regulations"
 meta:
   approved: false

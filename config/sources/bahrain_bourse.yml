@@ -1,0 +1,45 @@
+# Bahrain Bourse (BHB) — Legal Framework
+#
+# Written 2026-08-20, onboarding per docs/HANDOFF_bahrain_bourse.md. CUSTOM: the
+# accordion (Laws, Rules & Regulations, Resolutions, Guidelines, Circulars,
+# CBB Rules & Regulations, Consultation) is entirely client-rendered — a
+# `curl` of the page contains none of it — but it all comes from ONE call to
+# the site's own middleware API, `GetFaq`, which returns all seven sections in
+# one ~20 KB JSON response. No pagination, no browser. See the docstring in
+# crawler/bahrain_bourse_crawler.py for the full discovery trail (the
+# double-encoded querystring, the SharePoint-but-not-SharePoint-REST backend,
+# the zero-width-space cleanup).
+#
+# BAHRAIN BOURSE IS AN EXCHANGE. saudiexchange.sa — the last exchange this
+# project crawled — was permanently blocked (Akamai) after ~2 hours of
+# ordinary automated access. This source was built from ONE manual fetch of
+# the HTML plus ONE manual render (dynamic_crawler/formfill inspect) plus a
+# handful of direct calls to this API during development, all against a plain
+# JSON endpoint with no WAF/CDN observed — not a repeated crawl of the site
+# itself. Nothing here is scheduled yet (config/scheduler.yml must list it
+# `enabled: false`) until a person has read the resulting workbook.
+#
+# No per-document publisher change stamp exists except for Circulars, which
+# carries a reference number and an issue date (parsed from prose like
+# "31st December 2018" — best effort, `published_date` is left None on
+# anything unparseable rather than guessing). The default identity
+# (document_url, doc_path, title) is used unmodified: every document has its
+# own PDF url.
+#
+# doc_path = [regulator, source_system, section, title], so the library shows
+# each accordion section (Laws, Circulars, ...) as its own folder under Legal
+# Framework — matching the site. Accepted trade: an item migrating between
+# sections (several Circulars rows are literally titled "Consultation Paper:
+# ...", suggesting a later move to Guidelines) reads as one document
+# disappearing and a new one appearing, by design here. The section name is
+# ALSO kept in `category` and `extra_meta.bhb_section`.
+
+regulator: "Bahrain Bourse (BHB)"
+owner: lead
+
+sources:
+  - name: "Legal Framework"
+    mode: custom
+    crawler_class: "crawler.bahrain_bourse_crawler.BahrainBourseLegalFrameworkCrawler"
+    init_kwargs:
+      source_system: "Legal Framework"

@@ -32,7 +32,16 @@
 #     number and Hijri date, rather than one opaque PDF. If SIMAH stays blocked,
 #     that is the route, and SAMA is the issuing regulator anyway.
 
-regulator: SIMAH
+# MUST MATCH `regulations.regulator` EXACTLY. This file used the bare
+# acronym while every stored row carries the full name, written by the
+# hand-written crawler / formfill form that actually produced them. The
+# value was dormant because no crawl had ever run through this config --
+# but `regulator` becomes doc_path[0], which is an identity field, so the
+# first run under the short name would have matched nothing, inserted the
+# whole regulator again as `new`, and left `disappeared` silent because it
+# scopes by regulator and would have found no rows under the short name.
+# Corrected 2026-08-20, before any such run.
+regulator: "Saudi Credit Bureau (SIMAH)"
 owner: ai.team
 
 # Read by build_regulator_crawler, which refuses rather than composing an empty

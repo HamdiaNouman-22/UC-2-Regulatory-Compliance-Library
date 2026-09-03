@@ -148,6 +148,37 @@ def first_seg(path: str) -> str:
     return segs[0] if segs else ""
 
 
+def path_excluded(path: str, excludes) -> bool:
+    """Is this url path inside a subtree the source asked to skip?
+
+    WHY A SOURCE WOULD ASK. CBE's laws-regulations section can only be crawled
+    from its PARENT: the /regulations/regulations-book page links to nothing at
+    all (measured 2026-08-25 -- 157 links, 3 of them the Arabic copy of itself),
+    so seeding it directly records 1 document where the sitemap lists 143.
+    Seeding the parent reaches them, but `prefix` scope then also swallows
+    /regulations/circulars -- and those 396 circulars already arrive through
+    CBE's own API with real titles, dates and categories. 21 of 55 documents on
+    that crawl were duplicate circular PDFs.
+
+    So the choice was: lose 142 documents, or duplicate 21 badly. This is the
+    third answer -- crawl from the parent and skip the one subtree that is
+    already owned by a better source.
+
+    Matched on the PATH PREFIX, and it stops BOTH the page walk and document
+    collection. Excluding a page but still harvesting its files would defeat the
+    point, since it is the files that duplicate -- and documents are collected
+    regardless of scope.
+    """
+    if not excludes:
+        return False
+    p = (path or "").rstrip("/").lower()
+    for ex in excludes:
+        ex = (ex or "").rstrip("/").lower()
+        if ex and (p == ex or p.startswith(ex + "/")):
+            return True
+    return False
+
+
 def scope_prefix(path: str) -> str:
     """The path that `scope: prefix` means by "under the seed".
 

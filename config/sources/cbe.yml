@@ -83,6 +83,22 @@
 # News is deliberately out of the library (/api/listing/news, 781 items).
 
 regulator: "Central Bank of Egypt (CBE)"
+
+# THE CIRCULARS SUBTREE IS OWNED BY THE API SOURCE BELOW, for EVERY source here.
+#
+# MEASURED 2026-08-26: with the exclude scoped to `Laws and Regulations` alone,
+# that source leaked 0 -- and `Payment Systems and Services` leaked 11 instead.
+# 9 were files the Circulars source already holds with a real title and date;
+# 3 pairs pointed at ONE file titled after whichever page linked it ("Payment
+# Cards", "Mobile Wallets", "Introduction"). Any section page can link a
+# circular, so the rule belongs to the regulator, not to one of its sources.
+#
+# BOTH paths are needed. The first stops the crawl walking the listing; the
+# second stops the pdfs being harvested, because document links are collected
+# regardless of scope and the files live under /-/media/, not the section path.
+exclude:
+  - "/en/laws-regulations/regulations/circulars"
+  - "/-/media/project/cbe/listing/circulars"
 owner: teammate B
 
 sources:
@@ -102,13 +118,30 @@ sources:
       source_system: "Circulars"
 
   # ---- laws & regulations, seeded past the circulars listing ---------------
-  - name: "Laws-Regulations"
+  # NAMED FOR THE SITE, NOT THE URL. This was "Laws-Regulations", the slug, and
+  # doc_path is [regulator, source_system] + the site's own breadcrumb -- which
+  # says "Laws and Regulations". `_crumb_key` compares them as
+  #     "laws regulations"  vs  "laws and regulations"
+  # so the deduplicator kept both and every path read
+  #     CBE | Laws-Regulations | Laws and Regulations | Regulations | Basel
+  # Spelling it the site's way lets the existing dedupe collapse the pair.
+  #
+  # max_pages RAISED 60 -> 250. The regulations-book subtree alone lists 143
+  # sitemap urls; 60 cannot hold the section.
+  #
+  # EXCLUDE: the circulars subtree is owned by the API source above, which gets
+  # all 396 with real titles, dates and categories. Prefix scope from this seed
+  # would otherwise swallow them -- 21 of 55 documents on the 2026-08-18 crawl
+  # were duplicate circular pdfs. Both paths are needed: the listing page, and
+  # the /-/media/ tree the pdfs actually live in, because document links are
+  # collected regardless of scope.
+  - name: "Laws and Regulations"
     mode: generic
     seed_url: "https://www.cbe.org.eg/en/laws-regulations"
     scope: prefix
-    source_system: "Laws-Regulations"
-    category: "Laws-Regulations"
-    max_pages: 60
+    source_system: "Laws and Regulations"
+    category: "Laws and Regulations"
+    max_pages: 250
     max_depth: 6
 
   # # ---- the other sections, as crawled and measured 2026-08-18 -------------

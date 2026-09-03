@@ -73,6 +73,31 @@ MIN_PAGE_TEXT = 200
 # "Chapter 3: Monetary Policy" (10 characters, one child) looks the same.
 MIN_LEAF_TEXT = 50
 
+# A page whose visible text is its own title plus a date stamp and nothing else
+# is a wrapper around the file it links, not a document. See
+# GenericSiteCrawler._is_link_wrapper for the CBE case this was measured on.
+#
+# MEASURED over all 92 CBE HTML pages, 2026-08-20, residue after removing the
+# page's own title and its date stamp:
+#
+#       0   CBE Risk Appetite Statement   <- the wrapper, the only one under 40
+#      47   Laws
+#      94   Governance
+#      98   Payment Acceptance Channels
+#     103   Regulations Book
+#
+# So the real gap is 0 -> 47, not the comfortable one a first look at a single
+# section suggested. 20 sits in the middle of that gap and still catches the
+# target with room to spare; 40 would have left a 7-character margin against a
+# real page, which is not a margin at all.
+#
+# Do NOT raise this to catch "nearly empty" pages. The rule keys on residue
+# precisely so it cannot become a length rule — MIN_LEAF_TEXT exists because
+# SAMA's "Article 3" is 184 characters of actual law, and a generous threshold
+# here would start eating documents like it.
+WRAPPER_RESIDUE_CHARS = 20
+
+
 
 # ---- reading the listing row -------------------------------------------------
 # A listing row carries what the detail page usually does not repeat:
@@ -88,6 +113,17 @@ _DATE_PATTERNS = [
     re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),                          # 2026-07-06
     re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b"),                      # 06/07/2026
 ]
+# The date the CMS prints under the heading on every page ("13 Aug 2026",
+# "23 Mar 2023", "2026-08-13", "13/08/2026"). Removed before judging residue, so
+# a wrapper is not saved from the rule by the template's own furniture.
+_PAGE_DATE_STAMP_RE = re.compile(
+    rf"\b(?:\d{{1,2}}\s+(?:{_MONTH})\s+\d{{4}}"
+    rf"|(?:{_MONTH})\s+\d{{1,2}},?\s+\d{{4}}"
+    rf"|\d{{4}}-\d{{2}}-\d{{2}}"
+    rf"|\d{{1,2}}/\d{{1,2}}/\d{{4}})\b",
+    re.I,
+)
+
 _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun",
      "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}

@@ -1,0 +1,65 @@
+# Which country each regulator belongs to, for the FOLDER TREE ONLY.
+#
+# ---------------------------------------------------------------------------
+# THIS DOES NOT GO INTO doc_path, AND MUST NOT
+# ---------------------------------------------------------------------------
+# `doc_path` is one of the three identity fields:
+#
+#     DEFAULT_IDENTITY = ("document_url", "doc_path", "title")
+#
+# so putting the country in it would change the identity of EVERY stored
+# document at once. The next crawl would read all 9,358 as `new` and all the
+# stored rows as `disappeared` — and `disappeared` feeds the withdrawal gate.
+# That is the exact failure dynamic_crawler/MONITORING.md §2 exists to prevent,
+# applied to the whole library in one run.
+#
+# So the country is prepended when BUILDING THE TREE and nowhere else.
+# `regulations.doc_path` keeps starting at the regulator, identity is untouched,
+# and no document is reclassified. The tree gains a level; the library does not
+# move.
+#
+# ---------------------------------------------------------------------------
+# WHY A FILE AND NOT A FIELD ON EACH SOURCE CONFIG
+# ---------------------------------------------------------------------------
+# Not every regulator has a config/sources/*.yml — the formfill forms carry
+# their regulator under `library.regulator` in dynamic_crawler/hints/*.yml, and
+# SAMA/SBP/SECP predate both. One list keyed on the regulator NAME covers all of
+# them, and there is exactly one place to look when a folder lands in the wrong
+# country.
+#
+# THE NAME MUST MATCH EXACTLY, including the "(ACRONYM)" suffix, because that is
+# what `regulations.regulator` and `doc_path[0]` hold. A near-miss does not
+# error — it silently leaves the regulator at the root, which is why
+# `scripts/verify_country_tree.py` asserts that the root count is exactly the
+# number of countries below.
+
+countries:
+  "Kingdom of Saudi Arabia":
+    - "Saudi Arabian Monetary Authority (SAMA)"
+    - "Capital Market Authority (CMA)"
+    - "Ministry of Commerce"
+    - "Ministry of Education"
+    - "Ministry of Health"
+    - "Ministry of Human Resource and Social Development (MHRSD)"
+    - "Ministry of Investment (MISA)"
+    - "Saudi Data and AI Authority (SDAIA)"
+    - "Saudi Credit Bureau (SIMAH)"
+    - "Saudi Exchange"
+    - "Anti-Money Laundering Permanent Committee (AML)"
+    - "Zakat, Tax and Customs Authority (ZATCA)"
+
+  "Egypt":
+    - "Central Bank of Egypt (CBE)"
+    - "Egyptian Anti-Money Laundering and Counter-Terrorism Financing Unit (MLCU)"
+
+  "Bahrain":
+    - "Central Bank of Bahrain"
+    - "Bahrain Bourse (BHB)"
+    # Onboarded by abeeraslam, merged 2026-08-26. Listed here at merge time
+    # rather than at first crawl: an unlisted regulator keeps its folders at the
+    # TREE ROOT, and that is the failure that is expensive to notice -- the
+    # documents are all correct, so nothing else complains.
+    - "Real Estate Regulatory Authority (RERA)"
+    - "Social Insurance Organisation (SIO)"
+    - "Legislation and Legal Opinion Commission (LLOC)"
+

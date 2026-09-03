@@ -33,6 +33,7 @@ from utils.lang_translator import (
     translate_texts_batch,
     translate_v2_gap_result,
 )
+from utils.public_meta import public_extra_meta
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Regulatory Pipeline API", version="2.0.0")
 
@@ -1308,6 +1309,126 @@ def trigger_cbb_monitoring_with_dates(request: CBBMonitoringRequest = Body(defau
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
+# ============================================================================
+#  MONITORING JOBS OVER HTTP
+# ============================================================================
+# WHY THESE EXIST
+# ---------------
+# Every monitor_* job lives in scheduler.py's DIRECT_JOB_MAPPING, but
+# EXECUTION_MODE defaults to "API", so the scheduler reads API_JOB_MAPPING —
+# where no monitor job existed. Setting `enabled: true` on one therefore logged
+#     WARNING: No function mapped for job: monitor_cbe
+# and did nothing. No crash, no error surfaced, no monitoring. That was true for
+# EVERY regulator, not just the new ones.
+#
+# WHY THEY RETURN IMMEDIATELY
+# ---------------------------
+# `scheduler.trigger_via_api` posts with `timeout=10`. A monitoring run takes
+# tens of minutes (CBE measured ~40), so a synchronous endpoint hands the
+# scheduler a ReadTimeout on every successful run — the shape the existing
+# /trigger/CBB/monitoring endpoint has. These start the job on a thread and
+# answer 202 straight away, so the scheduler's 10 seconds is plenty and the
+# HTTP call reports whether the job STARTED, which is the only thing it can
+# honestly know.
+#
+# CONCURRENCY IS ALREADY HANDLED, and not here: every monitor_* job takes the
+# `_run_exclusive` file lock in jobs/monitor_jobs.py, so a second one started
+# while another is running returns {"skipped": true} rather than crashing a
+# browser. This module does not need its own lock and must not add one — a
+# second guard that disagrees with the first is how the two drift.
+#
+# THE STATE BELOW IS IN MEMORY AND IS LOST ON RESTART, deliberately. It answers
+# "what did THIS api process start", nothing more. The durable record of what
+# ran is `run_history` in the database, which the completeness gate reads; do
+# not build reporting on this dict.
+
+_MONITOR_JOBS = {
+    "monitor_cheap_probes", "monitor_sama", "monitor_mc", "monitor_cma",
+    "monitor_mlcu", "monitor_cbe", "monitor_cbb", "monitor_bahrain_bourse",
+    "monitor_rera", "monitor_sio", "monitor_lloc",
+}
+
+_monitor_state: Dict[str, Dict[str, Any]] = {}
+_monitor_lock = Lock()
+
+
+def _run_monitor_job(name: str) -> None:
+    """Run one monitor job on a worker thread and record how it ended."""
+    import jobs.monitor_jobs as mj
+    started = datetime.utcnow().isoformat()
+    try:
+        result = getattr(mj, name)()
+        with _monitor_lock:
+            _monitor_state[name] = {
+                "state": "finished", "started_at": started,
+                "finished_at": datetime.utcnow().isoformat(),
+                # The job's own report, unedited. `skipped: true` means the
+                # exclusive lock was held — a normal outcome, not a failure.
+                "result": result,
+            }
+    except Exception as e:
+        logger.error("monitor job %s failed: %s", name, e, exc_info=True)
+        with _monitor_lock:
+            _monitor_state[name] = {
+                "state": "failed", "started_at": started,
+                "finished_at": datetime.utcnow().isoformat(),
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+
+@app.post("/trigger/monitor/{job}", tags=["Monitoring"], status_code=202)
+def trigger_monitor_job(job: str):
+    """Start a monitoring job. Returns as soon as it has STARTED, not finished.
+
+    A run takes tens of minutes. Poll `GET /trigger/monitor/{job}` for the
+    outcome, or read `run_history` in the database for the durable record.
+    """
+    if job not in _MONITOR_JOBS:
+        raise HTTPException(status_code=404, detail={
+            "error": f"unknown monitoring job {job!r}",
+            "available": sorted(_MONITOR_JOBS)})
+
+    with _monitor_lock:
+        current = _monitor_state.get(job) or {}
+        if current.get("state") == "running":
+            # Not an error: the caller asked for something already happening.
+            return {"job": job, "state": "already_running",
+                    "started_at": current.get("started_at")}
+        _monitor_state[job] = {"state": "running",
+                               "started_at": datetime.utcnow().isoformat()}
+
+    Thread(target=_run_monitor_job, args=(job,), daemon=True,
+           name=f"monitor-{job}").start()
+    logger.info("monitoring job %s started via API", job)
+    return {"job": job, "state": "started",
+            "started_at": _monitor_state[job]["started_at"],
+            "poll": f"/trigger/monitor/{job}"}
+
+
+@app.get("/trigger/monitor/{job}", tags=["Monitoring"])
+def monitor_job_status(job: str):
+    """What this API process last saw of one monitoring job."""
+    if job not in _MONITOR_JOBS:
+        raise HTTPException(status_code=404, detail={
+            "error": f"unknown monitoring job {job!r}",
+            "available": sorted(_MONITOR_JOBS)})
+    with _monitor_lock:
+        state = dict(_monitor_state.get(job) or {"state": "never_started"})
+    state["job"] = job
+    return state
+
+
+@app.get("/trigger/monitor", tags=["Monitoring"])
+def list_monitor_jobs():
+    """Every monitoring job this API can start, and its state in this process."""
+    with _monitor_lock:
+        seen = {k: dict(v) for k, v in _monitor_state.items()}
+    return {"jobs": sorted(_MONITOR_JOBS),
+            "state": seen,
+            "note": ("state is in memory and resets when the api restarts; "
+                     "run_history in the database is the durable record")}
+
+
 @app.post("/trigger/{regulator}")
 def trigger_regulator_pipeline(regulator: str):
     # Capture all logs
@@ -1445,9 +1566,11 @@ def get_regulations_by_regulator(
                     reg_dict["document_html"] = reg_dict["document_html"].replace('\\"', '"')
                 if reg_dict.get("extra_meta"):
                     try:
-                        reg_dict["extra_meta"] = json.loads(reg_dict["extra_meta"])
-                        reg_dict["extra_meta"].pop("org_pdf_html", None)
-                        reg_dict["extra_meta"].pop("org_pdf_text", None)
+                        # ALLOWLIST, not pop(). Popping two known-bad keys
+                        # publishes every key a crawler invents next. See
+                        # utils/public_meta.py.
+                        reg_dict["extra_meta"] = public_extra_meta(
+                            reg_dict["extra_meta"])
                     except Exception:
                         pass
                 reg_dict["category_info"] = {
@@ -1538,9 +1661,9 @@ def get_regulation_detail(
                 reg_dict["document_html"] = reg_dict["document_html"].replace('\\"', '"')
             if reg_dict.get("extra_meta"):
                 try:
-                    reg_dict["extra_meta"] = json.loads(reg_dict["extra_meta"])
-                    reg_dict["extra_meta"].pop("org_pdf_text", None)
-                    reg_dict["extra_meta"].pop("org_pdf_html", None)
+                    # ALLOWLIST, not pop() -- see utils/public_meta.py.
+                    reg_dict["extra_meta"] = public_extra_meta(
+                        reg_dict["extra_meta"])
                 except Exception:
                     pass
             reg_dict["category_info"] = {
@@ -1639,7 +1762,7 @@ def get_compliance_analysis_full(regulation_id: int, lang: str = Query("en")):
                     "source_page_url":regulation.get("source_page_url"),
                     "document_html":  regulation.get("document_html"),
                     "doc_path":       regulation.get("doc_path"),
-                    "extra_meta":     regulation.get("extra_meta"),
+                    "extra_meta":     public_extra_meta(regulation.get("extra_meta")),
                     "content_hash":   regulation.get("content_hash"),
                 },
                 "requirements":   [],
@@ -1681,7 +1804,7 @@ def get_compliance_analysis_full(regulation_id: int, lang: str = Query("en")):
             "source_page_url":regulation.get("source_page_url"),
             "document_html":  regulation.get("document_html"),
             "doc_path":       regulation.get("doc_path"),
-            "extra_meta":     regulation.get("extra_meta"),
+            "extra_meta":     public_extra_meta(regulation.get("extra_meta")),
             "content_hash":   regulation.get("content_hash"),
         },
         **mapping_data,
@@ -2226,11 +2349,16 @@ def update_regulations_status(payload: StatusUpdate):
 # ================================================================== #
 
 @app.post("/trigger/requirement-matching/{regulation_id}", tags=["Step 2"])
-def trigger_requirement_matching_v2(regulation_id: int):
+def trigger_requirement_matching_v2(regulation_id: int, force: bool = False):
     """
     Trigger requirement matching for a regulation.
     Reads from the unified compliance_analysis table (works for all regulators).
     Passes version_id through to sama_requirement_mapping for CBB rows.
+
+    Cached on the obligations plus the internal register: an unchanged input
+    returns the stored verdicts without calling the LLM, because re-asking
+    produces different answers on the borderline cases. `force=true` re-runs
+    anyway -- expect 2-3 verdicts in 39 to move if you do.
     """
     rows = repo.get_compliance_analysis(regulation_id)
     if not rows:
@@ -2279,6 +2407,43 @@ def trigger_requirement_matching_v2(regulation_id: int):
     existing_kpis          = repo.get_all_demo_kpis()
     linked_controls_by_req = repo.get_linked_controls_by_requirement()
     linked_kpis_by_req     = repo.get_linked_kpis_by_requirement()
+
+    # ── Matching cache ────────────────────────────────────────────────
+    # Re-matching the same obligations against the same register disagrees with
+    # itself on 2-3 of every 39, because the disagreements are genuine ties
+    # rather than sampling noise -- determinism settings measurably do not help
+    # (docs/determinism.md). Deciding once is what keeps the stored verdicts
+    # stable. The key covers the obligations AND the internal register, so
+    # adding a requirement still re-opens the verdicts it could change.
+    _reg_row = repo.get_regulation_by_id(regulation_id) or {}
+    _extra_meta = _reg_row.get("extra_meta")
+    _corpus_hash = analysis_cache.corpus_fingerprint(
+        existing_requirements, existing_controls, existing_kpis)
+    _stored = repo.get_requirement_mappings_by_regulation(regulation_id) or []
+    _should, _match_hash, _why = analysis_cache.decide_matching(
+        extra_meta=_extra_meta,
+        obligation_texts=[r["requirement_text"] for r in extracted_requirements],
+        corpus_hash=_corpus_hash,
+        model=getattr(requirement_matcher, "model", ""),
+        has_existing_rows=bool(_stored),
+        force=force,
+    )
+    if not _should:
+        if not analysis_cache.as_dict(_extra_meta).get(analysis_cache.MATCH_HASH_KEY):
+            analysis_cache.record_matching(repo, regulation_id, _extra_meta,
+                                           _match_hash,
+                                           getattr(requirement_matcher, "model", ""))
+        logger.info(f"Requirement matching SKIPPED for {regulation_id}: {_why}")
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": _why,
+            "regulation_id": regulation_id,
+            "existing_mappings": len(_stored),
+            "low_confidence": sum(1 for m in _stored
+                                  if (m.get("match_confidence") or "high") == "low"),
+        }
+    logger.info(f"Requirement matching RUNNING for {regulation_id}: {_why}")
 
     match_results = requirement_matcher.match_requirements(
         regulation_id=regulation_id,
@@ -2377,6 +2542,13 @@ def trigger_requirement_matching_v2(regulation_id: int):
             logger.error(f"[matching] Failed to insert new suggested KPI: {e}")
 
     _invalidate_ar_cache(regulation_id)
+    # After the writes, never before: a hash recorded against matching that
+    # failed to persist would suppress the retry.
+    analysis_cache.record_matching(repo, regulation_id, _extra_meta, _match_hash,
+                                   getattr(requirement_matcher, "model", ""))
+
+    _low = [m for m in requirement_mappings
+            if (m.get("match_confidence") or "high") == "low"]
 
     return {
         "success":               True,
@@ -2390,9 +2562,22 @@ def trigger_requirement_matching_v2(regulation_id: int):
                 "requirement_id":             m.get("requirement_id"),
                 "match_status":               m["match_status"],
                 "matched_requirement_id":     m.get("matched_requirement_id"),
+                "match_confidence":           m.get("match_confidence", "high"),
                 "match_explanation":          m.get("match_explanation"),
             }
             for m in requirement_mappings
+        ],
+        # The verdicts a person should look at. Surfaced at the top level rather
+        # than buried per-row: a borderline call is only useful if somebody sees
+        # it, and nobody scans 39 rows looking for a field.
+        "needs_review": [
+            {
+                "extracted_requirement_text": m["extracted_requirement_text"],
+                "match_status":               m["match_status"],
+                "matched_requirement_id":     m.get("matched_requirement_id"),
+                "match_explanation":          m.get("match_explanation"),
+            }
+            for m in _low
         ],
         "summary": {
             "requirements": {
@@ -2400,6 +2585,7 @@ def trigger_requirement_matching_v2(regulation_id: int):
                 "fully_matched":     sum(1 for m in requirement_mappings if m["match_status"] == "fully_matched"),
                 "partially_matched": sum(1 for m in requirement_mappings if m["match_status"] == "partially_matched"),
                 "new":               sum(1 for m in requirement_mappings if m["match_status"] == "new"),
+                "low_confidence":    len(_low),
             },
             "controls": {"new_links_added": len(control_links), "new_controls_created": len(new_controls_to_insert)},
             "kpis":     {"new_links_added": len(kpi_links),     "new_kpis_created":     len(new_kpis_to_insert)},
@@ -3684,6 +3870,175 @@ async def upload_regulation(
 
 
 # ================================================================== #
+#  STANDALONE ANALYSIS — a document in, the analysis out, nothing     #
+#  written anywhere                                                    #
+# ================================================================== #
+#
+# WHY THIS IS SEPARATE FROM /upload-regulation
+#
+#   /upload-regulation is an INGESTION endpoint: it extracts, then inserts a
+#   regulations row, stores the analysis, runs matching against the internal
+#   register and creates suggested requirements. Every one of those is a write.
+#   Pointing it at a document you only wanted to look at leaves a regulation in
+#   the library, an analysis attached to it, and AUTO- requirements in
+#   COMPLIANCE_REQUIREMENT that somebody then has to unpick.
+#
+#   This endpoint runs the SAME extraction and the SAME four-stage analyzer and
+#   returns the result. It opens no database connection and writes nothing --
+#   not the regulation, not the analysis, not a requirement, not a version row.
+#   Nothing here can change the library.
+#
+#   That makes it the right tool for: checking what the analyzer makes of a
+#   document before committing it, comparing two runs of the same PDF, testing a
+#   prompt change, and analysing a document that is not a regulation at all.
+#
+#   It is deliberately NOT cached. The analysis cache keys on a stored
+#   regulation's extra_meta, and there is no stored regulation here. Two calls
+#   with the same PDF will therefore give slightly different answers -- that is
+#   the documented behaviour of long generations (docs/determinism.md), and on
+#   this endpoint it is a feature: it is how you measure the variance.
+
+@app.post("/analyze/document", tags=["Standalone Analysis"])
+async def analyze_document_standalone(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    regulator: str = Form(""),
+    reference: str = Form(""),
+    publication_date: str = Form(""),
+    include_text: bool = Form(False),
+):
+    """Extract and analyse a PDF/DOCX. Writes NOTHING to the database.
+
+    Same text extraction (OCR for scanned PDFs) and same four-stage analyzer as
+    the ingestion path. The response carries the obligations, controls and
+    per-stage JSON; pass `include_text=true` to get the extracted text back too.
+
+    `title`, `regulator`, `reference` and `publication_date` are prompt context
+    only -- the analyzer reads them, nothing is stored. Title falls back to the
+    filename.
+    """
+    filename = file.filename or "upload"
+    suffix = os.path.splitext(filename.lower())[-1]
+    if suffix not in (".pdf", ".docx", ".doc"):
+        raise HTTPException(400, "Only PDF and DOCX/DOC files are supported.")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(await file.read())
+            tmp_path = tmp.name
+        text, document_html = extract_document_content(tmp_path, suffix)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[analyze/document] extraction failed for {filename}: {e}")
+        raise HTTPException(422, f"Text extraction failed: {e}")
+    finally:
+        # Always, including on the error paths above -- an uploaded document is
+        # somebody's regulatory PDF and must not be left in the temp directory.
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception as e:
+                logger.warning(f"[analyze/document] could not remove {tmp_path}: {e}")
+
+    if not text or len(text) < 100:
+        raise HTTPException(
+            422,
+            f"Could not extract sufficient text from {filename} "
+            f"(got {len(text or '')} chars, need at least 100). A scanned PDF "
+            f"with no OCR-able text will land here.")
+
+    normalizer = LLMAnalyzer()
+    try:
+        clean_text = normalizer.normalize_input_text(text, content_type="pdf_text")
+    except Exception as e:
+        # Normalization is a cleanup, not a gate. Analysing the raw text is far
+        # better than refusing the request.
+        logger.warning(f"[analyze/document] normalization failed, using raw text: {e}")
+        clean_text = text
+
+    # regulation_id=0: the analyzer only logs it and stamps it into each row, and
+    # there is no regulation to name. It is visible in the response as 0 so
+    # nobody mistakes an output row for something that was stored.
+    rows = staged_analyzer.analyze(
+        text=clean_text,
+        regulation_id=0,
+        document_title=(title or os.path.splitext(filename)[0]).strip(),
+        regulator=regulator.strip(),
+        reference=reference.strip(),
+        publication_date=publication_date.strip(),
+    )
+    if not rows:
+        raise HTTPException(
+            422,
+            f"The analyzer extracted 0 obligations from {filename}. The text was "
+            f"{len(clean_text):,} chars, so it was read -- this usually means the "
+            f"document states no obligations (a form, a notice, a cover page).")
+
+    obligations, controls = [], []
+    exec_counts, crit_counts = {}, {}
+    for r in rows:
+        exec_counts[r.get("execution_category") or "Unknown"] = \
+            exec_counts.get(r.get("execution_category") or "Unknown", 0) + 1
+        crit_counts[r.get("criticality") or "Unknown"] = \
+            crit_counts.get(r.get("criticality") or "Unknown", 0) + 1
+        try:
+            parsed = json.loads(r.get("analysis_json") or "{}")
+        except Exception:
+            parsed = {}
+        for ob in parsed.get("obligations", []) or []:
+            obligations.append({
+                "requirement_title": r.get("requirement_title", ""),
+                "criticality": r.get("criticality"),
+                "execution_category": r.get("execution_category"),
+                **({k: ob.get(k) for k in
+                    ("obligation_id", "obligation_text", "obligation_type",
+                     "responsible_party", "frequency", "deadline")
+                    if ob.get(k) is not None}),
+            })
+        controls.extend(parsed.get("controls", []) or [])
+
+    response = {
+        "success": True,
+        "stored": False,          # stated explicitly: nothing was written
+        "document": {
+            "filename": filename,
+            "file_type": suffix.lstrip("."),
+            "title_used": (title or os.path.splitext(filename)[0]).strip(),
+            "extracted_chars": len(text),
+            "analysed_chars": len(clean_text),
+            "has_html": bool(document_html),
+        },
+        "summary": {
+            "requirements": len(rows),
+            "obligations": len(obligations),
+            "controls": len(controls),
+            "by_criticality": crit_counts,
+            "by_execution_category": exec_counts,
+        },
+        "obligations": obligations,
+        "controls": controls,
+        "stages": [
+            {
+                "requirement_id": r.get("requirement_id"),
+                "requirement_title": r.get("requirement_title"),
+                "stage1_json": r.get("stage1_json"),
+                "stage2_json": r.get("stage2_json"),
+                "stage3_json": r.get("stage3_json"),
+                "stage4_md": r.get("stage4_md"),
+            }
+            for r in rows
+        ],
+        "note": ("Nothing was written to the database. To ingest this document "
+                 "into the library use POST /upload-regulation instead."),
+    }
+    if include_text:
+        response["extracted_text"] = text
+    return response
+
+
+# ================================================================== #
 #  ADMIN ENDPOINTS                                                     #
 # ================================================================== #
 
@@ -4611,15 +4966,27 @@ import pyodbc as _demo_pyodbc
 
 
 def _demo_get_conn():
-    conn_str = (
-        f"DRIVER={os.getenv('MSSQL_DRIVER')};"
-        f"SERVER={os.getenv('MSSQL_SERVER')};"
-        f"DATABASE={os.getenv('MSSQL_DATABASE')};"
-        f"UID={os.getenv('MSSQL_USERNAME')};"
-        f"PWD={os.getenv('MSSQL_PASSWORD')};"
-        f"TrustServerCertificate=yes;"
-    )
-    return _demo_pyodbc.connect(conn_str, timeout=30)
+    """The SAME connection the rest of the api uses.
+
+    This used to build its own string and interpolate UID/PWD unconditionally:
+
+        UID={os.getenv('MSSQL_USERNAME')};PWD={os.getenv('MSSQL_PASSWORD')};
+
+    With a Windows-authenticated setup — no MSSQL_USERNAME in .env, which is how
+    this machine is configured — that produces the literal "UID=None;PWD=None;"
+    and the driver answers
+
+        [28000] Login failed for user 'None'. (18456)
+
+    which reads like a missing environment variable rather than the wrong
+    AUTHENTICATION MODE. storage/mssql_repo.py::_get_conn already carries that
+    fix and the comment explaining it; this was a second copy that never got it.
+
+    Delegating means there is one place that knows how to reach the database,
+    so the next auth change cannot fix one caller and miss the other. It also
+    inherits the repo's connect retries, which this never had.
+    """
+    return repo._get_conn()
 
 
 def _demo_get_regulation(regulation_id: int) -> Optional[dict]:
@@ -4738,15 +5105,15 @@ def demo_trigger_staged_analysis(regulation_id: int, force: bool = Query(False))
     insert_sql,
     [
         regulation_id,
-        _json.dumps(r),  # NEW — satisfies analysis_json NOT NULL
+        json.dumps(r),  # NEW — satisfies analysis_json NOT NULL
         r.get("requirement_id"),
         r.get("requirement_title"),
         r.get("execution_category"),
         r.get("criticality"),
         r.get("obligation_type"),
-        _json.dumps(r.get("stage1_json")) if r.get("stage1_json") is not None else None,
-        _json.dumps(r.get("stage2_json")) if r.get("stage2_json") is not None else None,
-        _json.dumps(r.get("stage3_json")) if r.get("stage3_json") is not None else None,
+        json.dumps(r.get("stage1_json")) if r.get("stage1_json") is not None else None,
+        json.dumps(r.get("stage2_json")) if r.get("stage2_json") is not None else None,
+        json.dumps(r.get("stage3_json")) if r.get("stage3_json") is not None else None,
         r.get("stage4_md"),
         "demo",
         "active",

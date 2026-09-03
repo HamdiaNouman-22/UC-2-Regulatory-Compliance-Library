@@ -157,7 +157,38 @@ def _tracked_urls(regulator: str, source_system: str, *, repo=None,
     inventory = repo if repo is not None else WorkbookInventory(workbook)
     rows = inventory.find_regulations_by_source(source_system,
                                                 regulator=regulator)
-    return [str(r.get("document_url") or "") for r in rows]
+    # EVERY url a row is reachable by, not just document_url.
+    #
+    # The SAMA feed resolves each entry to the document's NODE url, and until
+    # 2026-08-24 that was what document_url held. It now holds the PDF (see
+    # scripts/sama_pdf_as_document_url.py) and the node url moved to
+    # source_page_url -- so matching on document_url alone would have counted
+    # all 4,957 rows as `not_in_library`, and monitor_sama answers that by
+    # running benchmarks/sama_feed_ingest.py, which would have re-inserted the
+    # regulator as new documents.
+    #
+    # Widening is safe in one direction only, which is the direction we want: it
+    # can only turn a false DISCOVERY into a correct match. It can never hide a
+    # document the library really lacks, because a genuinely new document
+    # matches none of these fields.
+    urls = []
+    for r in rows:
+        for key in ("document_url", "source_page_url"):
+            u = str(r.get(key) or "").strip()
+            if u:
+                urls.append(u)
+        meta = r.get("extra_meta")
+        if isinstance(meta, str):
+            try:
+                import json as _json
+                meta = _json.loads(meta)
+            except Exception:
+                meta = None
+        if isinstance(meta, dict):
+            u = str(meta.get("found_on") or "").strip()
+            if u:
+                urls.append(u)
+    return urls
 
 
 def sitemap_sweep(source_system: str, *, regulator: str, sitemap_url=None,
