@@ -901,5 +901,97 @@ sources:
     signal: crawl
     confirm: true
 
+  # NBR (BAHRAIN) - `crawl` IS A MEASURED CONCLUSION, AND AN UNUSUAL ONE:
+  # this is the rare source where an honest ETag EXISTS and is still not used.
+  #
+  # An instrument here is a PDF ON S3 behind a `/media/<slug>` permalink; the
+  # permalink page is an Adobe viewer shell whose own visible text is 36
+  # characters. MEASURED 2026-08-31:
+  #   ETag / Last-Modified   BOTH PRESENT on every one of the seven S3 objects,
+  #                          and ABSENT on every `/media/` page and on the
+  #                          listing. So a stored-inventory sweep could only work
+  #                          if document_url were the S3 url - and it must not be.
+  #                          S3 keys are Laravel upload hashes: a replaced file
+  #                          gets a NEW key, so an S3 document_url reads as one
+  #                          `disappeared` plus one `new` on every amendment and
+  #                          loses the version chain. Worse, the sweep would keep
+  #                          probing the OLD key, which stays 200 with an
+  #                          unchanged ETag for as long as the orphaned object
+  #                          survives - reporting `unchanged` FOREVER while the
+  #                          site serves a different file. A silent permanent
+  #                          miss is the one failure mode worth paying to avoid.
+  #                          The validators are kept per row as s3_etag and
+  #                          s3_last_modified so a reviewer can still see them.
+  #   robots.txt             200, `Disallow:` empty - everything allowed.
+  #   sitemap.xml            404.
+  #   a publisher feed       NONE. /announcements and /releases are news; neither
+  #                          says which instrument moved.
+  #   raw body sha256        NOT STABLE - every response carries a fresh
+  #                          `<meta name="csrf-token">`, so a body hash moves on
+  #                          every fetch. The fingerprint is the PDF text.
+  #   BURST THROTTLING       REAL. Six unpaced requests in one session returned
+  #                          403 on everything; one paced request 45s later
+  #                          returned 200. The crawler paces at 3s, backs off 15s
+  #                          on a 403 and never treats one as an answer.
+  #
+  # The crawl is 18 requests and ~3.9 MB, and it DISCOVERS A NEW INSTRUMENT,
+  # which no probe can.
+  #
+  # `confirm: true` is recorded, not exercised; these are FILES, so confirm would
+  # hash their bytes, which is the right basis for a PDF.
+  #
+  # IDENTITY DIFFERS BY ROW, and change_signals has nothing to keep in step
+  # because the crawler DECLARES it per document. Reshaped 2026-09-01 on review:
+  # ONE ROW IS ONE `<h2>` SECTION of the page, not one PDF. THREE rows carrying
+  # SEVEN PDFs. The one-PDF row (the GCC Agreement) keeps `document_url` and the
+  # default identity; the two three-PDF rows leave it empty and declare
+  # `identity_fields: [doc_path, extra_meta.attachment_links, title]`, which is
+  # the contract in models.RegulatoryDocument and what `check` enforces.
+  #
+  # THE STORED FILE URLS ARE THE S3 PDFs, not the `/media/` viewer pages. So a
+  # re-upload rotates the key and the row reads `new` + `disappeared` rather than
+  # `modified` - the cost models.py already names for multi-file rows. The stable
+  # `/media/` permalink is kept beside every file as `media_page`.
+  #
+  # Measured 2026-09-01: 3 rows, 3 distinct titles, 3 distinct hashes, 0 blank,
+  # 7 distinct file urls, no `/media/` page stored as a file.
+  #
+  # A CHEAPER SIGNAL EXISTS AND IS NOT IN THIS FILE'S VOCABULARY, measured
+  # 2026-08-31 after the first delivery. A NORMALISED PAGE-SNAPSHOT HASH: one GET
+  # of the listing, strip the per-request token and the site's now() stamp, hash
+  # the rest. Two fetches six seconds apart differ in EXACTLY SIX PLACES and every
+  # one is inside `<meta name="csrf-token">`; byte length is identical (87,044)
+  # because the token is fixed-length.
+  #
+  # IT IS A TRAP WITHOUT THE SECOND STRIP. Every NBR page carries
+  # "Last Updated: <date>" and that date is now() - it read as TODAY on the VAT,
+  # excise, dmtt, decisions, a /media/ page and /about_NBR alike. Three same-day
+  # fetches look perfectly stable, which is how this gets adopted by mistake.
+  # Simulating a date rollover: csrf-stripped-only changes (a FALSE CHANGE EVERY
+  # DAY, the CMA pathology that cost 1,134 of them); csrf+stamp-stripped does not.
+  #
+  # WARNING TO WHOEVER MAKES THIS CHEAPER LATER. `inventory_sweep._visible_text`
+  # strips all TAGS, so the csrf token is handled for free - but it KEEPS visible
+  # text, and the now() stamp is visible text in a <div>. So switching any
+  # nbr.gov.bh source to `stored-inventory` + `confirm: true` yields a confirm
+  # hash that moves daily on every page. This source is unaffected today:
+  # `confirm` is read only by cli/sweep.py when it builds a StoredInventorySweep,
+  # and `signal: crawl` never constructs one, so the flag below is inert.
+  #
+  # FULL CHEAP COVERAGE would be three tiers - listing snapshot (1 request:
+  # add/remove/retitle/relink), /media/ page snapshot (7: the S3 key rotating),
+  # S3 ETag HEAD (7: bytes changing at an unchanged key) = 15 tiny requests, no
+  # downloads, no OCR, against `crawl`'s 18 requests + 3.9 MB + OCR.
+  #
+  # KEPT ON `crawl` DELIBERATELY at SEVEN documents: the saving does not justify a
+  # new signal type plus a normaliser that must track NBR's template, and the
+  # crawl DISCOVERS new documents, which tiers 2 and 3 structurally cannot. The
+  # arithmetic flips at roughly 65 documents (VAT + excise + dmtt + decisions +
+  # clarifications + the 40 guidelines) - build it then, with the numbers above.
+  - regulator: "National Bureau for Revenue (NBR)"
+    source_system: "Laws and Executive Regulations"
+    signal: crawl
+    confirm: true
+
 # Not listed, deliberately:
 #   MOH x2  same shape as MOE; both forms are still approved=false.

@@ -344,6 +344,24 @@ jobs:
       hour: 15
       minute: 0
 
+  # NBR (BAHRAIN) - THREE rows (one per <h2> section of the VAT page, carrying
+  # seven PDFs between them). 18 requests and ~3.9 MB: two language switches, the VAT
+  # listing read in Arabic then English, seven `/media/` permalink pages and
+  # seven PDF downloads. Paced at 3s because this host throttles bursts with 403.
+  # Five pages across two PDFs need OCR because their text layer does not decode,
+  # so it is neither purely network-bound nor OCR-heavy - a few minutes.
+  #
+  # DISABLED BECAUSE NOBODY HAS READ ITS WORKBOOK YET. This path writes straight
+  # to MSSQL, so enabling it before the review would make the first scheduled run
+  # be the ingest. Turn it on after the workbook is approved and promoted.
+  monitor_nbr:
+    enabled: false
+    trigger: cron
+    schedule:
+      day_of_week: 'sun'
+      hour: 16
+      minute: 0
+
   # ----------------------------------------------------------
   # NO JOB FOR Saudi Exchange OR SIMAH — deliberately.
   #

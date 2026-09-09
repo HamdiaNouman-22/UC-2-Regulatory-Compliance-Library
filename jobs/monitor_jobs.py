@@ -247,6 +247,14 @@ CRAWL_AS_SIGNAL = {
     #: a probe. No robots.txt or sitemap (both 404), and the listings badge a
     #: POSTING date, not the instrument's.
     "Labour Market Regulatory Authority (LMRA)": ("lmra", False),
+    #: NBR joined 2026-08-31, and it is the rare case where a cheap signal EXISTS
+    #: and is still refused. Every S3 object behind its documents carries an ETag
+    #: and a Last-Modified — but reaching them needs document_url to be the S3
+    #: url, whose key is a Laravel upload hash that ROTATES when a file is
+    #: replaced. That breaks the version chain, and the sweep would then go on
+    #: probing the orphaned old key and report `unchanged` forever. Full
+    #: measurements on the change_signals.yml entry.
+    "National Bureau for Revenue (NBR)": ("nbr", False),
 }
 
 
@@ -831,6 +839,46 @@ def _monitor_lmra_impl() -> dict:
     # walk is what lets an article amended IN PLACE move the law's fingerprint.
     res = _crawl_into_db("lmra", False, timeout=5400)
     logger.info("LMRA: %s", res)
+    return res
+
+
+def monitor_nbr() -> dict:
+    """WEEKLY, AND OFF. The crawl is the signal — measurements on the
+    change_signals.yml entry.
+
+    LEAVE THE SCHEDULER SLOT DISABLED until a person has read the workbook: this
+    path writes straight to MSSQL, and NBR has never been reviewed.
+    """
+    return _run_exclusive("monitor_nbr", _monitor_nbr_impl)
+
+
+def _monitor_nbr_impl() -> dict:
+    # 18 requests: two language switches, the listing read twice (Arabic then
+    # English — the order is load-bearing, the language is in the session), seven
+    # `/media/` permalink pages and seven PDF downloads, about 3.9 MB. Paced at
+    # 3s because this host throttles bursts with 403.
+    #
+    # THREE rows, not seven: one per `<h2>` section of the page, each carrying
+    # its own HTML and its attached PDFs. Reshaped on review 2026-09-01.
+    res = _crawl_into_db("nbr", False, timeout=3600)
+
+    # WHETHER ARABIC OCR WAS ACTUALLY AVAILABLE, recorded on the run rather than
+    # assumed. Five pages across two of NBR's PDFs carry a text layer that
+    # decodes to Latin mojibake; the crawler re-reads them by OCR, and without
+    # `ara` it DROPS them instead — so those two instruments would arrive with
+    # most of their text missing and the run would otherwise look normal.
+    try:
+        from processor.Text_Extractor import OCRProcessor
+        langs = OCRProcessor.ocr_langs()
+        res["ocr_langs"] = langs
+        if "ara" not in (langs or "").split("+"):
+            logger.error("NBR: tesseract has no 'ara' model (langs=%r). The two "
+                         "Arabic-only instruments will be stored with their "
+                         "undecodable pages dropped.", langs)
+    except Exception as e:                       # pragma: no cover
+        logger.warning("NBR: could not read OCR languages: %s", e)
+
+    logger.info("NBR: %s", res)
     return res
 
 
